@@ -1,0 +1,4 @@
+interface:
+  display_name: "Image to Editable PPT"
+  short_description: "将图片高保真复刻为可编辑 16:9 PPTX，支持单页精准复刻和多页顺序合并"
+  default_prompt: "Use $ia-image-to-editable-ppt to recreate my uploaded images as high-fidelity editable 16:9 PPTX files."
