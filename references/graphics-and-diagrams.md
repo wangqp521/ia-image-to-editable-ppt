@@ -2,8 +2,6 @@
 
 所有对象写入 schema v2 对应 `modules.graphics/diagram/chart` 并引用统一 `element_id`；不得预填最终 OOXML ID。先记录语义数量、bbox、结构、样式、层级和可编辑性，再决定由多少 Shape/Line 实现。
 
-统一构建器正式支持 text、rectangle/roundRect/ellipse/chevron、直线与箭头、原生 table、picture、icon、matrix 和 status；多对象结构使用稳定后缀 `ia:<element_id>:<part>`。table 显式提供行列、非均匀尺寸、完整 cells/span，并支持单元格 fill、margin、alignment、字体和局部边线；尺寸总和等于 element bbox。未声明边线、平均分配、默认 roundRect adjustment、自动近似 diagram/chart 都禁止；未知 route、gradient 或 effect 返回 `UNSUPPORTED_FEATURE`，不得用页级临时代码绕过。
-
 ## 表格、矩阵与框线
 
 规则行列、单元格与合并关系明确时用原生表格；不规则分区、局部边界、父子组或跨行对象用独立 Shape/Line/TextBox 自绘矩阵。不得把规则表格拆成漂浮文本框，也不得因外观像网格就强制原生表格。

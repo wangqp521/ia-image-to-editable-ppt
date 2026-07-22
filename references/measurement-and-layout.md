@@ -12,8 +12,6 @@ preflight 记录当前输入绝对路径/SHA-256、像素尺寸、alpha、页边
 
 生成前只维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`source_bbox` 使用视觉参考图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id`，已激活 module 必须非空；`reading_order` 必须覆盖全部 elements，每个 element 至少归属一个 region。不得预填最终 OOXML ID、另建平行对象清单或让构建脚本维护第二套内容/坐标。
 
-主代理提供元素、内容、`source_bbox`、layer、关系和顺序；`scaffold_reconstruction.py` 只算 EMU、bbox 与 hash。冲突返回 `SPEC_DERIVED_FIELD_CONFLICT`，缺字段返回 `MISSING_REQUIRED_FIELD`；报告不是事实源。
-
 每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。运行 prebuild 校验通过后才能生成。
 
 ## 画布、区域与关系

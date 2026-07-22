@@ -9,19 +9,11 @@ import importlib.util
 import json
 import os
 import re
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
-
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from lib.hashing import canonical_json_sha256
 
 
 ALLOWED_KINDS = {
@@ -1206,176 +1198,7 @@ def _validate_icons(
         _error(errors, "SPEC_ICON_ELEMENT_MISSING", "modules.icons.icons", f"missing icon records: {', '.join(missing_elements)}")
 
 
-def _validate_element_assets(
-    elements: Any,
-    clean_visual_reference: Any,
-    errors: list[dict[str, str]],
-) -> None:
-    if not isinstance(elements, list):
-        return
-    expected_source = (
-        Path(clean_visual_reference.get("path", "")).expanduser().resolve()
-        if isinstance(clean_visual_reference, dict)
-        else None
-    )
-    allowed = {"source_patch", "background_preserved", "explicit_mask", "alpha_isolation"}
-    for index, element in enumerate(elements):
-        if not isinstance(element, dict):
-            continue
-        content = element.get("content")
-        asset = content.get("asset") if isinstance(content, dict) else None
-        if not isinstance(asset, dict):
-            continue
-        path = f"elements[{index}].content.asset"
-        processor = asset.get("processor")
-        if processor not in allowed:
-            _error(errors, "SPEC_ASSET_PROCESSOR_INVALID", f"{path}.processor", "unsupported processor")
-            continue
-        if processor == "alpha_isolation" and element.get("kind") != "icon":
-            _error(errors, "SPEC_ALPHA_EXTRACTION_UNSAFE", f"{path}.processor", "non-icon requires explicit_mask")
-        padding = asset.get("padding")
-        if not isinstance(padding, int) or isinstance(padding, bool) or padding < 0:
-            _error(errors, "SPEC_ASSET_PADDING_INVALID", f"{path}.padding", "expected non-negative integer")
-        asset_path_value = asset.get("asset_path")
-        if not isinstance(asset_path_value, str):
-            _error(errors, "SPEC_ASSET_INVALID", f"{path}.asset_path", "absolute asset path required")
-            continue
-        asset_path = Path(asset_path_value).expanduser()
-        if not asset_path.is_absolute() or asset_path.is_symlink() or not asset_path.is_file():
-            _error(errors, "SPEC_ASSET_INVALID", f"{path}.asset_path", "readable non-symlink asset required")
-            continue
-        declared_hash = asset.get("asset_sha256")
-        if not isinstance(declared_hash, str) or not SHA256_PATTERN.fullmatch(declared_hash):
-            _error(errors, "SPEC_ASSET_HASH_INVALID", f"{path}.asset_sha256", "64 hex characters required")
-        elif _file_sha256(asset_path).lower() != declared_hash.lower():
-            _error(errors, "SPEC_ASSET_HASH_MISMATCH", f"{path}.asset_sha256", "asset file changed")
-        try:
-            with Image.open(asset_path) as opened:
-                opened.load()
-                declared_size = [asset.get("final_width"), asset.get("final_height")]
-                if declared_size != [opened.width, opened.height]:
-                    _error(errors, "SPEC_ASSET_DIMENSIONS_INVALID", path, "decoded dimensions differ")
-                alpha_hash = asset.get("alpha_mask_sha256")
-                if processor == "explicit_mask":
-                    if opened.mode != "RGBA":
-                        _error(errors, "SPEC_ASSET_ALPHA_INVALID", f"{path}.asset_path", "RGBA required")
-                    else:
-                        actual = hashlib.sha256(opened.getchannel("A").tobytes()).hexdigest()
-                        if alpha_hash != actual:
-                            _error(errors, "SPEC_ASSET_ALPHA_MISMATCH", f"{path}.alpha_mask_sha256", "alpha hash differs")
-                elif alpha_hash is not None:
-                    _error(errors, "SPEC_ASSET_ALPHA_INVALID", f"{path}.alpha_mask_sha256", "must be null")
-        except (OSError, UnidentifiedImageError):
-            _error(errors, "SPEC_ASSET_INVALID", f"{path}.asset_path", "unreadable image")
-        if expected_source is None or not expected_source.is_file():
-            continue
-        source_bbox = element.get("source_bbox")
-        if processor in {"source_patch", "background_preserved"} and _valid_bbox(source_bbox):
-            try:
-                x, y, width, height = (int(value) for value in source_bbox)
-                pad = padding if isinstance(padding, int) else 0
-                with Image.open(expected_source) as source_image, Image.open(asset_path) as opened_asset:
-                    expected = source_image.convert("RGB").crop((x - pad, y - pad, x + width + pad, y + height + pad))
-                    if expected.size != opened_asset.size or expected.tobytes() != opened_asset.convert("RGB").tobytes():
-                        _error(errors, "SPEC_ASSET_SOURCE_PATCH_MISMATCH", f"{path}.asset_path", "RGB pixels differ from source crop")
-            except (OSError, UnidentifiedImageError, ValueError):
-                _error(errors, "SPEC_ASSET_INVALID", f"{path}.asset_path", "cannot compare source crop")
-
-
-def _expected_asset_review_items(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    expected: dict[str, dict[str, Any]] = {}
-    source_hash = spec.get("clean_visual_reference", {}).get("sha256")
-    for element in spec.get("elements", []):
-        if not isinstance(element, dict):
-            continue
-        asset = element.get("content", {}).get("asset")
-        if isinstance(asset, dict) and isinstance(asset.get("asset_path"), str):
-            expected[str(element.get("element_id"))] = {
-                "source_sha256": source_hash,
-                "asset_sha256": asset.get("asset_sha256"),
-                "source_bbox": element.get("source_bbox"),
-            }
-    for icon in spec.get("modules", {}).get("icons", {}).get("icons", []):
-        if not isinstance(icon, dict):
-            continue
-        element_id = str(icon.get("element_id", icon.get("icon_id")))
-        expected.setdefault(
-            element_id,
-            {
-                "source_sha256": icon.get("source_sha256", source_hash),
-                "asset_sha256": icon.get("asset_sha256"),
-                "source_bbox": icon.get("source_bbox"),
-            },
-        )
-    return expected
-
-
-def _validate_asset_review(
-    spec: dict[str, Any], report: Any, required: bool, errors: list[dict[str, str]]
-) -> None:
-    expected = _expected_asset_review_items(spec)
-    if not expected:
-        return
-    if not isinstance(report, dict):
-        if required:
-            _error(errors, "SPEC_ASSET_REVIEW_REQUIRED", "asset_review_report", "current extracted assets require a review report")
-        return
-    if report.get("valid") is not True:
-        _error(errors, "SPEC_ASSET_REVIEW_INVALID", "asset_review_report.valid", "review report must be valid")
-    if report.get("spec_sha256") != canonical_json_sha256(spec):
-        _error(errors, "SPEC_ASSET_REVIEW_SPEC_HASH_MISMATCH", "asset_review_report.spec_sha256", "report does not bind current spec")
-    path_value = report.get("path")
-    review_path = Path(path_value).expanduser().resolve() if isinstance(path_value, str) else None
-    if review_path is None or not review_path.is_file():
-        _error(errors, "SPEC_ASSET_REVIEW_FILE_MISSING", "asset_review_report.path", "review PNG is missing")
-    elif report.get("sha256") != _file_sha256(review_path):
-        _error(errors, "SPEC_ASSET_REVIEW_FILE_HASH_MISMATCH", "asset_review_report.sha256", "review PNG hash mismatch")
-    manifest = report.get("manifest")
-    if not isinstance(manifest, list):
-        _error(errors, "SPEC_ASSET_REVIEW_MANIFEST_INVALID", "asset_review_report.manifest", "manifest must be an array")
-        return
-    manifest_hash = canonical_json_sha256(
-        {
-            "version": 2,
-            "renderer": {
-                "background": "#00FF00",
-                "roi_outline": "#FF00FF",
-                "icon_scale": 4,
-                "picture_scale": 2.5,
-                "context_scale": 2,
-                "panel": [360, 260],
-                "label_height": 24,
-            },
-            "assets": manifest,
-        }
-    )
-    if report.get("manifest_sha256") != manifest_hash:
-        _error(errors, "SPEC_ASSET_REVIEW_MANIFEST_HASH_MISMATCH", "asset_review_report.manifest_sha256", "manifest hash mismatch")
-    elif review_path is not None and review_path.is_file():
-        try:
-            with Image.open(review_path) as image:
-                if image.info.get("asset_manifest_sha256") != manifest_hash:
-                    _error(errors, "SPEC_ASSET_REVIEW_METADATA_MISMATCH", "asset_review_report.path", "PNG metadata does not bind manifest")
-        except (OSError, UnidentifiedImageError):
-            _error(errors, "SPEC_ASSET_REVIEW_FILE_INVALID", "asset_review_report.path", "cannot read review PNG")
-    actual = {str(item.get("element_id")): item for item in manifest if isinstance(item, dict)}
-    for element_id, contract in expected.items():
-        item = actual.get(element_id)
-        if item is None:
-            _error(errors, "SPEC_ASSET_REVIEW_ITEM_MISSING", f"asset_review_report.manifest.{element_id}", "asset is absent from review")
-            continue
-        for field in ("source_sha256", "asset_sha256", "source_bbox"):
-            if item.get(field) != contract.get(field):
-                _error(errors, "SPEC_ASSET_REVIEW_DEPENDENCY_MISMATCH", f"asset_review_report.manifest.{element_id}.{field}", "review dependency is stale")
-
-
-def validate_spec(
-    spec: Any,
-    stage: str = "prebuild",
-    *,
-    asset_review_report: Any = None,
-    require_asset_review: bool = False,
-) -> dict[str, Any]:
+def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     """Return a stable validation report for a reconstruction specification."""
     if stage not in {"prebuild", "final"}:
         raise ValueError("stage must be prebuild or final")
@@ -1620,9 +1443,6 @@ def validate_spec(
             stage,
             errors,
         )
-    _validate_element_assets(elements, spec.get("clean_visual_reference"), errors)
-    if stage == "prebuild":
-        _validate_asset_review(spec, asset_review_report, require_asset_review, errors)
 
     if stage == "final":
         visual_gate = spec.get("visual_gate")
@@ -1993,7 +1813,6 @@ def validate_spec(
         "valid": not errors,
         "stage": stage,
         "verification_profile": verification_profile,
-        "spec_sha256": canonical_json_sha256(spec),
         "errors": errors,
         "warnings": warnings,
     }
@@ -2007,11 +1826,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--output",
         type=Path,
         help="atomically save the same JSON emitted to stdout",
-    )
-    parser.add_argument(
-        "--asset-review-report",
-        type=Path,
-        help="current report from create_asset_crop_review.py; required when prebuild has assets",
     )
     return parser.parse_args(argv)
 
@@ -2045,15 +1859,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         spec = json.loads(args.spec.read_text(encoding="utf-8"))
-        asset_review_report = None
-        if args.asset_review_report is not None:
-            asset_review_report = json.loads(args.asset_review_report.read_text(encoding="utf-8"))
-        result = validate_spec(
-            spec,
-            stage=args.stage,
-            asset_review_report=asset_review_report,
-            require_asset_review=args.stage == "prebuild",
-        )
+        result = validate_spec(spec, stage=args.stage)
     except (OSError, json.JSONDecodeError) as exc:
         result = {
             "valid": False,

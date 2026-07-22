@@ -113,21 +113,6 @@
 
 验证通过和未通过的版本会使用清晰标签区分，例如“快速校验版”“独立复核通过版”“完整视觉门禁通过版”或对应的“未通过版”。
 
-## 标准自动化流程
-
-主代理先确认内容和元素语义，再依次运行：
-
-```bash
-python3 scripts/scaffold_reconstruction.py --spec work/page-reconstruction.json --preflight-report work/preflight-runtime.json --in-place --report work/scaffold-report.json
-python3 scripts/extract_assets.py --spec work/page-reconstruction.json --assets-dir assets --in-place --report work/assets-report.json
-python3 scripts/create_asset_crop_review.py --spec work/page-reconstruction.json --output comparisons/asset-crop-review.png --report work/asset-review-report.json
-python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --output work/prebuild-report.json
-python3 scripts/build_pptx_from_spec.py --spec work/page-reconstruction.json --prebuild-report work/prebuild-report.json --output candidate.pptx --build-report work/build-report.json
-python3 scripts/validate_pptx.py candidate.pptx --expected-slides 1 --spec work/page-reconstruction.json --build-report work/build-report.json --output work/structure-report.json
-```
-
-三个执行报告都不是第二套规格；修改和返工以 `page-reconstruction.json` 为准。运行 `--help` 查看各工具参数。工具遇到不支持的表示、旧 hash 或不安全透明分离时返回结构化错误并停止，不会静默截图化。
-
 ## 系统运行时依赖
 
 | 依赖 | 用途 |

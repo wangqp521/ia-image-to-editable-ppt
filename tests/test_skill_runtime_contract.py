@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,35 +21,6 @@ def chars(name: str) -> int:
 
 
 class SkillRuntimeContractTests(unittest.TestCase):
-    def test_reconstruction_core_is_shared_before_profile_branch(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        match = re.search(
-            r"## 共同复刻核心(?P<core>.*?)(?:\n## 三级验证模式)",
-            runtime,
-            flags=re.S,
-        )
-        self.assertIsNotNone(match, "SKILL.md must define a shared reconstruction core")
-        core = match.group("core") if match else ""
-        for phrase in (
-            "create_coordinate_overlay.py",
-            "render_font_trials.py",
-            "create_asset_crop_review.py",
-            "validate_reconstruction_spec.py --stage prebuild",
-            "build_pptx_from_spec.py",
-            "validate_pptx.py",
-            "placement",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, core)
-        self.assertNotRegex(core, r"只有.*(?:reviewed|strict)")
-        self.assertNotRegex(core, r"`strict`.*(?:坐标|图标|裁切|字体|placement)")
-
-    def test_profiles_only_change_audit_strength(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn("模式分支只能发生在共同复刻核心完成之后", runtime)
-        for phrase in ("region 证据", "独立 reviewer", "审查轮次", "哈希绑定强度"):
-            self.assertIn(phrase, runtime)
-
     def test_three_fixed_verification_profiles_are_explicit(self):
         runtime = SKILL.read_text(encoding="utf-8")
         for phrase in (
@@ -142,23 +112,6 @@ class SkillRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("schema v3", runtime)
         self.assertIn("旧 schema v2 终态规格", runtime)
         self.assertIn("重建 visual gate", runtime)
-
-    def test_three_tools_and_responsibility_boundary_are_explicit(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        combined = runtime + "".join(
-            path.read_text(encoding="utf-8") for path in sorted(REFERENCES.glob("*.md"))
-        )
-        for phrase in (
-            "scaffold_reconstruction.py",
-            "extract_assets.py",
-            "build_pptx_from_spec.py",
-            "schema v2 是唯一事实源",
-            "不得为每页编写临时构建代码",
-            "构建报告不是独立验证",
-            "ALPHA_EXTRACTION_UNSAFE",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
 
     def test_independent_reviewer_contract_is_explicit(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
@@ -312,7 +265,7 @@ class SkillRuntimeContractTests(unittest.TestCase):
         for phrase in (
             "[第 N/总页数] 图标裁切绿幕复核",
             "无图标时不生成也不展示",
-            "真实源图或任一素材依赖变化",
+            "真实源图或任一图标依赖变化",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
@@ -320,9 +273,9 @@ class SkillRuntimeContractTests(unittest.TestCase):
     def test_icon_review_invalidation_uses_icon_manifest_not_whole_spec(self):
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         for phrase in (
-            "`asset_manifest_sha256`",
-            "非素材字段变化不得使旧绿幕复核图失效",
-            "真实源图或任一素材依赖变化",
+            "`icon_manifest_sha256`",
+            "非图标字段变化不得使旧绿幕复核图失效",
+            "真实源图或任一图标依赖变化",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)

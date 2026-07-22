@@ -6,8 +6,6 @@
 
 `modules.typography.items[]` 用唯一 `element_id` 绑定文字 element，保存 `text/source_font_guess/candidates/selected_font/fallback_reason/fallback_trace/runs/paragraphs/text_box/internal_font_declaration/font_declaration_verified`。`runs` 与 `paragraphs` 均以连续 `start/end` 无空洞覆盖全文；`text_box` 保存 EMU x/y/w/h、四边 margin、水平/垂直对齐、wrap、overflow、soft/paragraph breaks。生成前不写最终 OOXML ID。
 
-`build_pptx_from_spec.py` 只按规格生成原生 TextBox/Paragraph/Run/bullet 并命名；Run 必须落实 bold/italic/underline/strike/super-subscript/letter spacing。不得猜字体、补换行、autofit、缩字号或图片化文字；未知特性返回 `UNSUPPORTED_FEATURE`。修正只改 schema。
-
 ## Text Run 与原生列表
 
 字体、字号、字重、颜色、斜体、下划线、删除线、上下标和局部字号变化精确到 Text Run；标题、标签和强调范围不得退化为整框统一 `font_weight: 400`。Paragraph 与 Run 不得互相替代。
