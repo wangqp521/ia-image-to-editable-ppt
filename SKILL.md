@@ -7,17 +7,29 @@ description: Use when converting one or more uploaded images, screenshots, expor
 
 ## 唯一目标与保留能力
 
-本 Skill 的唯一核心职责是把图片高保真地转换为可编辑 PPT。所有测量、规格和门禁只服务当前转换，不得扩展为独立平台、通用系统、OCR 服务或视觉检测框架。
+本 Skill 的唯一核心职责是把图片高保真地转换为可编辑 PPT；不得扩展为独立平台或通用系统。
 
-固定优先级：内容事实正确 → 视觉高保真 → 主要文字、数据和基础结构可编辑 → 多页终态合并。不得美化、自动平均、补造隐藏内容、用对象数量冒充质量，或用整页原图加少量文本冒充可编辑页面。照片、Logo、图标、插画、纹理和复杂装饰可保留为当前页最小范围局部 picture。
+优先级：事实正确 → 视觉高保真 → 主要内容可编辑 → 多页合并。禁止美化、补造或用整页原图冒充可编辑页；复杂视觉可用最小局部 picture。
 
-保留 schema v2、现有 `validate_pptx.py`、`merge_pptx.py`、图标透明/保底色双模式裁切、macOS fontconfig、Text Run、原生 bullet、表格合并、局部边线、圆角 adjustment、图片裁剪和 OOXML 安全规则。
+schema v2 是唯一事实源。保留 `validate_pptx.py`、`merge_pptx.py`、图标双模式裁切、macOS fontconfig、Text Run、原生 bullet、表格合并/局部边线、圆角、图片裁剪和 OOXML 安全规则。
 
-本升级仍使用 schema v2，但旧 schema v2 终态规格若缺少 `review_round`、coverage 或 validator 的 PPTX 哈希绑定，不得直接复用；必须从当前 PPTX 与证据重建 visual gate 和 editability gate，不得伪造迁移字段。
+旧 schema v2 终态规格缺 `review_round`、coverage 或当前 PPTX 哈希时，必须重建 visual gate/editability gate，不得伪造迁移字段。
+
+## 共同复刻核心
+
+三个验证模式必须完整执行同一套 `reconstruction_core`，不得改变识别、测量、字体、裁切、representation、构建或结构标准：
+
+1. 首次运行 `preflight_runtime.py`，原子输出 `work/preflight-runtime.json`；`create_coordinate_overlay.py` 生成定位图，写规格前通过 commentary 展示当前坐标定位图。
+2. 主代理写 schema v2 语义骨架；`scaffold_reconstruction.py` 只补确定性字段。高风险字体用 `render_font_trials.py` 试排；不得自动换字体、缩字或硬换行。
+3. `extract_assets.py` 抽取素材；`create_asset_crop_review.py` 复核 context/source/绿幕 asset：图标 400%，其他图片 200%–300%。图标 alpha 委托 `extract_icon_asset.py`；图标资产与绿幕复核必须在 prebuild 前完成，并在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图。
+4. 运行 `validate_reconstruction_spec.py --stage prebuild --asset-review-report <assets-review.json> --output <report.json>`；无素材时省略素材报告。`build_pptx_from_spec.py` 生成 PPTX/`build-report.json`；不支持属性 fail closed，禁止静默忽略或自动图片化。
+5. `validate_pptx.py --spec ... --build-report ...` 独立查真实 PPTX；渲染 preview，检查整页 diff、文字/对象位置和图片 crop/mask/alpha/placement。差异只改 schema。
+
+模式分支只能发生在共同复刻核心完成之后，只控制 region 证据、独立 reviewer、审查轮次和哈希绑定强度。
 
 ## 三级验证模式
 
-`verification_profile` 是项目级固定模式；同一批输入的所有页面只允许使用一个值。默认使用 `rapid`，只有用户明确提出“独立复核”时选择 `reviewed`，明确提出“严格审核”时选择 `strict`。模式一经写入首个页面规格，本项目不得自动升级或降级；即使校验失败也只在当前模式内修正或按失败状态交付。
+`verification_profile` 是项目级固定模式。默认使用 `rapid`；用户明确“独立复核”才用 `reviewed`，明确“严格审核”才用 `strict`。写入首个页面规格后不得自动升级或降级；失败留在当前模式。
 
 | 模式 | 触发方式 | 终态成功状态 | 验证边界 |
 |---|---|---|---|
@@ -25,30 +37,20 @@ description: Use when converting one or more uploaded images, screenshots, expor
 | `reviewed` | 用户明确“独立复核” | `reviewed_passed` | 独立 reviewer 最多 2 轮，只为必要区域生成 200% 证据，不得进入 `strict` |
 | `strict` | 用户明确“严格审核” | `strict_gate_passed` | 保留完整 regions 200% 证据、candidate 质量下限、最多 2 轮独立审查和完整哈希绑定 |
 
-显式规格必须同时写入匹配状态：构建中统一为 `pending`；失败为 `rapid_validation_failed`、`reviewed_failed` 或 `strict_gate_failed`。旧规格缺少 `verification_profile` 时仅为兼容而按 `strict` 校验；新任务不得省略该字段。
+规格构建中为 `pending`；失败状态依次为 `rapid_validation_failed`、`reviewed_failed`、`strict_gate_failed`。旧规格缺 profile 时兼容按 `strict` 校验；新任务不得省略。
 
 ## 单页流程
 
-1. 每页建独立目录；非续作时写 `session_reuse.mode=fresh_reconstruction`。主代理是 PPTX、规格、脚本和资产的唯一写入者。
-2. 首次运行 `preflight_runtime.py`，原子输出 `work/preflight-runtime.json`；失败不得生成。完成测量后，`strict` 写规格前通过 commentary 展示当前坐标定位图。
-3. 只加载命中的 reference，先写唯一 schema v2 `work/page-reconstruction.json`、项目 `verification_profile` 和 `pending`。图标先确认带 bbox 的局部上下文与 `roi_context_400`，默认先执行 `alpha_isolation`；前景触边时不得回退，应扩大 bbox。只有透明结果损失轮廓、阴影或色晕时才改用 `background_preserved` 并记录 `fallback_reason`。图标资产与绿幕复核必须在 prebuild 前完成；`strict` 在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图。随后首次运行 `validate_reconstruction_spec.py --stage prebuild --output <report.json>`，不得事后反补规格。
-4. 生成一页 16:9 PPTX。主要对象反查 `element_id`；OOXML 名称写 `ia:<element_id>`，多部件写 `ia:<element_id>:<part>`。画布外、隐藏或透明空对象不得充当可编辑证据。
-5. 运行 `validate_pptx.py --expected-slides 1 --spec ... --output <report.json>`，修正后重验。再按[视觉审计与交付](references/visual-audit-and-delivery.md)执行当前模式：`rapid` 运行 `create_visual_diff.py --profile rapid`；`reviewed` 生成必要区域证据并独立复核；`strict` 执行完整证据与 candidate 收敛。中间修复只重建受影响区域证据。
-6. 终态只显式运行一次 `validate_reconstruction_spec.py --stage final`。失败不切换模式、不伪造通过状态，按当前模式交付现有产物。
+每页独立目录；非续作写 `session_reuse.mode=fresh_reconstruction`。主代理唯一写入，只加载命中 reference。核心后按[视觉审计与交付](references/visual-audit-and-delivery.md)进入 profile；终态仅一次 `validate_reconstruction_spec.py --stage final`。OOXML 名为 `ia:<element_id>` 或 `ia:<element_id>:<part>`；不得为每页编写临时构建代码。
 
-## 自动 preflight 和测量工具
-
-从 Skill 根目录运行；工具只采集当前页事实，不扩展状态机。
+## 常用命令
 
 ```bash
-python3 scripts/create_coordinate_overlay.py <source> --output <page>/work/coordinate-overlay.png
-python3 scripts/inspect_image_region.py <source> --output-dir <page>/work/measurements --point X,Y --bbox LEFT,TOP,RIGHT,BOTTOM
 python3 scripts/extract_icon_asset.py <source> --icon-id <id> --bbox-xywh X,Y,W,H --crop-mode alpha_isolation --output <page>/assets/icons/<id>.png
-python3 scripts/create_icon_crop_review.py <page>/work/page-reconstruction.json --output <page>/comparisons/icon-crop-review.png
 FONTCONFIG_FILE="$PWD/assets/fontconfig-macos.conf" soffice --headless --convert-to pdf --outdir <preview-dir> <page.pptx>
 ```
 
-区域测量命令输入 LTRB，规格 `source_bbox` 固定 XYWH。不得请求外部 OCR 服务、API 或 Token；无法确认的内容记录为未验证项，不得补造。
+工具用 `--help` 查看参数。测量输入 LTRB，规格 bbox 固定 XYWH。不得请求外部 OCR/API/Token；不确定内容列为未验证项。
 
 ## 条件 reference 路由
 

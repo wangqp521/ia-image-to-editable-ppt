@@ -97,6 +97,8 @@ def _result(path: Path) -> dict[str, Any]:
         "full_slide_picture_risk": False,
         "external_relationships": [],
         "slides": [],
+        "build_claims_checked": 0,
+        "embedded_media_hashes": {},
     }
 
 
@@ -896,6 +898,70 @@ def _validate_element_bindings(
         result["element_bindings_checked"] = result.get("element_bindings_checked", 0) + 1
 
 
+def _load_build_report(value: dict[str, Any] | Path | str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    path = Path(value).expanduser().resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValidationError("PPTX_BUILD_REPORT_INVALID", str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise ValidationError("PPTX_BUILD_REPORT_INVALID", "build report must be an object")
+    return payload
+
+
+def _validate_build_claims(
+    result: dict[str, Any],
+    build_report: dict[str, Any],
+    spec: dict[str, Any] | None,
+) -> None:
+    if build_report.get("valid") is not True:
+        result["errors"].append("PPTX_BUILD_REPORT_INVALID")
+        return
+    if build_report.get("pptx_sha256") != result.get("pptx_sha256"):
+        result["errors"].append("PPTX_BUILD_CLAIM_MISMATCH")
+        result["warnings"].append("build report is bound to a different PPTX")
+    if spec is not None:
+        payload = json.dumps(
+            spec, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        expected_spec_hash = hashlib.sha256(payload).hexdigest()
+        if build_report.get("schema_sha256") != expected_spec_hash:
+            result["errors"].append("PPTX_BUILD_CLAIM_MISMATCH")
+            result["warnings"].append("build report is bound to a different schema")
+    actual_names = {
+        item.get("object_name")
+        for item in result.get("structure_objects", [])
+        if isinstance(item.get("object_name"), str)
+    }
+    media_hashes = {
+        item["object_name"]: item["media_sha256"]
+        for item in result.get("picture_objects", [])
+        if isinstance(item.get("object_name"), str)
+        and isinstance(item.get("media_sha256"), str)
+    }
+    result["embedded_media_hashes"] = media_hashes
+    elements = build_report.get("elements")
+    if not isinstance(elements, dict):
+        result["errors"].append("PPTX_BUILD_REPORT_INVALID")
+        return
+    for element_id, claim in elements.items():
+        result["build_claims_checked"] += 1
+        names = claim.get("ooxml_names") if isinstance(claim, dict) else None
+        if (
+            not isinstance(names, list)
+            or not names
+            or any(not isinstance(name, str) or name not in actual_names for name in names)
+        ):
+            result["errors"].append("PPTX_BUILD_CLAIM_MISMATCH")
+            result["warnings"].append(f"{element_id}: claimed OOXML object is missing")
+        claimed_count = claim.get("object_count") if isinstance(claim, dict) else None
+        if claimed_count != len(names or []):
+            result["errors"].append("PPTX_BUILD_CLAIM_MISMATCH")
+            result["warnings"].append(f"{element_id}: object_count does not match claimed names")
+
+
 def _expected_native_list_items(spec: dict[str, Any]) -> list[dict[str, Any]]:
     modules = spec.get("modules")
     typography = modules.get("typography") if isinstance(modules, dict) else None
@@ -1531,6 +1597,7 @@ def validate_pptx(
     path: Path,
     expected_slides: int | None = None,
     reconstruction_spec: dict[str, Any] | Path | str | None = None,
+    build_report: dict[str, Any] | Path | str | None = None,
 ) -> dict[str, Any]:
     path = Path(path).expanduser().resolve()
     result = _result(path)
@@ -1546,6 +1613,14 @@ def validate_pptx(
     if reconstruction_spec is not None:
         try:
             spec = _load_reconstruction_spec(reconstruction_spec)
+        except ValidationError as exc:
+            result["errors"].append(exc.code)
+            result["warnings"].append(exc.detail)
+            return result
+    build_claims = None
+    if build_report is not None:
+        try:
+            build_claims = _load_build_report(build_report)
         except ValidationError as exc:
             result["errors"].append(exc.code)
             result["warnings"].append(exc.detail)
@@ -1847,6 +1922,8 @@ def validate_pptx(
                 _validate_native_list_contracts(result, spec, width, height)
                 _validate_text_run_contracts(result, spec, width, height)
                 _validate_element_bindings(result, spec, width, height)
+            if build_claims is not None:
+                _validate_build_claims(result, build_claims, spec)
             if result["slide_count"] == 0:
                 result["errors"].append("NO_SLIDES")
 
@@ -1914,6 +1991,11 @@ def main(argv: list[str] | None = None) -> int:
         help="validate native list/TextBox structure against page-reconstruction.json",
     )
     parser.add_argument(
+        "--build-report",
+        type=Path,
+        help="independently check builder claims against actual OOXML objects",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="omit per-object arrays from CLI JSON output",
@@ -1924,7 +2006,7 @@ def main(argv: list[str] | None = None) -> int:
         help="atomically save the same JSON emitted to stdout",
     )
     args = parser.parse_args(argv)
-    result = validate_pptx(args.pptx, args.expected_slides, args.spec)
+    result = validate_pptx(args.pptx, args.expected_slides, args.spec, args.build_report)
     _emit_json(summary_result(result) if args.summary else result, args.output)
     return 0 if result["valid"] else 2
 

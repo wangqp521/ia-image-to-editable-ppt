@@ -680,6 +680,14 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         self.assertTrue(result["valid"], result)
         self.assertEqual([], result["errors"])
 
+    def test_validation_report_binds_canonical_spec_hash(self):
+        first = valid_spec()
+        second = {key: first[key] for key in reversed(first)}
+        first_result = MODULE.validate_spec(first, stage="prebuild")
+        second_result = MODULE.validate_spec(second, stage="prebuild")
+        self.assertRegex(first_result["spec_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(first_result["spec_sha256"], second_result["spec_sha256"])
+
     def test_prebuild_rejects_missing_or_changed_reference(self):
         missing = valid_spec()
         missing["content_reference"] = {

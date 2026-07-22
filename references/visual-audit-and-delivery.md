@@ -10,7 +10,9 @@
 | `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `reviewed_passed` |
 | `strict` | 全页证据 + 完整 regions 200% 证据 + accepted/candidate 证据链 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
 
-三个模式共享同一套复刻、prebuild、结构校验、tripwire、终态对象身份和失败诚实性要求。轻量化只减少“证明结果合格”的证据量与独立审查成本，不降低内容正确性、视觉复刻、可编辑性和 16:9 结构标准。
+三个模式共享 `reconstruction_core`：坐标、规格、字体、素材复核、prebuild、构建、结构校验、整页 diff 与 placement 局部自检。轻量化只减少 region 证据、独立 reviewer、审查轮次和哈希强度，不降低复刻、可编辑性或 16:9 标准；模式分支在核心完成后发生。
+
+构建报告不是独立验证。`validate_pptx.py --build-report` 独立读取 PPTX，核对文件/spec hash、对象名称/类型/bbox、文本、字体和媒体；与 `build-report.json` 不一致即阻断。
 
 ### `rapid` 快速校验
 
