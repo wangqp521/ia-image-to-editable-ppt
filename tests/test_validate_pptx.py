@@ -57,6 +57,7 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         page_id: str,
         *,
         visual_status: str = "passed",
+        profile: str = "strict",
     ) -> Path:
         source_path = directory / "source.png"
         preview_path = directory / f"{page_id}-preview.png"
@@ -72,8 +73,15 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         preview = identity(preview_path)
         pptx = identity(pptx_path)
         decision = "passed" if visual_status == "passed" else "changes_required"
+        delivery_status = {
+            "rapid": "rapid_validated" if visual_status == "passed" else "rapid_validation_failed",
+            "reviewed": "reviewed_passed" if visual_status == "passed" else "reviewed_failed",
+            "strict": "strict_gate_passed" if visual_status == "passed" else "strict_gate_failed",
+        }[profile]
         spec = {
             "page_id": page_id,
+            "verification_profile": profile,
+            "delivery_status": delivery_status,
             "clean_visual_reference": source,
             "elements": [
                 {
@@ -85,18 +93,23 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
                 }
             ],
             "visual_gate": {
-                "status": visual_status,
+                "status": (
+                    "not_independently_reviewed"
+                    if profile == "rapid" and visual_status == "passed"
+                    else visual_status
+                ),
                 "pptx": pptx,
                 "preview": preview,
-                "reviewer": {
-                    "page_id": page_id,
-                    "decision": decision,
-                    "source_sha256": source["sha256"],
-                    "preview_sha256": preview["sha256"],
-                },
             },
             "editability_gate": {"status": "passed", "pptx": pptx},
         }
+        if profile != "rapid":
+            spec["visual_gate"]["reviewer"] = {
+                "page_id": page_id,
+                "decision": decision,
+                "source_sha256": source["sha256"],
+                "preview_sha256": preview["sha256"],
+            }
         validation = VALIDATOR.validate_pptx(
             pptx_path, expected_slides=1, reconstruction_spec=spec
         )
@@ -306,8 +319,69 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertIn("delivery_label", json.loads(completed.stdout)["result"])
         self.assertEqual(
-            "未通过视觉门禁版",
+            "完整视觉门禁未通过版",
             json.loads(completed.stdout)["result"]["delivery_label"],
+        )
+
+    def test_merge_accepts_rapid_without_reviewer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            page = self._presentation(directory, "page.pptx", full_picture=True, text=True)
+            spec_path = self._merge_spec(directory, page, "page-001", profile="rapid")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MERGER_PATH),
+                    "--input", str(page), "--spec", str(spec_path),
+                    "--output", str(directory / "merged.pptx"),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        result = json.loads(completed.stdout)["result"]
+        self.assertEqual("rapid", result["verification_profile"])
+        self.assertEqual("快速校验版", result["delivery_label"])
+
+    def test_merge_reports_reviewed_delivery_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            page = self._presentation(directory, "page.pptx", full_picture=True, text=True)
+            spec_path = self._merge_spec(directory, page, "page-001", profile="reviewed")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MERGER_PATH),
+                    "--input", str(page), "--spec", str(spec_path),
+                    "--output", str(directory / "merged.pptx"),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        result = json.loads(completed.stdout)["result"]
+        self.assertEqual("reviewed", result["verification_profile"])
+        self.assertEqual("独立复核通过版", result["delivery_label"])
+
+    def test_merge_rejects_mixed_verification_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            first = self._presentation(directory, "one.pptx", full_picture=True, text=True)
+            second = self._presentation(directory, "two.pptx", full_picture=True, text=True)
+            first_spec = self._merge_spec(directory, first, "page-001", profile="rapid")
+            second_spec = self._merge_spec(directory, second, "page-002", profile="strict")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MERGER_PATH),
+                    "--input", str(first), "--spec", str(first_spec),
+                    "--input", str(second), "--spec", str(second_spec),
+                    "--output", str(directory / "merged.pptx"),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        self.assertEqual(2, completed.returncode)
+        self.assertEqual(
+            "VERIFICATION_PROFILE_MISMATCH",
+            json.loads(completed.stderr)["code"],
         )
 
 

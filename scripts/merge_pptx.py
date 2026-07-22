@@ -23,6 +23,17 @@ NS = {
     "pr": "http://schemas.openxmlformats.org/package/2006/relationships",
     "ct": "http://schemas.openxmlformats.org/package/2006/content-types",
 }
+VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
+PROFILE_DELIVERY_STATUSES = {
+    "rapid": {"rapid_validated", "rapid_validation_failed"},
+    "reviewed": {"reviewed_passed", "reviewed_failed"},
+    "strict": {"strict_gate_passed", "strict_gate_failed"},
+}
+PROFILE_SUCCESS_STATUSES = {
+    "rapid": "rapid_validated",
+    "reviewed": "reviewed_passed",
+    "strict": "strict_gate_passed",
+}
 RID = f"{{{NS['r']}}}id"
 SLIDE_REL_TYPE = (
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
@@ -107,6 +118,19 @@ def _validate_page_binding(
     if not isinstance(page_id, str) or not page_id:
         raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
     input_hash = _file_sha256(input_path)
+    explicit_profile = spec.get("verification_profile")
+    verification_profile = "strict" if explicit_profile is None else explicit_profile
+    if verification_profile not in VERIFICATION_PROFILES:
+        raise MergeError(
+            "VERIFICATION_PROFILE_INVALID",
+            f"Unknown verification profile for {page_id}: {verification_profile}",
+        )
+    delivery_status = spec.get("delivery_status")
+    if explicit_profile is not None and delivery_status not in PROFILE_DELIVERY_STATUSES[verification_profile]:
+        raise MergeError(
+            "DELIVERY_STATUS_INVALID",
+            f"Delivery status does not match {verification_profile}: {page_id}",
+        )
     gate_hashes: list[str] = []
     for gate_name in ("visual_gate", "editability_gate"):
         gate = spec.get(gate_name)
@@ -148,7 +172,21 @@ def _validate_page_binding(
     _, preview_hash = _artifact_identity(preview_identity, "PREVIEW_ARTIFACT_INVALID")
     source = spec.get("clean_visual_reference")
     source_hash = source.get("sha256") if isinstance(source, dict) else None
-    if (
+    if verification_profile == "rapid":
+        if reviewer is not None:
+            raise MergeError(
+                "RAPID_REVIEWER_INVALID",
+                f"Rapid page must not claim an independent reviewer: {page_id}",
+            )
+        if (
+            delivery_status == "rapid_validated"
+            and visual_gate.get("status") != "not_independently_reviewed"
+        ):
+            raise MergeError(
+                "RAPID_VISUAL_STATUS_INVALID",
+                f"Rapid validated page requires not_independently_reviewed status: {page_id}",
+            )
+    elif (
         not isinstance(reviewer, dict)
         or reviewer.get("page_id") != page_id
         or reviewer.get("source_sha256") != source_hash
@@ -171,8 +209,13 @@ def _validate_page_binding(
         )
     return {
         "page_id": page_id,
-        "visual_passed": (
-            visual_gate.get("status") == "passed"
+        "verification_profile": verification_profile,
+        "delivery_status": delivery_status,
+        "profile_passed": (
+            delivery_status == PROFILE_SUCCESS_STATUSES[verification_profile]
+            if explicit_profile is not None
+            else visual_gate.get("status") == "passed"
+            and isinstance(reviewer, dict)
             and reviewer.get("decision") == "passed"
         ),
         "validation": validation,
@@ -485,6 +528,23 @@ def merge_presentations(
     paths = [Path(item).expanduser().resolve() for item in inputs]
     spec_paths = [Path(item).expanduser().resolve() for item in specs]
     page_specs = [_load_page_spec(path) for path in spec_paths]
+    verification_profiles = [
+        "strict" if spec.get("verification_profile") is None else spec.get("verification_profile")
+        for spec in page_specs
+    ]
+    if any(profile not in VERIFICATION_PROFILES for profile in verification_profiles):
+        raise MergeError(
+            "VERIFICATION_PROFILE_INVALID",
+            "Every page spec must use rapid, reviewed, or strict verification",
+            profiles=verification_profiles,
+        )
+    if len(set(verification_profiles)) != 1:
+        raise MergeError(
+            "VERIFICATION_PROFILE_MISMATCH",
+            "All merge inputs must use the same fixed verification profile",
+            profiles=verification_profiles,
+        )
+    verification_profile = verification_profiles[0]
     page_ids = [spec.get("page_id") for spec in page_specs]
     if any(not isinstance(page_id, str) or not page_id for page_id in page_ids):
         raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
@@ -557,17 +617,20 @@ def merge_presentations(
     finally:
         temporary.unlink(missing_ok=True)
 
+    all_passed = all(binding["profile_passed"] for binding in page_bindings)
+    delivery_labels = {
+        "rapid": ("快速校验版", "快速校验未通过版"),
+        "reviewed": ("独立复核通过版", "独立复核未通过版"),
+        "strict": ("完整视觉门禁通过版", "完整视觉门禁未通过版"),
+    }
     return {
         "output": str(output),
         "slide_count": len(paths),
         "inputs": [str(path) for path in paths],
         "specs": [str(path) for path in spec_paths],
         "page_ids": page_ids,
-        "delivery_label": (
-            "通过视觉门禁版"
-            if all(binding["visual_passed"] for binding in page_bindings)
-            else "未通过视觉门禁版"
-        ),
+        "verification_profile": verification_profile,
+        "delivery_label": delivery_labels[verification_profile][0 if all_passed else 1],
         "imported_slide_parts": imported_parts,
         "validation": validation,
     }

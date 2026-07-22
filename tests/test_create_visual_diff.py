@@ -187,6 +187,66 @@ class CreateVisualDiffTests(unittest.TestCase):
 
             self.assertFalse(stale.exists())
 
+    def test_rapid_skips_region_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            output = root / "out"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (255, 255, 255))
+
+            report = MODULE.build_visual_diff(
+                reference,
+                preview,
+                output,
+                regions=[{"region_id": "header", "source_bbox": [0, 0, 80, 20]}],
+                profile="rapid",
+            )
+
+            self.assertEqual("rapid", report["verification_profile"])
+            self.assertEqual(
+                {"requested": 0, "generated": 0, "skipped": 0},
+                report["region_summary"],
+            )
+            self.assertFalse((output / "regions").exists())
+
+    def test_reviewed_generates_only_supplied_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            output = root / "out"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (255, 255, 255))
+
+            report = MODULE.build_visual_diff(
+                reference,
+                preview,
+                output,
+                regions=[{"region_id": "header", "source_bbox": [0, 0, 80, 20]}],
+                profile="reviewed",
+            )
+
+            self.assertEqual("reviewed", report["verification_profile"])
+            self.assertEqual(1, report["region_summary"]["generated"])
+
+    def test_unknown_profile_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (255, 255, 255))
+
+            with self.assertRaisesRegex(ValueError, "profile"):
+                MODULE.build_visual_diff(
+                    reference,
+                    preview,
+                    root / "out",
+                    profile="automatic",
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

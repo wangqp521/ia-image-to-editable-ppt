@@ -1,5 +1,29 @@
 # 视觉审计与交付
 
+## 固定验证模式合同
+
+`verification_profile` 是项目级固定模式，默认 `rapid`；用户明确提出“独立复核”才用 `reviewed`，明确提出“严格审核”才用 `strict`。运行中不得自动升级、降级或从 `reviewed` 进入 `strict`，多页合并必须拒绝混合模式。
+
+| 模式 | 必需视觉证据 | reviewer | 成功状态 |
+|---|---|---|---|
+| `rapid` | 当前 preview、对照图、overlay、diff、`visual-diff.json`；不生成 regions 200% 证据 | 不启动独立 reviewer，visual status 为 `not_independently_reviewed` | `rapid_validated` |
+| `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `reviewed_passed` |
+| `strict` | 全页证据 + 完整 regions 200% 证据 + accepted/candidate 证据链 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
+
+三个模式共享同一套复刻、prebuild、结构校验、tripwire、终态对象身份和失败诚实性要求。轻量化只减少“证明结果合格”的证据量与独立审查成本，不降低内容正确性、视觉复刻、可编辑性和 16:9 结构标准。
+
+### `rapid` 快速校验
+
+主代理运行 `create_visual_diff.py --profile rapid`，确认整页 preview、对照图、overlay、diff、全页指标和当前哈希一致；不启动独立 reviewer，不生成 regions 200% 证据。通过结构门禁、visual-diff schema、tripwire 和 final 后写 `rapid_validated`；失败写 `rapid_validation_failed`。该状态只表示快速校验完成，不得表述为“独立复核通过”或“严格审核通过”。
+
+### `reviewed` 独立复核
+
+每轮 reviewer 前结构必须通过；只为实际 finding、当前高风险对象及 reviewer 判断所需位置生成必要区域 200% 证据。最多 2 轮，第 1 轮通过即停止；第 2 轮仍有 P0/P1 或 `not_reviewable` 时写 `reviewed_failed`，不得进入 `strict`。成功写 `reviewed_passed`。修复仍需保持 accepted 质量下限，但不强制 strict 的完整 regions 与逐 candidate 全证据链。
+
+### `strict` 严格审核
+
+以下 accepted/candidate、证据复用、第二轮准入、独立 reviewer 和终态身份规则均为 strict 完整合同。它要求完整 regions 200% 证据、唯一 `candidate.pptx`、accepted 是质量下限，并对 source、PPTX、spec、preview、visual diff、regions、validator、reviewer 与运行依赖做完整哈希绑定；成功写 `strict_gate_passed`，失败写 `strict_gate_failed`。
+
 ## 三个检查点
 
 1. **自动 preflight/prebuild：** 规格只描述当前页；`validate_reconstruction_spec.py --stage prebuild` 失败不得生成。

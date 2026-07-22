@@ -70,6 +70,8 @@ def valid_spec() -> dict:
     return {
         "schema_version": 2,
         "page_id": "page-001",
+        "verification_profile": "rapid",
+        "delivery_status": "pending",
         "session_reuse": {
             "mode": "fresh_reconstruction",
             "reason": "new_session",
@@ -233,7 +235,57 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         path.write_bytes(payload)
         return {"path": str(path.resolve()), "sha256": hashlib.sha256(payload).hexdigest()}
 
-    def _attach_final_gates(self, candidate: dict, root: Path, validator_payload: dict) -> None:
+    def test_prebuild_accepts_all_explicit_verification_profiles(self):
+        for profile in ("rapid", "reviewed", "strict"):
+            with self.subTest(profile=profile):
+                candidate = valid_spec()
+                candidate["verification_profile"] = profile
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+                self.assertNotIn(
+                    "SPEC_VERIFICATION_PROFILE_INVALID",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_prebuild_rejects_unknown_verification_profile(self):
+        candidate = valid_spec()
+        candidate["verification_profile"] = "automatic"
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+        self.assertIn(
+            "SPEC_VERIFICATION_PROFILE_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_prebuild_rejects_delivery_status_from_another_profile(self):
+        candidate = valid_spec()
+        candidate["delivery_status"] = "reviewed_passed"
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+        self.assertIn(
+            "SPEC_DELIVERY_STATUS_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_legacy_spec_without_profile_uses_strict_contract(self):
+        candidate = valid_spec()
+        del candidate["verification_profile"]
+        del candidate["delivery_status"]
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+        self.assertTrue(result["valid"], result)
+        self.assertEqual("strict", result["verification_profile"])
+
+    def _attach_final_gates(
+        self,
+        candidate: dict,
+        root: Path,
+        validator_payload: dict,
+        *,
+        profile: str = "strict",
+    ) -> None:
+        candidate["verification_profile"] = profile
+        candidate["delivery_status"] = {
+            "rapid": "rapid_validated",
+            "reviewed": "reviewed_passed",
+            "strict": "strict_gate_passed",
+        }[profile]
         candidate["modules"]["typography"]["items"][0]["font_declaration_verified"] = True
         presentation = Presentation()
         presentation.slide_width = 12_192_000
@@ -260,6 +312,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             preview_path,
             root / "visual-diff",
             regions=candidate["regions"],
+            profile=profile,
         )
         report_path = Path(visual_report["report"])
         report = image_identity(report_path)
@@ -344,6 +397,162 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 "full_slide_picture_risk": "passed",
             },
         }
+        if profile == "rapid":
+            candidate["visual_gate"]["status"] = "not_independently_reviewed"
+            candidate["visual_gate"].pop("review_round")
+            candidate["visual_gate"].pop("reviewer")
+            candidate["visual_gate"].pop("review")
+
+    def test_final_accepts_rapid_without_reviewer(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertTrue(result["valid"], result)
+
+    def test_final_rapid_rejects_independent_passed_status(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            candidate["visual_gate"]["status"] = "passed"
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RAPID_VISUAL_STATUS_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rapid_rejects_delivery_status_from_other_profile(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            candidate["delivery_status"] = "reviewed_passed"
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_DELIVERY_STATUS_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rapid_rejects_reviewer_claim(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            candidate["visual_gate"]["reviewer"] = {"mode": "independent_read_only_subagent"}
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RAPID_REVIEWER_FORBIDDEN",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rapid_rejects_triggered_tripwire(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            candidate["visual_gate"]["tripwire"] = {
+                "available": True,
+                "triggered": True,
+                "reason": "below_minimum_similarity",
+            }
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_VISUAL_TRIPWIRE_TRIGGERED",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_reviewed_requires_independent_reviewer(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="reviewed",
+            )
+            del candidate["visual_gate"]["reviewer"]
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_accepts_reviewed_with_current_reviewer(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="reviewed",
+            )
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertTrue(result["valid"], result)
+
+    def test_final_reviewed_accepts_partial_region_evidence(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._attach_final_gates(
+                candidate,
+                root,
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="reviewed",
+            )
+            preview_path = Path(candidate["visual_gate"]["preview"]["path"])
+            report = VISUAL_DIFF.build_visual_diff(
+                Path(candidate["clean_visual_reference"]["path"]),
+                preview_path,
+                root / "visual-diff-light",
+                regions=[],
+                profile="reviewed",
+            )
+            candidate["visual_gate"]["report"] = image_identity(Path(report["report"]))
+            candidate["visual_gate"]["evidence"] = [report["evidence"]["overlay"]["path"]]
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertTrue(result["valid"], result)
+
+    def test_final_rejects_visual_diff_from_another_profile(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            report_path = Path(candidate["visual_gate"]["report"]["path"])
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report["verification_profile"] = "reviewed"
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+            candidate["visual_gate"]["report"] = image_identity(report_path)
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_VISUAL_DIFF_PROFILE_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
 
     def _add_valid_icon_contract(self, candidate: dict, root: Path) -> None:
         source_path = root / "source.png"
@@ -984,7 +1193,10 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         self.assertIn("SPEC_PARAGRAPH_BREAKS_INVALID", {item["code"] for item in result["errors"]})
 
     def test_final_stage_requires_both_gates_passed(self):
-        result = MODULE.validate_spec(valid_spec(), stage="final")
+        candidate = valid_spec()
+        candidate["verification_profile"] = "strict"
+        candidate["delivery_status"] = "strict_gate_passed"
+        result = MODULE.validate_spec(candidate, stage="final")
         codes = {item["code"] for item in result["errors"]}
         self.assertIn("SPEC_VISUAL_GATE_NOT_PASSED", codes)
         self.assertIn("SPEC_EDITABILITY_GATE_NOT_PASSED", codes)
@@ -1000,6 +1212,8 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
 
     def test_final_stage_requires_complete_gate_reviews(self):
         candidate = valid_spec()
+        candidate["verification_profile"] = "strict"
+        candidate["delivery_status"] = "strict_gate_passed"
         candidate["visual_gate"] = {"status": "passed", "evidence": "overlay.png"}
         candidate["editability_gate"] = {"status": "passed", "evidence": ["validator.json"]}
         candidate["modules"]["typography"]["items"][0]["font_declaration_verified"] = True

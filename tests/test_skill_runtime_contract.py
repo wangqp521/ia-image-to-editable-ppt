@@ -21,6 +21,66 @@ def chars(name: str) -> int:
 
 
 class SkillRuntimeContractTests(unittest.TestCase):
+    def test_three_fixed_verification_profiles_are_explicit(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        for phrase in (
+            "`verification_profile`",
+            "`rapid`",
+            "`reviewed`",
+            "`strict`",
+            "默认使用 `rapid`",
+            "不得自动升级或降级",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, runtime)
+
+    def test_rapid_contract_is_lightweight_and_not_independently_reviewed(self):
+        combined = SKILL.read_text(encoding="utf-8") + (
+            REFERENCES / "visual-audit-and-delivery.md"
+        ).read_text(encoding="utf-8")
+        for phrase in (
+            "`rapid_validated`",
+            "`not_independently_reviewed`",
+            "不启动独立 reviewer",
+            "不生成 regions 200% 证据",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+
+    def test_reviewed_contract_is_bounded_and_never_enters_strict(self):
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "`reviewed_passed`",
+            "最多 2 轮",
+            "不得进入 `strict`",
+            "必要区域 200% 证据",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, audit)
+
+    def test_strict_contract_retains_full_evidence_and_candidate_floor(self):
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "`strict_gate_passed`",
+            "完整 regions 200% 证据",
+            "accepted 是质量下限",
+            "唯一 `candidate.pptx`",
+            "完整哈希绑定",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, audit)
+
+    def test_multi_page_project_rejects_mixed_profiles(self):
+        combined = SKILL.read_text(encoding="utf-8") + (
+            REFERENCES / "visual-audit-and-delivery.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("项目级固定模式", combined)
+        self.assertIn("拒绝混合模式", combined)
+
     def test_exactly_five_authoritative_references_exist(self):
         self.assertEqual(
             AUTHORITATIVE_REFERENCES,

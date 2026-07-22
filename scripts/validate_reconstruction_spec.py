@@ -42,6 +42,12 @@ VISUAL_REVIEW_COVERAGE_FIELDS = {
     "high_risk_regions",
 }
 VISUAL_REVIEW_COVERAGE_RESULTS = {"checked", "not_applicable", "not_reviewable"}
+VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
+PROFILE_DELIVERY_STATUSES = {
+    "rapid": {"pending", "rapid_validated", "rapid_validation_failed"},
+    "reviewed": {"pending", "reviewed_passed", "reviewed_failed"},
+    "strict": {"pending", "strict_gate_passed", "strict_gate_failed"},
+}
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 RGB_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_IMAGE_PIXELS = 100_000_000
@@ -53,6 +59,37 @@ def _error(errors: list[dict[str, str]], code: str, path: str, detail: str) -> N
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _verification_profile(spec: dict[str, Any]) -> str:
+    value = spec.get("verification_profile")
+    return "strict" if value is None else value
+
+
+def _validate_verification_identity(
+    spec: dict[str, Any],
+    profile: str,
+    errors: list[dict[str, str]],
+) -> None:
+    explicit_profile = spec.get("verification_profile")
+    if explicit_profile is not None and explicit_profile not in VERIFICATION_PROFILES:
+        _error(
+            errors,
+            "SPEC_VERIFICATION_PROFILE_INVALID",
+            "verification_profile",
+            "verification_profile must be rapid, reviewed, or strict",
+        )
+        return
+    delivery_status = spec.get("delivery_status")
+    if explicit_profile is None and delivery_status is None:
+        return
+    if delivery_status not in PROFILE_DELIVERY_STATUSES.get(profile, set()):
+        _error(
+            errors,
+            "SPEC_DELIVERY_STATUS_INVALID",
+            "delivery_status",
+            f"delivery_status is invalid for {profile} verification",
+        )
 
 
 def _valid_size(value: Any) -> bool:
@@ -322,6 +359,8 @@ def _validate_visual_diff_report(
     spec: dict[str, Any],
     preview: tuple[str, str] | None,
     errors: list[dict[str, str]],
+    *,
+    require_all_regions: bool = True,
 ) -> set[str]:
     verified: set[str] = set()
     if artifact is None:
@@ -334,6 +373,14 @@ def _validate_visual_diff_report(
     if not isinstance(payload, dict):
         _error(errors, "SPEC_VISUAL_DIFF_REPORT_INVALID", "visual_gate.report", "visual diff report root must be an object")
         return verified
+    expected_profile = _verification_profile(spec)
+    if payload.get("verification_profile") != expected_profile:
+        _error(
+            errors,
+            "SPEC_VISUAL_DIFF_PROFILE_MISMATCH",
+            "visual_gate.report.verification_profile",
+            "visual diff must use the current fixed verification profile",
+        )
     source_hash = spec.get("clean_visual_reference", {}).get("sha256")
     report_source = payload.get("reference")
     if not isinstance(report_source, dict) or report_source.get("sha256") != source_hash:
@@ -346,9 +393,15 @@ def _validate_visual_diff_report(
     ):
         _error(errors, "SPEC_VISUAL_DIFF_PREVIEW_MISMATCH", "visual_gate.report.preview", "visual diff must bind the current preview")
     summary = payload.get("region_summary")
-    requested = len(spec.get("regions", [])) if isinstance(spec.get("regions"), list) else 0
+    if require_all_regions:
+        requested = len(spec.get("regions", [])) if isinstance(spec.get("regions"), list) else 0
+    else:
+        requested = summary.get("requested") if isinstance(summary, dict) else None
     if (
         not isinstance(summary, dict)
+        or not isinstance(requested, int)
+        or isinstance(requested, bool)
+        or requested < 0
         or summary.get("skipped") != 0
         or summary.get("requested") != requested
         or summary.get("generated") != requested
@@ -1155,9 +1208,13 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         return {
             "valid": False,
             "stage": stage,
+            "verification_profile": "strict",
             "errors": [{"code": "SPEC_ROOT_INVALID", "path": "$", "detail": "root must be an object"}],
             "warnings": [],
         }
+
+    verification_profile = _verification_profile(spec)
+    _validate_verification_identity(spec, verification_profile, errors)
 
     required_top = {
         "schema_version",
@@ -1390,14 +1447,48 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     if stage == "final":
         visual_gate = spec.get("visual_gate")
         editability_gate = spec.get("editability_gate")
-        if not isinstance(visual_gate, dict) or visual_gate.get("status") != "passed" or not visual_gate.get("evidence"):
-            _error(errors, "SPEC_VISUAL_GATE_NOT_PASSED", "visual_gate", "final visual gate requires passed status and evidence")
-        elif isinstance(visual_gate.get("tripwire"), dict) and visual_gate["tripwire"].get("triggered"):
+        expected_delivery_status = {
+            "rapid": "rapid_validated",
+            "reviewed": "reviewed_passed",
+            "strict": "strict_gate_passed",
+        }.get(verification_profile)
+        if (
+            spec.get("verification_profile") is not None
+            and spec.get("delivery_status") != expected_delivery_status
+        ):
+            _error(
+                errors,
+                "SPEC_DELIVERY_STATUS_INVALID",
+                "delivery_status",
+                f"final {verification_profile} delivery requires {expected_delivery_status}",
+            )
+        if verification_profile == "rapid":
+            if (
+                not isinstance(visual_gate, dict)
+                or visual_gate.get("status") != "not_independently_reviewed"
+                or not visual_gate.get("evidence")
+            ):
+                _error(
+                    errors,
+                    "SPEC_RAPID_VISUAL_STATUS_INVALID",
+                    "visual_gate",
+                    "rapid final requires not_independently_reviewed status and evidence",
+                )
+        elif not isinstance(visual_gate, dict) or visual_gate.get("status") != "passed" or not visual_gate.get("evidence"):
+            _error(errors, "SPEC_VISUAL_GATE_NOT_PASSED", "visual_gate", "reviewed and strict final require passed visual status and evidence")
+        if isinstance(visual_gate, dict) and isinstance(visual_gate.get("tripwire"), dict) and visual_gate["tripwire"].get("triggered"):
             _error(errors, "SPEC_VISUAL_TRIPWIRE_TRIGGERED", "visual_gate.tripwire", "triggered tripwire blocks final delivery")
         if not isinstance(editability_gate, dict) or editability_gate.get("status") != "passed" or not editability_gate.get("evidence"):
             _error(errors, "SPEC_EDITABILITY_GATE_NOT_PASSED", "editability_gate", "final editability gate requires passed status and evidence")
         review_round = visual_gate.get("review_round") if isinstance(visual_gate, dict) else None
-        if type(review_round) is not int or not 1 <= review_round <= 2:
+        if verification_profile == "rapid" and review_round is not None:
+            _error(
+                errors,
+                "SPEC_RAPID_REVIEWER_FORBIDDEN",
+                "visual_gate.review_round",
+                "rapid verification must not claim an independent review round",
+            )
+        elif verification_profile != "rapid" and (type(review_round) is not int or not 1 <= review_round <= 2):
             _error(
                 errors,
                 "SPEC_VISUAL_REVIEW_ROUND_INVALID",
@@ -1410,17 +1501,24 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 _error(errors, "SPEC_GATE_EVIDENCE_INVALID", f"{gate_name}.evidence", "evidence must be a non-empty string array")
         visual_review = visual_gate.get("review") if isinstance(visual_gate, dict) else None
         required_visual = {"whole_page", "title", "body", "footer", "high_risk_regions"}
-        if not isinstance(visual_review, dict) or not required_visual.issubset(visual_review) or any(visual_review.get(key) != "passed" for key in ("whole_page", "title", "body", "footer")) or not isinstance(visual_review.get("high_risk_regions"), list):
+        if verification_profile == "strict" and (not isinstance(visual_review, dict) or not required_visual.issubset(visual_review) or any(visual_review.get(key) != "passed" for key in ("whole_page", "title", "body", "footer")) or not isinstance(visual_review.get("high_risk_regions"), list)):
             _error(errors, "SPEC_VISUAL_REVIEW_INVALID", "visual_gate.review", "all visual review fields are required and must pass")
         reviewer = visual_gate.get("reviewer") if isinstance(visual_gate, dict) else None
-        if not isinstance(reviewer, dict) or reviewer.get("mode") != "independent_read_only_subagent":
+        if verification_profile == "rapid" and reviewer is not None:
+            _error(
+                errors,
+                "SPEC_RAPID_REVIEWER_FORBIDDEN",
+                "visual_gate.reviewer",
+                "rapid verification must not claim an independent reviewer",
+            )
+        elif verification_profile != "rapid" and (not isinstance(reviewer, dict) or reviewer.get("mode") != "independent_read_only_subagent"):
             _error(
                 errors,
                 "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED",
                 "visual_gate.reviewer",
                 "independent read-only visual review is required",
             )
-        else:
+        elif isinstance(reviewer, dict):
             findings = reviewer.get("findings")
             disclosures = reviewer.get("p2_disclosures")
             coverage = reviewer.get("coverage")
@@ -1640,6 +1738,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             spec,
             preview_artifact,
             errors,
+            require_all_regions=verification_profile == "strict",
         )
         visual_evidence = visual_gate.get("evidence") if isinstance(visual_gate, dict) else None
         if isinstance(visual_evidence, list):
@@ -1710,7 +1809,13 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                     "open P0/P1 blocks final delivery",
                 )
 
-    return {"valid": not errors, "stage": stage, "errors": errors, "warnings": warnings}
+    return {
+        "valid": not errors,
+        "stage": stage,
+        "verification_profile": verification_profile,
+        "errors": errors,
+        "warnings": warnings,
+    }
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
