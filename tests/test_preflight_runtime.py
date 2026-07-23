@@ -19,6 +19,92 @@ class PreflightRuntimeTest(unittest.TestCase):
         self.assertTrue(SCRIPT.is_file())
 
     @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_profile_is_created_next_to_report_with_uri_safe_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "中文 路径"
+            root.mkdir()
+            executable = root / "fake-tool"
+            executable.write_text("#!/bin/sh\necho fake-tool 1.0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            report = root / "work" / "preflight-runtime.json"
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--soffice",
+                    str(executable),
+                    "--pdftoppm",
+                    str(executable),
+                    "--pdffonts",
+                    str(executable),
+                    "--fontconfig",
+                    str(FONTCONFIG),
+                    "--python-module",
+                    "json",
+                    "--output",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            profile = report.parent / "libreoffice-profile"
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertTrue(profile.is_dir())
+            self.assertEqual(
+                str(profile.resolve()), payload["libreoffice_profile"]["path"]
+            )
+            self.assertEqual(
+                profile.resolve().as_uri(), payload["libreoffice_profile"]["uri"]
+            )
+            self.assertTrue(payload["libreoffice_profile"]["writable"])
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_existing_file_at_profile_path_fails_with_specific_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            executable = root / "fake-tool"
+            executable.write_text("#!/bin/sh\necho fake-tool 1.0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            report = root / "work" / "preflight-runtime.json"
+            report.parent.mkdir()
+            (report.parent / "libreoffice-profile").write_text(
+                "blocked", encoding="utf-8"
+            )
+
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--soffice",
+                    str(executable),
+                    "--pdftoppm",
+                    str(executable),
+                    "--pdffonts",
+                    str(executable),
+                    "--fontconfig",
+                    str(FONTCONFIG),
+                    "--python-module",
+                    "json",
+                    "--output",
+                    str(report),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            payload = json.loads(completed.stdout)
+            self.assertEqual(2, completed.returncode)
+            self.assertIn(
+                "LIBREOFFICE_PROFILE_UNWRITABLE",
+                {entry["code"] for entry in payload["errors"]},
+            )
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
     def test_valid_runtime_writes_traceable_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

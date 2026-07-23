@@ -21,6 +21,14 @@ def chars(name: str) -> int:
 
 
 class SkillRuntimeContractTests(unittest.TestCase):
+    def test_libreoffice_uses_page_scoped_user_installation(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        self.assertIn(
+            "-env:UserInstallation=<preflight-runtime.json:libreoffice_profile.uri>",
+            runtime,
+        )
+        self.assertIn("首次预览直接使用该 URI", runtime)
+
     def test_three_fixed_verification_profiles_are_explicit(self):
         runtime = SKILL.read_text(encoding="utf-8")
         for phrase in (
@@ -478,19 +486,22 @@ class SkillRuntimeContractTests(unittest.TestCase):
         combined = runtime + text
         for phrase in (
             "字体试排不是固定阶段",
-            "普通低风险文字默认不执行字体试排",
-            "高风险文字诊断工具",
-            "原字体不可用或发生 renderer fallback",
+            "原字体可用时直接使用，不执行字体试排",
+            'candidates=["Noto Sans CJK SC"]',
+            'selected_font="Noto Sans CJK SC"',
+            "Noto 无法精确解析时 preflight 失败",
+            "不得寻找第二候选",
+            "0.5 pt",
+            "原字号的 10%",
+            "2 pt",
+            "不得通过缩小字号关闭 P1",
             "整页 preview/diff",
             "`render_font_trials.py`",
             "`candidate_trials/render_metrics/font_trial_report`",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, combined)
-        self.assertNotIn(
-            "建立 2–5 个候选，以同文字、同 box、同段落结构试排",
-            text,
-        )
+        self.assertNotIn("2–5 个候选", text)
 
 
 if __name__ == "__main__":

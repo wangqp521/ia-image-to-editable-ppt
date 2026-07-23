@@ -77,8 +77,34 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _writable_directory(path: Path) -> tuple[bool, str | None]:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        if not path.is_dir():
+            return False, "path is not a directory"
+        with tempfile.NamedTemporaryFile(
+            dir=path,
+            prefix=".write-probe-",
+            delete=True,
+        ):
+            pass
+    except OSError as exc:
+        return False, str(exc)
+    return True, None
+
+
 def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
+    profile_path = args.output.expanduser().resolve().parent / "libreoffice-profile"
+    profile_writable, profile_detail = _writable_directory(profile_path)
+    if not profile_writable:
+        errors.append(
+            {
+                "code": "LIBREOFFICE_PROFILE_UNWRITABLE",
+                "detail": f"{profile_path}: {profile_detail}",
+            }
+        )
+
     executables: dict[str, dict[str, Any]] = {}
     for name in ("soffice", "pdftoppm", "pdffonts"):
         requested = getattr(args, name)
@@ -139,6 +165,11 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         "executables": executables,
         "fontconfig": fontconfig_entry,
         "python_modules": modules,
+        "libreoffice_profile": {
+            "path": str(profile_path),
+            "uri": profile_path.as_uri(),
+            "writable": profile_writable,
+        },
     }
 
 
