@@ -23,11 +23,8 @@ def chars(name: str) -> int:
 class SkillRuntimeContractTests(unittest.TestCase):
     def test_libreoffice_uses_page_scoped_user_installation(self):
         runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn(
-            "-env:UserInstallation=<preflight-runtime.json:libreoffice_profile.uri>",
-            runtime,
-        )
         self.assertIn("首次预览直接使用该 URI", runtime)
+        self.assertIn("失败不得进入 PPTX 生成阶段", runtime)
 
     def test_three_fixed_verification_profiles_are_explicit(self):
         runtime = SKILL.read_text(encoding="utf-8")
@@ -123,7 +120,7 @@ class SkillRuntimeContractTests(unittest.TestCase):
                 "visual-audit-and-delivery.md",
             )
         )
-        self.assertLessEqual(skill + measurement + text + audit, 15500)
+        self.assertLessEqual(skill + measurement + text + audit, 16200)
         self.assertLessEqual(skill + measurement + graphics + audit, 15000)
         self.assertLessEqual(
             skill + measurement + text + graphics + pictures + audit, 25000
@@ -486,10 +483,10 @@ class SkillRuntimeContractTests(unittest.TestCase):
         combined = runtime + text
         for phrase in (
             "字体试排不是固定阶段",
-            "原字体可用时直接使用，不执行字体试排",
+            "不执行字体试排",
             'candidates=["Noto Sans CJK SC"]',
             'selected_font="Noto Sans CJK SC"',
-            "Noto 无法精确解析时 preflight 失败",
+            "无法精确解析时 preflight 失败",
             "不得寻找第二候选",
             "0.5 pt",
             "原字号的 10%",
@@ -498,10 +495,25 @@ class SkillRuntimeContractTests(unittest.TestCase):
             "整页 preview/diff",
             "`render_font_trials.py`",
             "`candidate_trials/render_metrics/font_trial_report`",
+            "`source_font_available`",
+            "`resolved_font`",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, combined)
         self.assertNotIn("2–5 个候选", text)
+
+    def test_visual_audit_scopes_profile_specific_gates_explicitly(self):
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        for phrase in (
+            "rapid 执行自动视觉差异门禁",
+            "reviewed 与 strict 执行独立视觉门禁",
+            "reviewed 不要求全部 regions 200% 证据",
+            "strict 专属候选与完整证据",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, audit)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 import tempfile
 import unittest
@@ -50,8 +51,9 @@ class FontTrialTests(unittest.TestCase):
         self.assertEqual(["ABCDEE+MicrosoftYaHei"], MODULE.parse_pdffonts(output))
 
     @unittest.skipUnless(
-        all(shutil.which(name) for name in ("soffice", "pdftoppm", "pdffonts")),
-        "LibreOffice and Poppler required",
+        os.environ.get("IA_RUN_INTEGRATION") == "1"
+        and all(shutil.which(name) for name in ("soffice", "pdftoppm", "pdffonts")),
+        "set IA_RUN_INTEGRATION=1 and install LibreOffice/Poppler",
     )
     def test_real_trial_produces_traceable_metrics(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -4,7 +4,7 @@
 
 内容逐字服从 `content_reference`。一个来源文本容器对应一个 `TextBox/TextFrame`；自然段、同源列表和混合样式不得按视觉行或条目拆框。视觉自动折行留在原 Paragraph，不写硬回车。只有来源本来是独立对象才拆框。
 
-`modules.typography.items[]` 用唯一 `element_id` 绑定文字 element，保存 `text/source_font_guess/candidates/selected_font/fallback_reason/fallback_trace/runs/paragraphs/text_box/internal_font_declaration/font_declaration_verified`。`runs` 与 `paragraphs` 均以连续 `start/end` 无空洞覆盖全文；`text_box` 保存 EMU x/y/w/h、四边 margin、水平/垂直对齐、wrap、overflow、soft/paragraph breaks。生成前不写最终 OOXML ID。
+`modules.typography.items[]` 用唯一 `element_id` 绑定文字 element，保存 `text/source_font_guess/source_font_available/candidates/selected_font/resolved_font/fallback_reason/fallback_trace/runs/paragraphs/text_box/internal_font_declaration/font_declaration_verified`。`runs` 与 `paragraphs` 均以连续 `start/end` 无空洞覆盖全文；`text_box` 保存 EMU x/y/w/h、四边 margin、水平/垂直对齐、wrap、overflow、soft/paragraph breaks。生成前不写最终 OOXML ID。
 
 ## Text Run 与原生列表
 
@@ -14,9 +14,9 @@
 
 ## 字体与字号
 
-各类文字分别判断原字体是否可用。原字体可用时直接使用，不执行字体试排；保留字号、字重和 Text Run，进入 PPTX 构建、结构校验和整页 preview/diff，并核对内部字体声明和实际 resolved font。
+各类文字分别判断原字体是否可用并写 `source_font_available`；只有当前 fontconfig 精确解析时才可写 true，必要时把原字体作为额外 `--required-font` 交给 preflight。原字体可用时固定 `candidates=[source_font_guess]`、`selected_font=source_font_guess`，不执行字体试排；保留字号、字重和 Text Run，进入 PPTX 构建、结构校验和整页 preview/diff，并把实际解析字体写入 `resolved_font`。`validate_pptx.py --spec` 必须核对 selected font、内部字体声明和全部真实 Text Run 字体声明。
 
-原字体不可用时固定 `candidates=["Noto Sans CJK SC"]`、`selected_font="Noto Sans CJK SC"`，记录原字体、fallback 原因和实际 resolved font，不得增加其他候选。Noto 无法精确解析时 preflight 失败，不得寻找第二候选。自动流程不运行 `render_font_trials.py`；仅在用户明确要求字体对比时用于手动诊断，不得据此扩展自动候选或选择字体。
+原字体不可用时固定 `source_font_available=false`、`candidates=["Noto Sans CJK SC"]`、`selected_font="Noto Sans CJK SC"`、`resolved_font="Noto Sans CJK SC"`，记录原字体、fallback 原因和 trace，不得增加其他候选。`preflight_runtime.py` 必须通过当前 fontconfig 的 `fc-match` 精确解析 Noto 家族并记录字体文件；无法精确解析时 preflight 失败，不得寻找第二候选。自动流程不运行 `render_font_trials.py`；仅在用户明确要求字体对比时用于手动诊断，不得据此扩展自动候选或选择字体。
 
 自动流程省略 `candidate_trials/render_metrics/font_trial_report`。用户明确要求字体对比且真实运行诊断后，三字段同时存在并绑定真实 `font-trials.json`，不得编造数值；未真实渲染不得声称已完成字体试排验证。
 

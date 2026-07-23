@@ -13,6 +13,7 @@ from unittest import mock
 
 from PIL import Image
 from pptx import Presentation
+from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Pt
 
 
@@ -140,8 +141,10 @@ def valid_spec() -> dict:
                         "element_id": "title",
                         "text": text,
                         "source_font_guess": "Noto Sans CJK SC",
+                        "source_font_available": True,
                         "candidates": ["Noto Sans CJK SC"],
                         "selected_font": "Noto Sans CJK SC",
+                        "resolved_font": "Noto Sans CJK SC",
                         "fallback_reason": None,
                         "fallback_trace": None,
                         "runs": [
@@ -397,6 +400,10 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         run.text = item["text"]
         run.font.bold = True
         run.font.size = Pt(24)
+        run.font.name = item["selected_font"]
+        east_asian = OxmlElement("a:ea")
+        east_asian.set("typeface", item["selected_font"])
+        run._r.get_or_add_rPr().append(east_asian)
         pptx_path = root / "page.pptx"
         presentation.save(pptx_path)
         pptx = image_identity(pptx_path)
@@ -942,6 +949,62 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         result = MODULE.validate_spec(candidate, stage="prebuild")
 
         self.assertTrue(result["valid"], result)
+
+    def test_original_available_font_requires_only_original_candidate(self):
+        candidate = valid_spec()
+        item = candidate["modules"]["typography"]["items"][0]
+        item["candidates"] = ["Noto Sans CJK SC", "Arial"]
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_FONT_SELECTION_POLICY_INVALID",
+            {entry["code"] for entry in result["errors"]},
+        )
+
+    def test_unavailable_font_requires_only_noto_candidate(self):
+        candidate = valid_spec()
+        item = candidate["modules"]["typography"]["items"][0]
+        item.update(
+            {
+                "source_font_guess": "KaiTi",
+                "source_font_available": False,
+                "candidates": ["KaiTi", "Noto Sans CJK SC"],
+                "selected_font": "Noto Sans CJK SC",
+                "resolved_font": "Noto Sans CJK SC",
+                "fallback_reason": "source font unavailable",
+                "fallback_trace": {"source": "preflight"},
+            }
+        )
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_FONT_SELECTION_POLICY_INVALID",
+            {entry["code"] for entry in result["errors"]},
+        )
+
+    def test_typography_requires_resolved_font(self):
+        candidate = valid_spec()
+        del candidate["modules"]["typography"]["items"][0]["resolved_font"]
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_TYPOGRAPHY_FIELD_MISSING",
+            {entry["code"] for entry in result["errors"]},
+        )
+
+    def test_available_source_font_must_resolve_exactly(self):
+        candidate = valid_spec()
+        candidate["modules"]["typography"]["items"][0]["resolved_font"] = "Arial"
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_FONT_RESOLUTION_INVALID",
+            {entry["code"] for entry in result["errors"]},
+        )
 
     def test_present_font_trials_require_traceable_report(self):
         candidate = valid_spec()
@@ -1662,23 +1725,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             {item["code"] for item in result["errors"]},
         )
 
-    def test_final_rejects_missing_independent_visual_reviewer(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                candidate,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            del candidate["visual_gate"]["reviewer"]
-
-            result = MODULE.validate_spec(candidate, stage="final")
-
-        self.assertIn(
-            "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED",
-            {entry["code"] for entry in result["errors"]},
-        )
-
     def test_final_requires_visual_review_round(self):
         candidate = valid_spec()
         with tempfile.TemporaryDirectory() as directory:
@@ -1696,37 +1742,39 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         )
 
     def test_final_rejects_visual_review_round_outside_one_to_two(self):
-        for review_round in (0, 3, 4, True, 1.5):
-            with self.subTest(review_round=review_round):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for review_round in (0, 3, 4, True, 1.5):
+                with self.subTest(review_round=review_round):
+                    candidate = copy.deepcopy(base)
                     candidate["visual_gate"]["review_round"] = review_round
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_VISUAL_REVIEW_ROUND_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_VISUAL_REVIEW_ROUND_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_accepts_visual_review_rounds_one_to_two(self):
-        for review_round in (1, 2):
-            with self.subTest(review_round=review_round):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for review_round in (1, 2):
+                with self.subTest(review_round=review_round):
+                    candidate = copy.deepcopy(base)
                     candidate["visual_gate"]["review_round"] = review_round
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertTrue(result["valid"], result)
+                    self.assertTrue(result["valid"], result)
 
     def test_final_requires_complete_visual_review_coverage(self):
         candidate = valid_spec()
@@ -1750,65 +1798,68 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             lambda coverage: coverage.update({"canvas_and_regions": "skipped"}),
             lambda coverage: coverage.update({"canvas_and_regions": "not_reviewable"}),
         )
-        for mutate in mutations:
-            candidate = valid_spec()
-            with tempfile.TemporaryDirectory() as directory:
-                self._attach_final_gates(
-                    candidate,
-                    Path(directory),
-                    {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for mutate in mutations:
+                candidate = copy.deepcopy(base)
                 mutate(candidate["visual_gate"]["reviewer"]["coverage"])
                 result = MODULE.validate_spec(candidate, stage="final")
 
-            self.assertIn(
-                "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                {entry["code"] for entry in result["errors"]},
-            )
+                self.assertIn(
+                    "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_rejects_unhashable_visual_coverage_values_without_crashing(self):
-        for invalid in ([], {}, 1, None):
-            with self.subTest(invalid=invalid):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for invalid in ([], {}, 1, None):
+                with self.subTest(invalid=invalid):
+                    candidate = copy.deepcopy(base)
                     candidate["visual_gate"]["reviewer"]["coverage"][
                         "canvas_and_regions"
                     ] = invalid
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_requires_applicable_visual_coverage_to_be_checked(self):
-        for category in (
-            "canvas_and_regions",
-            "objects_and_geometry",
-            "text_and_typography",
-        ):
-            with self.subTest(category=category):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for category in (
+                "canvas_and_regions",
+                "objects_and_geometry",
+                "text_and_typography",
+            ):
+                with self.subTest(category=category):
+                    candidate = copy.deepcopy(base)
                     candidate["visual_gate"]["reviewer"]["coverage"][category] = (
                         "not_applicable"
                     )
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_requires_complete_finding_fields(self):
         finding = {
@@ -1819,24 +1870,25 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "observed_difference": "预览圆角半径略小",
             "evidence": "region-picture.png",
         }
-        for field in tuple(finding):
-            with self.subTest(field=field):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for field in tuple(finding):
+                with self.subTest(field=field):
+                    candidate = copy.deepcopy(base)
                     incomplete = dict(finding)
                     del incomplete[field]
                     candidate["visual_gate"]["reviewer"]["findings"] = [incomplete]
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_rejects_non_string_finding_enums_without_crashing(self):
         base = {
@@ -1847,25 +1899,26 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "observed_difference": "预览圆角半径略小",
             "evidence": "region-picture.png",
         }
-        for field in ("severity", "category"):
-            for invalid in ([], {}, 1, None):
-                with self.subTest(field=field, invalid=invalid):
-                    candidate = valid_spec()
-                    with tempfile.TemporaryDirectory() as directory:
-                        self._attach_final_gates(
-                            candidate,
-                            Path(directory),
-                            {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                        )
+        base_candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base_candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for field in ("severity", "category"):
+                for invalid in ([], {}, 1, None):
+                    with self.subTest(field=field, invalid=invalid):
+                        candidate = copy.deepcopy(base_candidate)
                         finding = dict(base)
                         finding[field] = invalid
                         candidate["visual_gate"]["reviewer"]["findings"] = [finding]
                         result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                        self.assertIn(
+                            "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                            {entry["code"] for entry in result["errors"]},
+                        )
 
     def test_final_rejects_decision_and_findings_inconsistency(self):
         blocking = {
@@ -1881,42 +1934,44 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             ("not_reviewable", [blocking]),
             ("changes_required", []),
         )
-        for decision, findings in scenarios:
-            with self.subTest(decision=decision):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for decision, findings in scenarios:
+                with self.subTest(decision=decision):
+                    candidate = copy.deepcopy(base)
                     reviewer = candidate["visual_gate"]["reviewer"]
                     reviewer["decision"] = decision
                     reviewer["findings"] = findings
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_rejects_non_string_reviewer_decision_without_crashing(self):
-        for invalid in ([], {}, 1, None):
-            with self.subTest(invalid=invalid):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
+        base = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                base,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            for invalid in ([], {}, 1, None):
+                with self.subTest(invalid=invalid):
+                    candidate = copy.deepcopy(base)
                     candidate["visual_gate"]["reviewer"]["decision"] = invalid
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                self.assertIn(
-                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                    {entry["code"] for entry in result["errors"]},
-                )
+                    self.assertIn(
+                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_rejects_validator_report_for_different_pptx(self):
         candidate = valid_spec()

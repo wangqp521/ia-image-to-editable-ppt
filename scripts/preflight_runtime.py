@@ -55,6 +55,54 @@ def _version(path: Path) -> str:
     return last_result
 
 
+def _resolve_font(
+    fc_match: Path,
+    fontconfig: Path,
+    requested_family: str,
+) -> dict[str, Any]:
+    env = os.environ.copy()
+    env["FONTCONFIG_FILE"] = str(fontconfig)
+    try:
+        completed = subprocess.run(
+            [
+                str(fc_match),
+                "-f",
+                "%{family}\n%{file}\n",
+                requested_family,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=env,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    lines = (
+        completed.stdout.splitlines()
+        if completed is not None and completed.returncode == 0
+        else []
+    )
+    resolved_families = [
+        family.strip()
+        for family in (lines[0].split(",") if lines else [])
+        if family.strip()
+    ]
+    font_file = lines[1].strip() if len(lines) > 1 and lines[1].strip() else None
+    exact_match = (
+        requested_family.casefold()
+        in {family.casefold() for family in resolved_families}
+        and font_file is not None
+        and Path(font_file).is_file()
+    )
+    return {
+        "requested_family": requested_family,
+        "resolved_families": resolved_families,
+        "file": font_file,
+        "exact_match": exact_match,
+    }
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     handle = tempfile.NamedTemporaryFile(
@@ -106,9 +154,16 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     executables: dict[str, dict[str, Any]] = {}
-    for name in ("soffice", "pdftoppm", "pdffonts"):
-        requested = getattr(args, name)
+    resolved_executables: dict[str, Path | None] = {}
+    for name, argument in (
+        ("soffice", "soffice"),
+        ("pdftoppm", "pdftoppm"),
+        ("pdffonts", "pdffonts"),
+        ("fc-match", "fc_match"),
+    ):
+        requested = getattr(args, argument)
         resolved = _resolve_executable(requested)
+        resolved_executables[name] = resolved
         executables[name] = {
             "requested": requested,
             "available": resolved is not None,
@@ -137,6 +192,23 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
+    fonts: dict[str, dict[str, Any]] = {}
+    fc_match = resolved_executables["fc-match"]
+    if fc_match is not None and fontconfig.is_file():
+        for requested_family in args.required_font:
+            resolution = _resolve_font(fc_match, fontconfig, requested_family)
+            fonts[requested_family] = resolution
+            if not resolution["exact_match"]:
+                errors.append(
+                    {
+                        "code": f"RUNTIME_FONT_UNRESOLVED:{requested_family}",
+                        "detail": (
+                            ",".join(resolution["resolved_families"])
+                            or "no resolved family"
+                        ),
+                    }
+                )
+
     modules: dict[str, dict[str, Any]] = {}
     for name in args.python_module:
         available = importlib.util.find_spec(name) is not None
@@ -164,6 +236,7 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         },
         "executables": executables,
         "fontconfig": fontconfig_entry,
+        "fonts": fonts,
         "python_modules": modules,
         "libreoffice_profile": {
             "path": str(profile_path),
@@ -178,10 +251,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--soffice", required=True)
     parser.add_argument("--pdftoppm", required=True)
     parser.add_argument("--pdffonts", required=True)
+    parser.add_argument("--fc-match", default="fc-match")
     parser.add_argument("--fontconfig", type=Path, required=True)
+    parser.add_argument("--required-font", action="append")
     parser.add_argument("--python-module", action="append", default=[])
     parser.add_argument("--output", type=Path, required=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    args.required_font = list(
+        dict.fromkeys(["Noto Sans CJK SC", *(args.required_font or [])])
+    )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:

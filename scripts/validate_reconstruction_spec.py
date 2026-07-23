@@ -912,8 +912,10 @@ def _validate_typography(
         "element_id",
         "text",
         "source_font_guess",
+        "source_font_available",
         "candidates",
         "selected_font",
+        "resolved_font",
         "fallback_reason",
         "fallback_trace",
         "runs",
@@ -946,6 +948,89 @@ def _validate_typography(
         selected = item.get("selected_font")
         if not isinstance(candidates, list) or not candidates or selected not in candidates:
             _error(errors, "SPEC_FONT_CANDIDATES_INVALID", f"{path}.candidates", "selected_font must be in non-empty candidates")
+        source_font = item.get("source_font_guess")
+        source_available = item.get("source_font_available")
+        resolved_font = item.get("resolved_font")
+        fallback_reason = item.get("fallback_reason")
+        fallback_trace = item.get("fallback_trace")
+        if not isinstance(source_font, str) or not source_font:
+            _error(
+                errors,
+                "SPEC_FONT_SELECTION_POLICY_INVALID",
+                f"{path}.source_font_guess",
+                "source_font_guess must be a non-empty string",
+            )
+        elif not isinstance(source_available, bool):
+            _error(
+                errors,
+                "SPEC_FONT_SELECTION_POLICY_INVALID",
+                f"{path}.source_font_available",
+                "source_font_available must be boolean",
+            )
+        elif source_available:
+            if candidates != [source_font] or selected != source_font:
+                _error(
+                    errors,
+                    "SPEC_FONT_SELECTION_POLICY_INVALID",
+                    f"{path}.candidates",
+                    "available source font requires one original-font candidate and selection",
+                )
+            if fallback_reason not in {None, ""} or fallback_trace is not None:
+                _error(
+                    errors,
+                    "SPEC_FONT_SELECTION_POLICY_INVALID",
+                    f"{path}.fallback_reason",
+                    "available source font must not claim fallback",
+                )
+        else:
+            if candidates != ["Noto Sans CJK SC"] or selected != "Noto Sans CJK SC":
+                _error(
+                    errors,
+                    "SPEC_FONT_SELECTION_POLICY_INVALID",
+                    f"{path}.candidates",
+                    "unavailable source font requires only Noto Sans CJK SC",
+                )
+            if (
+                not isinstance(fallback_reason, str)
+                or not fallback_reason.strip()
+                or fallback_trace is None
+                or fallback_trace == ""
+            ):
+                _error(
+                    errors,
+                    "SPEC_FONT_SELECTION_POLICY_INVALID",
+                    f"{path}.fallback_reason",
+                    "unavailable source font requires fallback reason and trace",
+                )
+        if not isinstance(resolved_font, str) or not resolved_font.strip():
+            _error(
+                errors,
+                "SPEC_FONT_RESOLUTION_INVALID",
+                f"{path}.resolved_font",
+                "resolved_font must be a non-empty string",
+            )
+        elif source_available is True and resolved_font != source_font:
+            _error(
+                errors,
+                "SPEC_FONT_RESOLUTION_INVALID",
+                f"{path}.resolved_font",
+                "available source font must resolve exactly to source_font_guess",
+            )
+        elif source_available is False and resolved_font != "Noto Sans CJK SC":
+            _error(
+                errors,
+                "SPEC_FONT_RESOLUTION_INVALID",
+                f"{path}.resolved_font",
+                "fallback must resolve exactly to Noto Sans CJK SC",
+            )
+        declaration = item.get("internal_font_declaration")
+        if isinstance(selected, str) and declaration != selected:
+            _error(
+                errors,
+                "SPEC_FONT_DECLARATION_INVALID",
+                f"{path}.internal_font_declaration",
+                "internal font declaration must equal selected_font",
+            )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)
         _validate_text_run_styles(runs, f"{path}.runs", errors)

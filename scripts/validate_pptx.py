@@ -1028,6 +1028,34 @@ def _validate_text_run_contracts(
         if expected_bold is None or actual_bold is None or expected_bold != actual_bold:
             result["errors"].append("TEXT_RUN_FONT_WEIGHT_MISMATCH")
             result["warnings"].append(f"{element_id}: Text Run bold ranges do not match the reconstruction spec")
+        selected_font = item.get("selected_font")
+        declared_font = item.get("internal_font_declaration")
+        if isinstance(selected_font, str) and selected_font:
+            if declared_font != selected_font:
+                result["errors"].append("TEXT_RUN_FONT_DECLARATION_MISMATCH")
+                result["warnings"].append(
+                    f"{element_id}: internal font declaration does not match selected_font"
+                )
+            actual_fonts: set[str] = set()
+            for run in actual_object.get("runs", []):
+                if not isinstance(run, dict):
+                    continue
+                fonts_by_script = run.get("fonts_by_script")
+                if isinstance(fonts_by_script, dict):
+                    actual_fonts.update(
+                        font
+                        for font in fonts_by_script.values()
+                        if isinstance(font, str) and font
+                    )
+                font = run.get("font")
+                if isinstance(font, str) and font:
+                    actual_fonts.add(font)
+            normalized_fonts = {font.casefold() for font in actual_fonts}
+            if normalized_fonts != {selected_font.casefold()}:
+                result["errors"].append("TEXT_RUN_FONT_DECLARATION_MISMATCH")
+                result["warnings"].append(
+                    f"{element_id}: PPTX font declaration does not match {selected_font}"
+                )
 
 
 def _validate_native_list_contracts(
