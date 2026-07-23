@@ -18,6 +18,8 @@
 
 每条线保存实际起止、宽度、颜色、透明度、虚线、端点和层级；存在但被遮挡也算错误。纯色记录 RGB/alpha，真正无填充用 `noFill`，不得用无颜色 `solidFill`。只有连续且方向明确的颜色变化才用渐变，并保存类型、角度和 stops；压缩噪声不算渐变证据。
 
+来源明确无阴影时，主题效果中和仅用于目标 Shape/Line：保留主题结构，不得删除整个 `p:style`；将 `a:effectRef` 的 `idx` 设为 `0`，清除 `spPr` 下的显式 `effectLst/effectDag` 并写入空 `effectLst`。不得作用于表格、图片或 `graphicFrame`。渲染后同时确认阴影消失，且后续表格、透明图片和图标无缺失、错位或裁切。
+
 ## 图示、Connector 与重复组件
 
 记录 nodes/ports/edges/groups/component_templates。edge 固定表达 `source_node+port → route/bend_points → target_port+node`：端点附着正确边界，路径类型、拐点、箭头、线型和 Z-order 与来源一致；多段相邻端点严格重合，不悬空、不深入错误节点、不误穿节点/标签、不被背景截断。一个逻辑 edge 不拆成无关系线段，多条关系不合并。
