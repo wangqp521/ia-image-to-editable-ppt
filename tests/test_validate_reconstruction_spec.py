@@ -9,11 +9,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest import mock
 
 from PIL import Image
 from pptx import Presentation
-from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Pt
 
 
@@ -47,17 +45,6 @@ if COORDINATE_OVERLAY_SPEC is None or COORDINATE_OVERLAY_SPEC.loader is None:
     raise RuntimeError(f"Cannot load {COORDINATE_OVERLAY_PATH}")
 COORDINATE_OVERLAY = importlib.util.module_from_spec(COORDINATE_OVERLAY_SPEC)
 COORDINATE_OVERLAY_SPEC.loader.exec_module(COORDINATE_OVERLAY)
-
-ICON_REVIEW_PATH = Path(__file__).resolve().parents[1] / "scripts" / "create_icon_crop_review.py"
-ICON_REVIEW_SPEC = importlib.util.spec_from_file_location(
-    "icon_review_for_spec_tests",
-    ICON_REVIEW_PATH,
-)
-if ICON_REVIEW_SPEC is None or ICON_REVIEW_SPEC.loader is None:
-    raise RuntimeError(f"Cannot load {ICON_REVIEW_PATH}")
-ICON_REVIEW = importlib.util.module_from_spec(ICON_REVIEW_SPEC)
-ICON_REVIEW_SPEC.loader.exec_module(ICON_REVIEW)
-
 
 REFERENCE_ROOT: tempfile.TemporaryDirectory[str] | None = None
 REFERENCE_PATH: Path | None = None
@@ -141,10 +128,8 @@ def valid_spec() -> dict:
                         "element_id": "title",
                         "text": text,
                         "source_font_guess": "Noto Sans CJK SC",
-                        "source_font_available": True,
                         "candidates": ["Noto Sans CJK SC"],
                         "selected_font": "Noto Sans CJK SC",
-                        "resolved_font": "Noto Sans CJK SC",
                         "fallback_reason": None,
                         "fallback_trace": None,
                         "runs": [
@@ -400,10 +385,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         run.text = item["text"]
         run.font.bold = True
         run.font.size = Pt(24)
-        run.font.name = item["selected_font"]
-        east_asian = OxmlElement("a:ea")
-        east_asian.set("typeface", item["selected_font"])
-        run._r.get_or_add_rPr().append(east_asian)
         pptx_path = root / "page.pptx"
         presentation.save(pptx_path)
         pptx = image_identity(pptx_path)
@@ -702,15 +683,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "slide_coordinate_unit": "EMU",
             "clean_visual_reference": source["path"],
             "clean_visual_sha256": source["sha256"],
-            "batch_extraction": {
-                "processor": "extract_icon_asset.py",
-                "algorithm_version": "edge-connected-v2",
-                "processor_sha256": "1" * 64,
-                "source_path": source["path"],
-                "source_sha256": source["sha256"],
-                "icon_count": 1,
-                "result": "passed",
-            },
             "icons": [
                 {
                     "icon_id": "status-icon",
@@ -725,7 +697,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                     "source_path": source["path"],
                     "source_sha256": source["sha256"],
                     "crop_mode": "alpha_isolation",
-                    "fallback_reason": None,
                     "padding": 0,
                     "background_handling": "border_connected_background_to_alpha",
                     "asset_path": asset["path"],
@@ -734,12 +705,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                     "final_width": 32,
                     "final_height": 32,
                     "sharpness": "source_preserved",
-                    "inspection": {
-                        "roi_context_400": "passed",
-                        "source_400": "passed",
-                        "asset_400": "passed",
-                        "placement_400": "pending",
-                    },
                     "validation": "passed",
                     "native_redraw": False,
                     "selectable_picture_verified": False,
@@ -765,19 +730,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "grid": coordinate["grid"],
             "inspection": "passed",
         }
-        if "icons" not in candidate["activated_modules"]:
-            return
-        spec_path = work_dir / "icon-review-spec.json"
-        spec_path.write_text(json.dumps(candidate), encoding="utf-8")
-        review_path = root / "comparisons" / "icon-crop-review.png"
-        review = ICON_REVIEW.create_icon_crop_review(spec_path, review_path)
-        candidate["modules"]["icons"]["crop_review_evidence"] = {
-            "path": str(review_path.resolve()),
-            "sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
-            "icon_manifest_sha256": review["icon_manifest_sha256"],
-            "inspection": "passed",
-        }
-
     def _replace_icon_asset(self, candidate: dict, image: Image.Image) -> None:
         icon = candidate["modules"]["icons"]["icons"][0]
         asset_path = Path(icon["asset_path"])
@@ -788,38 +740,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             if "A" in image.getbands()
             else None
         )
-
-    def _set_background_preserved_icon(
-        self,
-        candidate: dict,
-        image: Image.Image,
-    ) -> None:
-        icon = candidate["modules"]["icons"]["icons"][0]
-        icon.update(
-            {
-                "crop_mode": "background_preserved",
-                "fallback_reason": "透明化导致浅色轮廓或阴影出现可见损失",
-                "background_handling": "preserved_source_patch",
-                "semantic_scope": "intentional_composite",
-                "alpha_mask_sha256": None,
-                "sharpness": "source_pixels_preserved",
-            }
-        )
-        self._replace_icon_asset(candidate, image)
-        icon["alpha_mask_sha256"] = None
-        source_path = Path(icon["source_path"])
-        with Image.open(source_path) as opened:
-            source = opened.convert("RGB")
-        source.paste(image.convert("RGB"), (100, 100))
-        source.save(source_path)
-        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
-        candidate["content_reference"]["sha256"] = source_sha256
-        candidate["clean_visual_reference"]["sha256"] = source_sha256
-        candidate["modules"]["icons"]["clean_visual_sha256"] = source_sha256
-        candidate["modules"]["icons"]["batch_extraction"]["source_sha256"] = (
-            source_sha256
-        )
-        icon["source_sha256"] = source_sha256
 
     def test_valid_prebuild_spec_passes(self):
         result = MODULE.validate_spec(valid_spec(), stage="prebuild")
@@ -917,8 +837,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             icons = candidate["modules"]["icons"]
             icons["clean_visual_reference"] = identity["path"]
             icons["clean_visual_sha256"] = identity["sha256"]
-            icons["batch_extraction"]["source_path"] = identity["path"]
-            icons["batch_extraction"]["source_sha256"] = identity["sha256"]
             icon = icons["icons"][0]
             icon["source_path"] = identity["path"]
             icon["source_sha256"] = identity["sha256"]
@@ -949,62 +867,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         result = MODULE.validate_spec(candidate, stage="prebuild")
 
         self.assertTrue(result["valid"], result)
-
-    def test_original_available_font_requires_only_original_candidate(self):
-        candidate = valid_spec()
-        item = candidate["modules"]["typography"]["items"][0]
-        item["candidates"] = ["Noto Sans CJK SC", "Arial"]
-
-        result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_FONT_SELECTION_POLICY_INVALID",
-            {entry["code"] for entry in result["errors"]},
-        )
-
-    def test_unavailable_font_requires_only_noto_candidate(self):
-        candidate = valid_spec()
-        item = candidate["modules"]["typography"]["items"][0]
-        item.update(
-            {
-                "source_font_guess": "KaiTi",
-                "source_font_available": False,
-                "candidates": ["KaiTi", "Noto Sans CJK SC"],
-                "selected_font": "Noto Sans CJK SC",
-                "resolved_font": "Noto Sans CJK SC",
-                "fallback_reason": "source font unavailable",
-                "fallback_trace": {"source": "preflight"},
-            }
-        )
-
-        result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_FONT_SELECTION_POLICY_INVALID",
-            {entry["code"] for entry in result["errors"]},
-        )
-
-    def test_typography_requires_resolved_font(self):
-        candidate = valid_spec()
-        del candidate["modules"]["typography"]["items"][0]["resolved_font"]
-
-        result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_TYPOGRAPHY_FIELD_MISSING",
-            {entry["code"] for entry in result["errors"]},
-        )
-
-    def test_available_source_font_must_resolve_exactly(self):
-        candidate = valid_spec()
-        candidate["modules"]["typography"]["items"][0]["resolved_font"] = "Arial"
-
-        result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_FONT_RESOLUTION_INVALID",
-            {entry["code"] for entry in result["errors"]},
-        )
 
     def test_present_font_trials_require_traceable_report(self):
         candidate = valid_spec()
@@ -1139,299 +1001,37 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertTrue(result["valid"], result)
 
-    def test_icon_batch_extraction_is_required(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            del candidate["modules"]["icons"]["batch_extraction"]
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_BATCH_EXTRACTION_MISSING",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_batch_extraction_must_bind_to_current_source(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            candidate["modules"]["icons"]["batch_extraction"]["source_sha256"] = "0" * 64
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_BATCH_SOURCE_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_validation_reuses_source_hash_and_decode(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._add_valid_icon_contract(candidate, root)
-            icons_module = candidate["modules"]["icons"]
-            second_element = copy.deepcopy(candidate["elements"][-1])
-            second_element["element_id"] = "status-icon-2"
-            candidate["elements"].append(second_element)
-            second_icon = copy.deepcopy(icons_module["icons"][0])
-            second_icon["icon_id"] = "status-icon-2"
-            second_icon["element_id"] = "status-icon-2"
-            icons_module["icons"].append(second_icon)
-            icons_module["batch_extraction"]["icon_count"] = 2
-
-            source_path = Path(candidate["clean_visual_reference"]["path"]).resolve()
-            source_hash_calls = 0
-            source_open_calls = 0
-            original_file_sha256 = MODULE._file_sha256
-            original_image_open = MODULE.Image.open
-
-            def counted_file_sha256(path):
-                nonlocal source_hash_calls
-                if Path(path).resolve() == source_path:
-                    source_hash_calls += 1
-                return original_file_sha256(path)
-
-            def counted_image_open(path, *args, **kwargs):
-                nonlocal source_open_calls
-                if Path(path).resolve() == source_path:
-                    source_open_calls += 1
-                return original_image_open(path, *args, **kwargs)
-
-            errors = []
-            with (
-                mock.patch.object(MODULE, "_file_sha256", side_effect=counted_file_sha256),
-                mock.patch.object(MODULE.Image, "open", side_effect=counted_image_open),
-            ):
-                MODULE._validate_icons(
-                    icons_module,
-                    {item["element_id"]: item for item in candidate["elements"]},
-                    candidate["canvas"],
-                    candidate["clean_visual_reference"],
-                    candidate["page_id"],
-                    "prebuild",
-                    errors,
-                )
-
-        self.assertEqual([], errors)
-        self.assertEqual(1, source_hash_calls)
-        self.assertEqual(1, source_open_calls)
-
-    def test_icon_page_requires_current_crop_review_for_every_profile(self):
+    def test_icon_page_does_not_require_crop_review_or_inspection(self):
         for profile in ("rapid", "reviewed", "strict"):
             with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
                 candidate = valid_spec()
                 candidate["verification_profile"] = profile
                 self._add_valid_icon_contract(candidate, Path(directory))
-                del candidate["modules"]["icons"]["crop_review_evidence"]
 
                 result = MODULE.validate_spec(candidate, stage="prebuild")
 
-                self.assertIn(
-                    "SPEC_ICON_CROP_REVIEW_EVIDENCE_MISSING",
-                    {item["code"] for item in result["errors"]},
-                )
+                self.assertTrue(result["valid"], result)
 
-    def test_icon_page_rejects_stale_crop_review_manifest(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            candidate["modules"]["icons"]["crop_review_evidence"][
-                "icon_manifest_sha256"
-            ] = "0" * 64
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_asset_change_invalidates_old_crop_review(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            changed = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
-            changed.paste((0, 120, 255, 255), (4, 4, 28, 28))
-            self._replace_icon_asset(candidate, changed)
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_bbox_change_invalidates_old_crop_review(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            candidate["modules"]["icons"]["icons"][0]["source_bbox"][0] += 1
-            candidate["elements"][1]["source_bbox"][0] += 1
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_crop_mode_change_invalidates_old_crop_review(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._add_valid_icon_contract(candidate, root)
-            old_evidence = copy.deepcopy(
-                candidate["modules"]["icons"]["crop_review_evidence"]
-            )
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            candidate["modules"]["icons"]["crop_review_evidence"] = old_evidence
-
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-
-        self.assertIn(
-            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_icon_contract_requires_roi_context_inspection(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            del candidate["modules"]["icons"]["icons"][0]["inspection"]["roi_context_400"]
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_INSPECTION_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_alpha_isolation_requires_null_fallback_reason(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            candidate["modules"]["icons"]["icons"][0]["fallback_reason"] = "统一处理"
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_FALLBACK_REASON_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_background_preserved_requires_nonempty_fallback_reason(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            candidate["modules"]["icons"]["icons"][0]["fallback_reason"] = "   "
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_FALLBACK_REASON_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_final_icon_contract_requires_placement_and_selectability_verification(self):
+    def test_final_icon_contract_requires_selectability_verification(self):
         candidate = valid_spec()
         with tempfile.TemporaryDirectory() as directory:
             self._add_valid_icon_contract(candidate, Path(directory))
             result = MODULE.validate_spec(candidate, stage="final")
         codes = {item["code"] for item in result["errors"]}
-        self.assertIn("SPEC_ICON_PLACEMENT_NOT_VERIFIED", codes)
         self.assertIn("SPEC_ICON_SELECTABILITY_NOT_VERIFIED", codes)
 
-    def test_unknown_icon_crop_mode_is_rejected(self):
+    def test_non_alpha_icon_crop_modes_are_rejected(self):
         candidate = valid_spec()
         with tempfile.TemporaryDirectory() as directory:
             self._add_valid_icon_contract(candidate, Path(directory))
-            candidate["modules"]["icons"]["icons"][0]["crop_mode"] = "tight_rect"
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn("SPEC_ICON_CROP_MODE_INVALID", {item["code"] for item in result["errors"]})
-
-    def test_background_preserved_accepts_rgb_png_without_alpha_hash(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            self._refresh_prebuild_visual_evidence(candidate, Path(directory))
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertTrue(result["valid"], result)
-
-    def test_background_preserved_accepts_fully_opaque_rgba_png(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGBA", (32, 32), (242, 241, 235, 255)),
-            )
-            self._refresh_prebuild_visual_evidence(candidate, Path(directory))
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertTrue(result["valid"], result)
-
-    def test_background_preserved_rejects_partial_transparency(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            image = Image.new("RGBA", (32, 32), (242, 241, 235, 255))
-            image.putpixel((0, 0), (242, 241, 235, 128))
-            self._set_background_preserved_icon(candidate, image)
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_BACKGROUND_PRESERVED_ALPHA_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_background_preserved_requires_intentional_composite(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            candidate["modules"]["icons"]["icons"][0]["semantic_scope"] = "icon_only"
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_BACKGROUND_PRESERVED_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_background_preserved_requires_preserved_source_patch_handling(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            candidate["modules"]["icons"]["icons"][0]["background_handling"] = "none"
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_BACKGROUND_PRESERVED_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
-
-    def test_background_preserved_rejects_alpha_mask_hash(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            self._set_background_preserved_icon(
-                candidate,
-                Image.new("RGB", (32, 32), (242, 241, 235)),
-            )
-            candidate["modules"]["icons"]["icons"][0]["alpha_mask_sha256"] = "f" * 64
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn(
-            "SPEC_ICON_BACKGROUND_PRESERVED_INVALID",
-            {item["code"] for item in result["errors"]},
-        )
+            for crop_mode in ("background_preserved", "tight_rect"):
+                with self.subTest(crop_mode=crop_mode):
+                    candidate["modules"]["icons"]["icons"][0]["crop_mode"] = crop_mode
+                    result = MODULE.validate_spec(candidate, stage="prebuild")
+                    self.assertIn(
+                        "SPEC_ICON_CROP_MODE_INVALID",
+                        {item["code"] for item in result["errors"]},
+                    )
 
     def test_alpha_isolation_rejects_mismatched_alpha_hash(self):
         candidate = valid_spec()
@@ -1449,18 +1049,6 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             icon.paste((241, 90, 34, 255), (4, 4, 28, 28))
             icon.putpixel((0, 0), (1, 2, 3, 0))
             self._replace_icon_asset(candidate, icon)
-            result = MODULE.validate_spec(candidate, stage="prebuild")
-        self.assertIn("SPEC_ICON_RGB_MISMATCH", {item["code"] for item in result["errors"]})
-
-    def test_background_preserved_rejects_changed_source_crop_rgb(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._add_valid_icon_contract(candidate, Path(directory))
-            preserved = Image.new("RGB", (32, 32), (242, 241, 235))
-            self._set_background_preserved_icon(candidate, preserved)
-            changed = preserved.copy()
-            changed.putpixel((7, 9), (10, 20, 30))
-            self._replace_icon_asset(candidate, changed)
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertIn("SPEC_ICON_RGB_MISMATCH", {item["code"] for item in result["errors"]})
 
@@ -1725,6 +1313,23 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             {item["code"] for item in result["errors"]},
         )
 
+    def test_final_rejects_missing_independent_visual_reviewer(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+            )
+            del candidate["visual_gate"]["reviewer"]
+
+            result = MODULE.validate_spec(candidate, stage="final")
+
+        self.assertIn(
+            "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED",
+            {entry["code"] for entry in result["errors"]},
+        )
+
     def test_final_requires_visual_review_round(self):
         candidate = valid_spec()
         with tempfile.TemporaryDirectory() as directory:
@@ -1742,39 +1347,37 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         )
 
     def test_final_rejects_visual_review_round_outside_one_to_two(self):
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for review_round in (0, 3, 4, True, 1.5):
-                with self.subTest(review_round=review_round):
-                    candidate = copy.deepcopy(base)
+        for review_round in (0, 3, 4, True, 1.5):
+            with self.subTest(review_round=review_round):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     candidate["visual_gate"]["review_round"] = review_round
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_VISUAL_REVIEW_ROUND_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                self.assertIn(
+                    "SPEC_VISUAL_REVIEW_ROUND_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_accepts_visual_review_rounds_one_to_two(self):
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for review_round in (1, 2):
-                with self.subTest(review_round=review_round):
-                    candidate = copy.deepcopy(base)
+        for review_round in (1, 2):
+            with self.subTest(review_round=review_round):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     candidate["visual_gate"]["review_round"] = review_round
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertTrue(result["valid"], result)
+                self.assertTrue(result["valid"], result)
 
     def test_final_requires_complete_visual_review_coverage(self):
         candidate = valid_spec()
@@ -1798,68 +1401,65 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             lambda coverage: coverage.update({"canvas_and_regions": "skipped"}),
             lambda coverage: coverage.update({"canvas_and_regions": "not_reviewable"}),
         )
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for mutate in mutations:
-                candidate = copy.deepcopy(base)
+        for mutate in mutations:
+            candidate = valid_spec()
+            with tempfile.TemporaryDirectory() as directory:
+                self._attach_final_gates(
+                    candidate,
+                    Path(directory),
+                    {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                )
                 mutate(candidate["visual_gate"]["reviewer"]["coverage"])
                 result = MODULE.validate_spec(candidate, stage="final")
+
+            self.assertIn(
+                "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
+                {entry["code"] for entry in result["errors"]},
+            )
+
+    def test_final_rejects_unhashable_visual_coverage_values_without_crashing(self):
+        for invalid in ([], {}, 1, None):
+            with self.subTest(invalid=invalid):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
+                    candidate["visual_gate"]["reviewer"]["coverage"][
+                        "canvas_and_regions"
+                    ] = invalid
+                    result = MODULE.validate_spec(candidate, stage="final")
 
                 self.assertIn(
                     "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
                     {entry["code"] for entry in result["errors"]},
                 )
 
-    def test_final_rejects_unhashable_visual_coverage_values_without_crashing(self):
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for invalid in ([], {}, 1, None):
-                with self.subTest(invalid=invalid):
-                    candidate = copy.deepcopy(base)
-                    candidate["visual_gate"]["reviewer"]["coverage"][
-                        "canvas_and_regions"
-                    ] = invalid
-                    result = MODULE.validate_spec(candidate, stage="final")
-
-                    self.assertIn(
-                        "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
-
     def test_final_requires_applicable_visual_coverage_to_be_checked(self):
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for category in (
-                "canvas_and_regions",
-                "objects_and_geometry",
-                "text_and_typography",
-            ):
-                with self.subTest(category=category):
-                    candidate = copy.deepcopy(base)
+        for category in (
+            "canvas_and_regions",
+            "objects_and_geometry",
+            "text_and_typography",
+        ):
+            with self.subTest(category=category):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     candidate["visual_gate"]["reviewer"]["coverage"][category] = (
                         "not_applicable"
                     )
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                self.assertIn(
+                    "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_requires_complete_finding_fields(self):
         finding = {
@@ -1870,25 +1470,24 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "observed_difference": "预览圆角半径略小",
             "evidence": "region-picture.png",
         }
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for field in tuple(finding):
-                with self.subTest(field=field):
-                    candidate = copy.deepcopy(base)
+        for field in tuple(finding):
+            with self.subTest(field=field):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     incomplete = dict(finding)
                     del incomplete[field]
                     candidate["visual_gate"]["reviewer"]["findings"] = [incomplete]
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                self.assertIn(
+                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_rejects_non_string_finding_enums_without_crashing(self):
         base = {
@@ -1899,26 +1498,25 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "observed_difference": "预览圆角半径略小",
             "evidence": "region-picture.png",
         }
-        base_candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base_candidate,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for field in ("severity", "category"):
-                for invalid in ([], {}, 1, None):
-                    with self.subTest(field=field, invalid=invalid):
-                        candidate = copy.deepcopy(base_candidate)
+        for field in ("severity", "category"):
+            for invalid in ([], {}, 1, None):
+                with self.subTest(field=field, invalid=invalid):
+                    candidate = valid_spec()
+                    with tempfile.TemporaryDirectory() as directory:
+                        self._attach_final_gates(
+                            candidate,
+                            Path(directory),
+                            {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                        )
                         finding = dict(base)
                         finding[field] = invalid
                         candidate["visual_gate"]["reviewer"]["findings"] = [finding]
                         result = MODULE.validate_spec(candidate, stage="final")
 
-                        self.assertIn(
-                            "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                            {entry["code"] for entry in result["errors"]},
-                        )
+                    self.assertIn(
+                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                        {entry["code"] for entry in result["errors"]},
+                    )
 
     def test_final_rejects_decision_and_findings_inconsistency(self):
         blocking = {
@@ -1934,44 +1532,42 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             ("not_reviewable", [blocking]),
             ("changes_required", []),
         )
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for decision, findings in scenarios:
-                with self.subTest(decision=decision):
-                    candidate = copy.deepcopy(base)
+        for decision, findings in scenarios:
+            with self.subTest(decision=decision):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     reviewer = candidate["visual_gate"]["reviewer"]
                     reviewer["decision"] = decision
                     reviewer["findings"] = findings
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                self.assertIn(
+                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_rejects_non_string_reviewer_decision_without_crashing(self):
-        base = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                base,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            for invalid in ([], {}, 1, None):
-                with self.subTest(invalid=invalid):
-                    candidate = copy.deepcopy(base)
+        for invalid in ([], {}, 1, None):
+            with self.subTest(invalid=invalid):
+                candidate = valid_spec()
+                with tempfile.TemporaryDirectory() as directory:
+                    self._attach_final_gates(
+                        candidate,
+                        Path(directory),
+                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                    )
                     candidate["visual_gate"]["reviewer"]["decision"] = invalid
                     result = MODULE.validate_spec(candidate, stage="final")
 
-                    self.assertIn(
-                        "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                        {entry["code"] for entry in result["errors"]},
-                    )
+                self.assertIn(
+                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
+                    {entry["code"] for entry in result["errors"]},
+                )
 
     def test_final_rejects_validator_report_for_different_pptx(self):
         candidate = valid_spec()

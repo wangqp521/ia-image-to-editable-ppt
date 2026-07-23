@@ -22,21 +22,17 @@
 
 ### `strict` 严格审核
 
-strict 要求完整 regions 200% 证据、唯一 `candidate.pptx`、accepted 是质量下限，并对 source、PPTX、spec、preview、visual diff、regions、validator、reviewer 与运行依赖做完整哈希绑定；成功写 `strict_gate_passed`，失败写 `strict_gate_failed`。
+以下 accepted/candidate、证据复用、第二轮准入、独立 reviewer 和终态身份规则均为 strict 完整合同。它要求完整 regions 200% 证据、唯一 `candidate.pptx`、accepted 是质量下限，并对 source、PPTX、spec、preview、visual diff、regions、validator、reviewer 与运行依赖做完整哈希绑定；成功写 `strict_gate_passed`，失败写 `strict_gate_failed`。
 
-## 三种模式共享检查点
+## 三个检查点
 
-1. **自动 preflight/prebuild：** 规格只描述当前页；`validate_reconstruction_spec.py --stage prebuild` 失败不得进入 PPTX 生成阶段。
+1. **自动 preflight/prebuild：** 规格只描述当前页；`validate_reconstruction_spec.py --stage prebuild` 失败不得生成。
 2. **自动结构门禁：** 每轮视觉审查前用 `validate_pptx.py --expected-slides 1 --spec ...` 检查当前 PPTX；结构写入修正后重新校验，直至通过。
-3. **视觉门禁：** rapid 执行自动视觉差异门禁；reviewed 与 strict 执行独立视觉门禁，由主代理生成证据、全新上下文视觉子代理只读判断，指标不能自动批准。终态 reviewer 通过后不得再写入 PPTX，最后运行 schema v2 final 校验。
+3. **独立视觉门禁：** 主代理生成证据，全新上下文视觉子代理只读判断；指标不能自动批准。终态 reviewer 通过后不得再写入 PPTX，最后运行 schema v2 final 校验。
 
 条件 module 是复刻能力，不是额外审批。用户反馈、圈选、当前高风险对象或门禁差异写入唯一 `modules.high_risk.items`；从未触发时不建空清单，不创建第二套差异文件、状态机或修复历史。
 
-## reviewed 与 strict 独立 reviewer
-
-reviewed 只生成必要区域；reviewed 不要求全部 regions 200% 证据或逐 candidate 完整链。accepted 仅表示修复不得回退。
-
-## strict 专属候选与完整证据
+## 修复候选与当前视觉证据
 
 第一轮 reviewer 后，最近一次通过当前阶段门禁的 PPTX 记为 accepted；accepted 是质量下限。每批只从 accepted 生成唯一 `candidate.pptx`。中间修复只重建受影响区域证据，并检查 finding、受影响区域及相邻边界和同一容器。candidate 仅在目标达到 expected、无新 P0/P1、结构通过时晋级；未改善目标问题、回退或结构失败时不得覆盖 accepted。箭头/连接线同时核对端点、方向、弧度、线宽、填充与层级；复杂装饰连续两次原生重绘仍退化时，改用最小范围透明 picture。
 

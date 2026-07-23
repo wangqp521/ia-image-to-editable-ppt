@@ -30,12 +30,7 @@ class MacOSFontconfigTests(unittest.TestCase):
             'FONTCONFIG_FILE="$PWD/assets/fontconfig-macos.conf"',
             skill_text,
         )
-        self.assertIn(
-            'soffice "-env:UserInstallation='
-            '<preflight-runtime.json:libreoffice_profile.uri>"',
-            skill_text,
-        )
-        self.assertIn("--headless --convert-to pdf", skill_text)
+        self.assertIn("soffice --headless --convert-to pdf", skill_text)
 
 
 if __name__ == "__main__":

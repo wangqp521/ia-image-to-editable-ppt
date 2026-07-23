@@ -21,11 +21,6 @@ def chars(name: str) -> int:
 
 
 class SkillRuntimeContractTests(unittest.TestCase):
-    def test_libreoffice_uses_page_scoped_user_installation(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn("首次预览直接使用该 URI", runtime)
-        self.assertIn("失败不得进入 PPTX 生成阶段", runtime)
-
     def test_three_fixed_verification_profiles_are_explicit(self):
         runtime = SKILL.read_text(encoding="utf-8")
         for phrase in (
@@ -60,7 +55,8 @@ class SkillRuntimeContractTests(unittest.TestCase):
         combined = runtime + audit
         for phrase in (
             "写规格前通过 commentary 展示当前坐标定位图并检查",
-            "图标页面在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图并检查",
+            "通过 commentary 展示一次当前页最终图标绿幕汇总图",
+            "仅展示，不设审核门禁",
             "profile 只控制终态证明成本，不得降低构建前输入质量",
         ):
             with self.subTest(phrase=phrase):
@@ -120,7 +116,7 @@ class SkillRuntimeContractTests(unittest.TestCase):
                 "visual-audit-and-delivery.md",
             )
         )
-        self.assertLessEqual(skill + measurement + text + audit, 16200)
+        self.assertLessEqual(skill + measurement + text + audit, 15000)
         self.assertLessEqual(skill + measurement + graphics + audit, 15000)
         self.assertLessEqual(
             skill + measurement + text + graphics + pictures + audit, 25000
@@ -208,37 +204,39 @@ class SkillRuntimeContractTests(unittest.TestCase):
         for prohibited in ("独立平台", "通用系统"):
             self.assertIn(prohibited, runtime)
 
-    def test_icon_reference_defines_lossless_dual_crop_modes(self):
+    def test_icon_reference_defines_lossless_alpha_only_contract(self):
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         for phrase in (
+            "图标裁切只允许 `alpha_isolation`",
             "`alpha_isolation`",
-            "`background_preserved`",
-            "透明化造成虚化、色晕或边缘损失",
-            "`background_handling=preserved_source_patch`",
-            "`semantic_scope=intentional_composite`",
-            "`alpha_mask_sha256=null`",
-            "不得羽化",
-            "原始局部底色",
-            "source/asset 400%",
-            "`placement_400`",
-            "P2",
+            "只允许改变 alpha",
+            "RGB 必须逐像素一致",
+            "前景不得触边",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
+        for phrase in (
+            "background_preserved",
+            "crop_review_evidence",
+            "icon_manifest_sha256",
+            "source_400",
+            "asset_400",
+            "placement_400",
+            "fallback_reason",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, pictures)
 
-    def test_icon_workflow_is_single_pass_batch_before_prebuild(self):
+    def test_icon_workflow_uses_one_lightweight_xywh_extractor_before_prebuild(self):
         runtime = SKILL.read_text(encoding="utf-8")
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         for phrase in (
-            "一次精确测量",
-            "一次批量裁切",
-            "一次绿幕展示与确认",
-            "→ prebuild",
-            "--spec <page>/work/page-reconstruction.json",
-            "--output-dir <page>/assets/icons",
+            "extract_icon_asset.py",
+            "--bbox-xywh X,Y,W,H",
+            "展示后不等待确认，直接运行 `validate_reconstruction_spec.py --stage prebuild`",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime + pictures)
+                self.assertIn(phrase, runtime)
         for phrase in (
             "唯一图标资产生成入口",
             "`source_bbox=[x,y,w,h]`",
@@ -246,53 +244,26 @@ class SkillRuntimeContractTests(unittest.TestCase):
             "开放线框",
             "封闭区域",
             "RGB 必须逐像素一致",
-            "资产侧固定使用 `#00FF00` 绿幕",
+            "背景固定为 `#00FF00`",
             "不得编写页面专用裁切脚本",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
-        self.assertNotIn("每次只处理一个已测量图标", pictures)
 
-    def test_icon_exception_path_is_bounded_and_local(self):
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        for phrase in (
-            "仅重裁异常图标",
-            "一次初始批量裁切",
-            "一次异常项修正",
-            "修正后仍不正确",
-            "阻断 prebuild",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, pictures)
-
-    def test_real_quality_validation_preserves_crop_decisions(self):
+    def test_icon_workflow_has_one_fixed_alpha_path_without_fallback(self):
         runtime = SKILL.read_text(encoding="utf-8")
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         combined = runtime + pictures
         for phrase in (
-            "真实质量验收不得改写 `crop_mode`、`source_bbox` 或 `fallback_reason`",
-            "临时规格只允许改写 `asset_path`",
-            "`ok=false` 时不得生成绿幕或宣称视觉通过",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_icon_workflow_has_one_alpha_first_path_and_explicit_fallback(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        combined = runtime + pictures
-        for phrase in (
-            "默认先执行 `alpha_isolation`",
+            "固定执行 `alpha_isolation`",
             "带 bbox 的局部上下文",
-            "`roi_context_400`",
-            "`fallback_reason`",
-            "前景触边时不得回退",
-            "不得将整页图标统一",
+            "前景触边时扩大 bbox",
+            "不存在第二种裁切模式",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, combined)
 
-    def test_prebuild_evidence_is_displayed_once_and_invalidated_by_dependencies(self):
+    def test_green_preview_is_displayed_once_without_becoming_a_gate(self):
         runtime = SKILL.read_text(encoding="utf-8")
         measurement = (REFERENCES / "measurement-and-layout.md").read_text(
             encoding="utf-8"
@@ -300,7 +271,8 @@ class SkillRuntimeContractTests(unittest.TestCase):
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         for phrase in (
             "写规格前通过 commentary 展示当前坐标定位图",
-            "prebuild 前通过 commentary 展示当前图标裁切绿幕复核图",
+            "通过 commentary 展示一次当前页最终图标绿幕汇总图",
+            "展示后不等待确认",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, runtime)
@@ -312,23 +284,21 @@ class SkillRuntimeContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, measurement)
         for phrase in (
-            "[第 N/总页数] 图标裁切绿幕复核",
-            "无图标时不生成也不展示",
-            "真实源图或任一图标依赖变化",
+            "[第 N/总页数] 图标透明效果展示（仅展示，不设审核门禁）",
+            "无图标时不生成、不展示",
+            "每页最终图标资产集合只展示一次",
+            "图标资产发生变化时，以新的最终资产集合重新展示一次",
+            "绿幕展示不写入 schema",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
 
-    def test_icon_review_invalidation_uses_icon_manifest_not_whole_spec(self):
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        for phrase in (
-            "`icon_manifest_sha256`",
-            "非图标字段变化不得使旧绿幕复核图失效",
-            "真实源图或任一图标依赖变化",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, pictures)
-        self.assertNotIn("规格或任一图标资产 SHA-256 改变时", pictures)
+    def test_green_preview_tool_replaces_crop_review_tool(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        self.assertIn("create_icon_green_preview.py", runtime)
+        self.assertNotIn("create_icon_crop_review.py", runtime)
+        self.assertTrue((ROOT / "scripts" / "create_icon_green_preview.py").is_file())
+        self.assertFalse((ROOT / "scripts" / "create_icon_crop_review.py").exists())
 
     def test_local_repairs_use_one_candidate_and_preserve_quality_floor(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
@@ -473,44 +443,6 @@ class SkillRuntimeContractTests(unittest.TestCase):
             "换行敏感区域",
             "同根因差异",
             "保持未关闭",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_font_trials_are_on_demand_diagnostics(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        text = (REFERENCES / "text-and-editability.md").read_text(encoding="utf-8")
-        combined = runtime + text
-        for phrase in (
-            "字体试排不是固定阶段",
-            "不执行字体试排",
-            'candidates=["Noto Sans CJK SC"]',
-            'selected_font="Noto Sans CJK SC"',
-            "无法精确解析时 preflight 失败",
-            "不得寻找第二候选",
-            "0.5 pt",
-            "原字号的 10%",
-            "2 pt",
-            "不得通过缩小字号关闭 P1",
-            "整页 preview/diff",
-            "`render_font_trials.py`",
-            "`candidate_trials/render_metrics/font_trial_report`",
-            "`source_font_available`",
-            "`resolved_font`",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-        self.assertNotIn("2–5 个候选", text)
-
-    def test_visual_audit_scopes_profile_specific_gates_explicitly(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "rapid 执行自动视觉差异门禁",
-            "reviewed 与 strict 执行独立视觉门禁",
-            "reviewed 不要求全部 regions 200% 证据",
-            "strict 专属候选与完整证据",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, audit)

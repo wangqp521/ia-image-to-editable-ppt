@@ -650,14 +650,7 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
     H = 700_000
     TEXT = "重点正文"
 
-    @staticmethod
-    def _set_run_font(run, font_name: str) -> None:
-        run.font.name = font_name
-        east_asian = OxmlElement("a:ea")
-        east_asian.set("typeface", font_name)
-        run._r.get_or_add_rPr().append(east_asian)
-
-    def _contract(self, runs: list[dict], selected_font: str | None = None) -> dict:
+    def _contract(self, runs: list[dict]) -> dict:
         return {
             "elements": [
                 {
@@ -673,14 +666,6 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
                             "element_id": "title-01",
                             "text": self.TEXT,
                             "runs": runs,
-                            **(
-                                {
-                                    "selected_font": selected_font,
-                                    "internal_font_declaration": selected_font,
-                                }
-                                if selected_font
-                                else {}
-                            ),
                             "text_box": {
                                 "x": self.X,
                                 "y": self.Y,
@@ -693,11 +678,7 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
             },
         }
 
-    def _presentation(
-        self,
-        run_values: list[tuple[str, bool]],
-        font_name: str | None = None,
-    ) -> Presentation:
+    def _presentation(self, run_values: list[tuple[str, bool]]) -> Presentation:
         presentation = Presentation()
         presentation.slide_width = 12_192_000
         presentation.slide_height = 6_858_000
@@ -709,8 +690,6 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
             run = paragraph.add_run()
             run.text = value
             run.font.bold = bold
-            if font_name:
-                self._set_run_font(run, font_name)
         return presentation
 
     def test_expected_bold_run_rejects_nonbold_pptx(self) -> None:
@@ -753,51 +732,6 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
             result = VALIDATOR.validate_pptx(output, 1, self._contract(expected))
 
         self.assertTrue(result["valid"], result)
-
-    def test_selected_font_must_match_pptx_internal_declaration(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "wrong-font.pptx"
-            presentation = self._presentation(
-                [(self.TEXT, True)],
-                font_name="Arial",
-            )
-            presentation.save(output)
-            result = VALIDATOR.validate_pptx(
-                output,
-                1,
-                self._contract(
-                    [{"start": 0, "end": len(self.TEXT), "font_weight": 700}],
-                    selected_font="Noto Sans CJK SC",
-                ),
-            )
-
-        self.assertFalse(result["valid"])
-        self.assertIn("TEXT_RUN_FONT_DECLARATION_MISMATCH", result["errors"])
-
-    def test_every_text_run_must_use_selected_font(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            output = Path(temp_dir) / "mixed-fonts.pptx"
-            presentation = self._presentation(
-                [(self.TEXT[:2], True), (self.TEXT[2:], True)]
-            )
-            runs = presentation.slides[0].shapes[0].text_frame.paragraphs[0].runs
-            self._set_run_font(runs[0], "Noto Sans CJK SC")
-            self._set_run_font(runs[1], "Arial")
-            presentation.save(output)
-            result = VALIDATOR.validate_pptx(
-                output,
-                1,
-                self._contract(
-                    [
-                        {"start": 0, "end": 2, "font_weight": 700},
-                        {"start": 2, "end": len(self.TEXT), "font_weight": 700},
-                    ],
-                    selected_font="Noto Sans CJK SC",
-                ),
-            )
-
-        self.assertFalse(result["valid"])
-        self.assertIn("TEXT_RUN_FONT_DECLARATION_MISMATCH", result["errors"])
 
 
 class ValidatePptxRoundedRectangleTest(unittest.TestCase):

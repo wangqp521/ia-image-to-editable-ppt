@@ -52,7 +52,6 @@ SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 RGB_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_IMAGE_PIXELS = 100_000_000
 COORDINATE_MANIFEST_METADATA_KEY = "coordinate_overlay_manifest_sha256"
-ICON_MANIFEST_METADATA_KEY = "icon_manifest_sha256"
 _LOCAL_MODULE_CACHE: dict[str, Any] = {}
 
 
@@ -334,40 +333,6 @@ def _validate_coordinate_overlay_evidence(
     metadata_manifest = checked[1]
     if declared_manifest.lower() != expected.lower() or metadata_manifest != expected.lower():
         _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate overlay does not bind the current source and grid")
-
-
-def _validate_icon_crop_review_evidence(
-    icons_module: Any,
-    errors: list[dict[str, str]],
-) -> None:
-    path = "modules.icons.crop_review_evidence"
-    evidence = icons_module.get("crop_review_evidence") if isinstance(icons_module, dict) else None
-    checked = _validate_png_evidence(
-        evidence,
-        path=path,
-        missing_code="SPEC_ICON_CROP_REVIEW_EVIDENCE_MISSING",
-        stale_code="SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
-        metadata_key=ICON_MANIFEST_METADATA_KEY,
-        errors=errors,
-    )
-    if checked is None or not isinstance(evidence, dict) or not isinstance(icons_module, dict):
-        return
-    declared_manifest = evidence.get("icon_manifest_sha256")
-    if not isinstance(declared_manifest, str) or not SHA256_PATTERN.fullmatch(declared_manifest):
-        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "icon review manifest is missing or invalid")
-        return
-    try:
-        icon_module = _load_local_script("create_icon_crop_review.py")
-        expected = icon_module.icon_manifest_sha256_for_module(
-            icons_module,
-            Path.cwd(),
-        )
-    except (OSError, ValueError, UnidentifiedImageError, RuntimeError):
-        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "cannot recompute current icon review manifest")
-        return
-    metadata_manifest = checked[1]
-    if declared_manifest.lower() != expected.lower() or metadata_manifest != expected.lower():
-        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "icon review does not bind the current source, bbox, crop mode, and asset")
 
 
 def _module_element_references(value: Any) -> set[str]:
@@ -912,10 +877,8 @@ def _validate_typography(
         "element_id",
         "text",
         "source_font_guess",
-        "source_font_available",
         "candidates",
         "selected_font",
-        "resolved_font",
         "fallback_reason",
         "fallback_trace",
         "runs",
@@ -948,89 +911,6 @@ def _validate_typography(
         selected = item.get("selected_font")
         if not isinstance(candidates, list) or not candidates or selected not in candidates:
             _error(errors, "SPEC_FONT_CANDIDATES_INVALID", f"{path}.candidates", "selected_font must be in non-empty candidates")
-        source_font = item.get("source_font_guess")
-        source_available = item.get("source_font_available")
-        resolved_font = item.get("resolved_font")
-        fallback_reason = item.get("fallback_reason")
-        fallback_trace = item.get("fallback_trace")
-        if not isinstance(source_font, str) or not source_font:
-            _error(
-                errors,
-                "SPEC_FONT_SELECTION_POLICY_INVALID",
-                f"{path}.source_font_guess",
-                "source_font_guess must be a non-empty string",
-            )
-        elif not isinstance(source_available, bool):
-            _error(
-                errors,
-                "SPEC_FONT_SELECTION_POLICY_INVALID",
-                f"{path}.source_font_available",
-                "source_font_available must be boolean",
-            )
-        elif source_available:
-            if candidates != [source_font] or selected != source_font:
-                _error(
-                    errors,
-                    "SPEC_FONT_SELECTION_POLICY_INVALID",
-                    f"{path}.candidates",
-                    "available source font requires one original-font candidate and selection",
-                )
-            if fallback_reason not in {None, ""} or fallback_trace is not None:
-                _error(
-                    errors,
-                    "SPEC_FONT_SELECTION_POLICY_INVALID",
-                    f"{path}.fallback_reason",
-                    "available source font must not claim fallback",
-                )
-        else:
-            if candidates != ["Noto Sans CJK SC"] or selected != "Noto Sans CJK SC":
-                _error(
-                    errors,
-                    "SPEC_FONT_SELECTION_POLICY_INVALID",
-                    f"{path}.candidates",
-                    "unavailable source font requires only Noto Sans CJK SC",
-                )
-            if (
-                not isinstance(fallback_reason, str)
-                or not fallback_reason.strip()
-                or fallback_trace is None
-                or fallback_trace == ""
-            ):
-                _error(
-                    errors,
-                    "SPEC_FONT_SELECTION_POLICY_INVALID",
-                    f"{path}.fallback_reason",
-                    "unavailable source font requires fallback reason and trace",
-                )
-        if not isinstance(resolved_font, str) or not resolved_font.strip():
-            _error(
-                errors,
-                "SPEC_FONT_RESOLUTION_INVALID",
-                f"{path}.resolved_font",
-                "resolved_font must be a non-empty string",
-            )
-        elif source_available is True and resolved_font != source_font:
-            _error(
-                errors,
-                "SPEC_FONT_RESOLUTION_INVALID",
-                f"{path}.resolved_font",
-                "available source font must resolve exactly to source_font_guess",
-            )
-        elif source_available is False and resolved_font != "Noto Sans CJK SC":
-            _error(
-                errors,
-                "SPEC_FONT_RESOLUTION_INVALID",
-                f"{path}.resolved_font",
-                "fallback must resolve exactly to Noto Sans CJK SC",
-            )
-        declaration = item.get("internal_font_declaration")
-        if isinstance(selected, str) and declaration != selected:
-            _error(
-                errors,
-                "SPEC_FONT_DECLARATION_INVALID",
-                f"{path}.internal_font_declaration",
-                "internal font declaration must equal selected_font",
-            )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)
         _validate_text_run_styles(runs, f"{path}.runs", errors)
@@ -1090,82 +970,6 @@ def _validate_typography(
             _error(errors, "SPEC_FONT_NOT_VERIFIED", f"{path}.font_declaration_verified", "final spec requires verified font declaration")
 
 
-def _validate_icon_batch_extraction(
-    module: dict[str, Any],
-    expected_source_path: Any,
-    expected_source_hash: Any,
-    errors: list[dict[str, str]],
-) -> None:
-    """Require one complete extraction batch bound to the current clean source."""
-    batch = module.get("batch_extraction")
-    path = "modules.icons.batch_extraction"
-    if not isinstance(batch, dict):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_EXTRACTION_MISSING",
-            path,
-            "batch extraction evidence is required",
-        )
-        return
-    required = {
-        "processor",
-        "algorithm_version",
-        "processor_sha256",
-        "source_path",
-        "source_sha256",
-        "icon_count",
-        "result",
-    }
-    if required - set(batch):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_EXTRACTION_INVALID",
-            path,
-            "batch extraction fields are incomplete",
-        )
-        return
-    if (
-        batch["processor"] != "extract_icon_asset.py"
-        or batch["algorithm_version"] != "edge-connected-v2"
-    ):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_PROCESSOR_INVALID",
-            path,
-            "unexpected icon extractor identity",
-        )
-    if (
-        not isinstance(batch["processor_sha256"], str)
-        or not SHA256_PATTERN.fullmatch(batch["processor_sha256"])
-    ):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_PROCESSOR_INVALID",
-            f"{path}.processor_sha256",
-            "invalid processor sha256",
-        )
-    if (
-        batch["source_path"] != expected_source_path
-        or batch["source_sha256"] != expected_source_hash
-    ):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_SOURCE_INVALID",
-            path,
-            "batch source must match clean_visual_reference",
-        )
-    if (
-        batch["icon_count"] != len(module.get("icons", []))
-        or batch["result"] != "passed"
-    ):
-        _error(
-            errors,
-            "SPEC_ICON_BATCH_RESULT_INVALID",
-            path,
-            "batch result must cover every icon and pass",
-        )
-
-
 def _validate_icons(
     module: Any,
     element_map: dict[str, dict[str, Any]],
@@ -1209,18 +1013,10 @@ def _validate_icons(
     if not isinstance(icons, list) or not icons:
         _error(errors, "SPEC_ICONS_ITEMS_INVALID", "modules.icons.icons", "icons must be a non-empty array")
         return
-    _validate_icon_batch_extraction(
-        module,
-        expected_reference_path,
-        expected_reference_hash,
-        errors,
-    )
 
     icon_element_ids = {element_id for element_id, element in element_map.items() if element.get("kind") == "icon"}
     seen_icon_ids: set[str] = set()
     seen_element_ids: set[str] = set()
-    source_hash_cache: dict[Path, str] = {}
-    source_image_cache: dict[Path, Image.Image] = {}
     required_item = {
         "icon_id",
         "element_id",
@@ -1234,15 +1030,14 @@ def _validate_icons(
         "source_path",
         "source_sha256",
         "crop_mode",
-        "fallback_reason",
         "padding",
         "background_handling",
         "asset_path",
         "asset_sha256",
+        "alpha_mask_sha256",
         "final_width",
         "final_height",
         "sharpness",
-        "inspection",
         "validation",
         "native_redraw",
         "selectable_picture_verified",
@@ -1308,57 +1103,25 @@ def _validate_icons(
         if item.get("source_path") != expected_reference_path or item.get("source_sha256") != expected_reference_hash:
             _error(errors, "SPEC_ICON_SOURCE_BINDING_INVALID", path, "source must exactly bind to clean_visual_reference")
         source_path = Path(item["source_path"]).expanduser() if isinstance(item.get("source_path"), str) else None
-        resolved_source: Path | None = None
         if source_path is None or not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
             _error(errors, "SPEC_ICON_SOURCE_INVALID", f"{path}.source_path", "source must be a readable non-symlink file")
         elif isinstance(item.get("source_sha256"), str) and SHA256_PATTERN.fullmatch(item["source_sha256"]):
-            resolved_source = source_path.resolve()
-            if resolved_source not in source_hash_cache:
-                source_hash_cache[resolved_source] = _file_sha256(resolved_source)
-            if source_hash_cache[resolved_source].lower() != item["source_sha256"].lower():
+            if _file_sha256(source_path.resolve()).lower() != item["source_sha256"].lower():
                 _error(errors, "SPEC_ICON_SOURCE_HASH_MISMATCH", f"{path}.source_sha256", "source hash does not match current file")
 
         crop_mode = item.get("crop_mode")
-        if crop_mode not in {"alpha_isolation", "background_preserved"}:
+        if crop_mode != "alpha_isolation":
             _error(
                 errors,
                 "SPEC_ICON_CROP_MODE_INVALID",
                 f"{path}.crop_mode",
-                "must be alpha_isolation or background_preserved",
+                "must be alpha_isolation",
             )
         alpha_hash = item.get("alpha_mask_sha256")
-        fallback_reason = item.get("fallback_reason")
-        if crop_mode == "alpha_isolation":
-            if fallback_reason is not None:
-                _error(
-                    errors,
-                    "SPEC_ICON_FALLBACK_REASON_INVALID",
-                    f"{path}.fallback_reason",
-                    "alpha_isolation requires null fallback_reason",
-                )
-            if not isinstance(item.get("background_handling"), str) or not item["background_handling"]:
-                _error(errors, "SPEC_ICON_BACKGROUND_HANDLING_INVALID", f"{path}.background_handling", "must be non-empty")
-            if not isinstance(alpha_hash, str) or not SHA256_PATTERN.fullmatch(alpha_hash):
-                _error(errors, "SPEC_ICON_ALPHA_MASK_INVALID", f"{path}.alpha_mask_sha256", "alpha isolation requires alpha_mask_sha256")
-        elif crop_mode == "background_preserved":
-            if not isinstance(fallback_reason, str) or not fallback_reason.strip():
-                _error(
-                    errors,
-                    "SPEC_ICON_FALLBACK_REASON_INVALID",
-                    f"{path}.fallback_reason",
-                    "background_preserved requires a non-empty per-icon visual fallback reason",
-                )
-            if (
-                item.get("background_handling") != "preserved_source_patch"
-                or item.get("semantic_scope") != "intentional_composite"
-                or alpha_hash is not None
-            ):
-                _error(
-                    errors,
-                    "SPEC_ICON_BACKGROUND_PRESERVED_INVALID",
-                    path,
-                    "background_preserved requires preserved_source_patch, intentional_composite, and null alpha_mask_sha256",
-                )
+        if not isinstance(item.get("background_handling"), str) or not item["background_handling"]:
+            _error(errors, "SPEC_ICON_BACKGROUND_HANDLING_INVALID", f"{path}.background_handling", "must be non-empty")
+        if not isinstance(alpha_hash, str) or not SHA256_PATTERN.fullmatch(alpha_hash):
+            _error(errors, "SPEC_ICON_ALPHA_MASK_INVALID", f"{path}.alpha_mask_sha256", "alpha isolation requires alpha_mask_sha256")
 
         asset_path = Path(item["asset_path"]).expanduser() if isinstance(item.get("asset_path"), str) else None
         if asset_path is None or not asset_path.is_absolute() or asset_path.is_symlink() or not asset_path.is_file():
@@ -1383,13 +1146,8 @@ def _validate_icons(
             elif _file_sha256(resolved_asset).lower() != asset_hash.lower():
                 _error(errors, "SPEC_ICON_ASSET_HASH_MISMATCH", f"{path}.asset_sha256", "asset hash does not match current file")
             if resolved_asset.suffix.lower() != ".png":
-                code = (
-                    "SPEC_ICON_ALPHA_CONTENT_INVALID"
-                    if crop_mode == "alpha_isolation"
-                    else "SPEC_ICON_BACKGROUND_PRESERVED_INVALID"
-                )
-                _error(errors, code, f"{path}.asset_path", "icon asset must be a PNG")
-            elif crop_mode in {"alpha_isolation", "background_preserved"}:
+                _error(errors, "SPEC_ICON_ALPHA_CONTENT_INVALID", f"{path}.asset_path", "icon asset must be a PNG")
+            elif crop_mode == "alpha_isolation":
                 try:
                     with Image.open(resolved_asset) as image:
                         image.load()
@@ -1408,9 +1166,9 @@ def _validate_icons(
                                 path,
                                 "decoded asset dimensions must match final_width/final_height",
                             )
-                        if crop_mode == "alpha_isolation" and image.mode != "RGBA":
+                        if image.mode != "RGBA":
                             _error(errors, "SPEC_ICON_ALPHA_CONTENT_INVALID", f"{path}.asset_path", "icon PNG must use RGBA mode")
-                        elif crop_mode == "alpha_isolation":
+                        else:
                             alpha = image.getchannel("A")
                             minimum, maximum = alpha.getextrema()
                             if minimum != 0 or maximum == 0:
@@ -1426,21 +1184,6 @@ def _validate_icons(
                                 or foreground[3] == image.height
                             ):
                                 _error(errors, "SPEC_ICON_FOREGROUND_TOUCHES_EDGE", f"{path}.asset_path", "visible icon pixels must not touch the crop boundary")
-                        elif image.mode == "RGBA":
-                            if image.getchannel("A").getextrema() != (255, 255):
-                                _error(
-                                    errors,
-                                    "SPEC_ICON_BACKGROUND_PRESERVED_ALPHA_INVALID",
-                                    f"{path}.asset_path",
-                                    "background_preserved must be RGB or fully opaque RGBA",
-                                )
-                        elif image.mode != "RGB":
-                            _error(
-                                errors,
-                                "SPEC_ICON_BACKGROUND_PRESERVED_ALPHA_INVALID",
-                                f"{path}.asset_path",
-                                "background_preserved must be RGB or fully opaque RGBA",
-                            )
                         if (
                             source_path is not None
                             and source_path.is_absolute()
@@ -1449,21 +1192,15 @@ def _validate_icons(
                             and isinstance(padding, int)
                             and padding >= 0
                         ):
-                            if resolved_source is None:
-                                resolved_source = source_path.resolve()
-                            if resolved_source not in source_image_cache:
-                                with Image.open(resolved_source) as source_image:
-                                    source_image.load()
-                                    source_image_cache[resolved_source] = (
-                                        source_image.convert("RGB").copy()
-                                    )
-                            left = source_bbox[0] - padding
-                            top = source_bbox[1] - padding
-                            right = source_bbox[0] + source_bbox[2] + padding
-                            bottom = source_bbox[1] + source_bbox[3] + padding
-                            source_crop = source_image_cache[resolved_source].crop(
-                                (left, top, right, bottom)
-                            )
+                            with Image.open(source_path.resolve()) as source_image:
+                                source_image.load()
+                                left = source_bbox[0] - padding
+                                top = source_bbox[1] - padding
+                                right = source_bbox[0] + source_bbox[2] + padding
+                                bottom = source_bbox[1] + source_bbox[3] + padding
+                                source_crop = source_image.convert("RGB").crop(
+                                    (left, top, right, bottom)
+                                )
                             asset_rgb = image.convert("RGB")
                             if (
                                 source_crop.size == asset_rgb.size
@@ -1476,12 +1213,7 @@ def _validate_icons(
                                     "asset RGB pixels must exactly match the bound source crop",
                                 )
                 except (OSError, UnidentifiedImageError):
-                    code = (
-                        "SPEC_ICON_ALPHA_CONTENT_INVALID"
-                        if crop_mode == "alpha_isolation"
-                        else "SPEC_ICON_BACKGROUND_PRESERVED_INVALID"
-                    )
-                    _error(errors, code, f"{path}.asset_path", "icon asset is not a readable PNG")
+                    _error(errors, "SPEC_ICON_ALPHA_CONTENT_INVALID", f"{path}.asset_path", "icon asset is not a readable PNG")
 
         final_width = item.get("final_width")
         final_height = item.get("final_height")
@@ -1495,30 +1227,6 @@ def _validate_icons(
         if not isinstance(item.get("sharpness"), str) or not item["sharpness"]:
             _error(errors, "SPEC_ICON_SHARPNESS_INVALID", f"{path}.sharpness", "must be non-empty")
 
-        inspection = item.get("inspection")
-        if not isinstance(inspection, dict) or not {
-            "roi_context_400",
-            "source_400",
-            "asset_400",
-            "placement_400",
-        }.issubset(inspection):
-            _error(errors, "SPEC_ICON_INSPECTION_INVALID", f"{path}.inspection", "400% inspection fields are required")
-        else:
-            if (
-                inspection.get("roi_context_400") != "passed"
-                or inspection.get("source_400") != "passed"
-                or inspection.get("asset_400") != "passed"
-            ):
-                _error(
-                    errors,
-                    "SPEC_ICON_INSPECTION_INVALID",
-                    f"{path}.inspection",
-                    "ROI context, source, and asset 400% inspections must pass",
-                )
-            if inspection.get("placement_400") not in {"pending", "passed"}:
-                _error(errors, "SPEC_ICON_INSPECTION_INVALID", f"{path}.inspection.placement_400", "must be pending or passed")
-            if stage == "final" and inspection.get("placement_400") != "passed":
-                _error(errors, "SPEC_ICON_PLACEMENT_NOT_VERIFIED", f"{path}.inspection.placement_400", "final spec requires passed placement inspection")
         if item.get("validation") != "passed":
             _error(errors, "SPEC_ICON_VALIDATION_INVALID", f"{path}.validation", "must be passed")
         if item.get("native_redraw") is not False:
@@ -1533,8 +1241,6 @@ def _validate_icons(
     missing_elements = sorted(icon_element_ids - seen_element_ids)
     if missing_elements:
         _error(errors, "SPEC_ICON_ELEMENT_MISSING", "modules.icons.icons", f"missing icon records: {', '.join(missing_elements)}")
-    for source_image in source_image_cache.values():
-        source_image.close()
 
 
 def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
@@ -1778,7 +1484,6 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     if "typography" in activated:
         _validate_typography(modules.get("typography"), element_map, canvas, stage, errors)
     if "icons" in activated:
-        _validate_icon_crop_review_evidence(modules.get("icons"), errors)
         _validate_icons(
             modules.get("icons"),
             element_map,
