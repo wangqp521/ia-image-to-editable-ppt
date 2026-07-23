@@ -128,7 +128,6 @@ def valid_spec() -> dict:
                         "element_id": "title",
                         "text": text,
                         "source_font_guess": "Noto Sans CJK SC",
-                        "candidates": ["Noto Sans CJK SC"],
                         "selected_font": "Noto Sans CJK SC",
                         "fallback_reason": None,
                         "fallback_trace": None,
@@ -868,80 +867,53 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
 
         self.assertTrue(result["valid"], result)
 
-    def test_present_font_trials_require_traceable_report(self):
+    def test_typography_does_not_require_candidates(self):
         candidate = valid_spec()
         item = candidate["modules"]["typography"]["items"][0]
-        item["candidate_trials"] = [
-            {
-                "font": "Noto Sans CJK SC",
-                "font_size": 24,
-                "width": 6096000,
-                "height": 457200,
-                "lines": 1,
-                "score": 0,
-            }
-        ]
-        item["render_metrics"] = {
-            "width": 6096000,
-            "height": 457200,
-            "baseline": 342900,
-            "lines": 1,
-            "wrap_points": [],
-            "width_delta": 0,
-            "height_delta": 0,
-        }
+        self.assertNotIn("candidates", item)
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertTrue(result["valid"], result)
+
+    def test_removed_font_trial_fields_are_rejected(self):
+        candidate = valid_spec()
+        item = candidate["modules"]["typography"]["items"][0]
+        item["candidate_trials"] = [{"font": "Noto Sans CJK SC"}]
 
         result = MODULE.validate_spec(candidate, stage="prebuild")
 
         self.assertIn(
-            "SPEC_FONT_TRIAL_EVIDENCE_REQUIRED",
+            "SPEC_REMOVED_FONT_WORKFLOW_FIELD",
             {entry["code"] for entry in result["errors"]},
         )
 
-    def test_traceable_font_trial_report_is_accepted(self):
+    def test_unknown_source_font_requires_noto_sans(self):
         candidate = valid_spec()
         item = candidate["modules"]["typography"]["items"][0]
-        item["candidate_trials"] = [
-            {
-                "font": "Noto Sans CJK SC",
-                "font_size": 24,
-                "width": 6096000,
-                "height": 457200,
-                "lines": 1,
-                "score": 0,
-            }
-        ]
-        item["render_metrics"] = {
-            "width": 6096000,
-            "height": 457200,
-            "baseline": 342900,
-            "lines": 1,
-            "wrap_points": [],
-            "width_delta": 0,
-            "height_delta": 0,
-        }
-        with tempfile.TemporaryDirectory() as directory:
-            report_payload = {
-                "trials": [
-                    {
-                        "requested_font": "Noto Sans CJK SC",
-                        "resolved_fonts": ["ABCDEE+NotoSansCJKsc-Regular"],
-                        "size_pt": 24,
-                        "box_in": [6096000 / 914400, 457200 / 914400],
-                        "line_count": 1,
-                        "clipped": False,
-                    }
-                ]
-            }
-            report = self._artifact(
-                Path(directory) / "font-trials.json",
-                json.dumps(report_payload).encode("utf-8"),
-            )
-            item["font_trial_report"] = report
+        item["source_font_guess"] = "unknown"
+        item["selected_font"] = "STKaiti"
 
-            result = MODULE.validate_spec(candidate, stage="prebuild")
+        result = MODULE.validate_spec(candidate, stage="prebuild")
 
-        self.assertTrue(result["valid"], result)
+        self.assertIn(
+            "SPEC_UNCERTAIN_FONT_FALLBACK_INVALID",
+            {entry["code"] for entry in result["errors"]},
+        )
+
+    def test_unknown_source_font_requires_fallback_reason(self):
+        candidate = valid_spec()
+        item = candidate["modules"]["typography"]["items"][0]
+        item["source_font_guess"] = "unknown"
+        item["selected_font"] = "Noto Sans CJK SC"
+        item["fallback_reason"] = None
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_UNCERTAIN_FONT_FALLBACK_INVALID",
+            {entry["code"] for entry in result["errors"]},
+        )
 
     def test_typography_requires_emu(self):
         candidate = valid_spec()

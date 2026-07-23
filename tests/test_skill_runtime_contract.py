@@ -130,6 +130,34 @@ class SkillRuntimeContractTests(unittest.TestCase):
         self.assertIn("旧 schema v2 终态规格", runtime)
         self.assertIn("重建 visual gate", runtime)
 
+    def test_single_font_fallback_replaces_candidate_trials(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        typography = (REFERENCES / "text-and-editability.md").read_text(
+            encoding="utf-8"
+        )
+        combined = runtime + typography
+        for phrase in (
+            "`Noto Sans CJK SC`",
+            "`NotoSansCJKsc-Regular`",
+            "项目级只验证一次",
+            "每个最终 PDF",
+            "`pdffonts`",
+            "特殊字符",
+            "意外 fallback",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+        for removed in (
+            "candidates",
+            "candidate_trials",
+            "render_metrics",
+            "font_trial_report",
+            "render_font_trials.py",
+            "2–5 个候选",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, combined)
+
     def test_independent_reviewer_contract_is_explicit(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
             encoding="utf-8"

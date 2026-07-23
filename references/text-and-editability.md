@@ -4,7 +4,7 @@
 
 内容逐字服从 `content_reference`。一个来源文本容器对应一个 `TextBox/TextFrame`；自然段、同源列表和混合样式不得按视觉行或条目拆框。视觉自动折行留在原 Paragraph，不写硬回车。只有来源本来是独立对象才拆框。
 
-`modules.typography.items[]` 用唯一 `element_id` 绑定文字 element，保存 `text/source_font_guess/candidates/selected_font/fallback_reason/fallback_trace/runs/paragraphs/text_box/internal_font_declaration/font_declaration_verified`。`runs` 与 `paragraphs` 均以连续 `start/end` 无空洞覆盖全文；`text_box` 保存 EMU x/y/w/h、四边 margin、水平/垂直对齐、wrap、overflow、soft/paragraph breaks。生成前不写最终 OOXML ID。
+`modules.typography.items[]` 用唯一 `element_id` 绑定文字 element，保存 `text/source_font_guess/selected_font/fallback_reason/fallback_trace/runs/paragraphs/text_box/internal_font_declaration/font_declaration_verified`。每项只有一个 `selected_font`；`runs`、`paragraphs` 连续覆盖全文；`text_box` 保存 EMU bbox、margin、对齐、wrap、overflow 和 breaks。生成前不写最终 OOXML ID。
 
 ## Text Run 与原生列表
 
@@ -14,15 +14,17 @@
 
 ## 字体与字号
 
-标题、正文、表头、矩阵小字、说明和页码分别判断，不把单一字体结论套全页。先看字形骨架、宽高比和视觉重量，再核对本机真实字体；建立 2–5 个候选，以同文字、同 box、同段落结构试排。判断顺序：行数/换行点 → 字面宽高 → 基线 → 视觉重量 → 相邻留白。字号可用小数；OCR 高度和层级名称只作初值。
+各类文字分别判断。来源明确时写实际 family；未知时固定 `source_font_guess=unknown`、`selected_font=Noto Sans CJK SC`、`fallback_reason=source_font_uncertain`。PPTX family 是 `Noto Sans CJK SC`；PDF 预期 resolved name 是 `NotoSansCJKsc-Regular`，可带六位大写字母加 `+` 的子集前缀。不得混写两种名称。
 
-普通低风险文字可省略 `candidate_trials/render_metrics/font_trial_report`。标题、fallback、密集小字、换行敏感或判断不稳时必须运行 `render_font_trials.py`；三字段同时存在并绑定真实 `font-trials.json`，不得编造数值。原字体不可用时记录候选、替代理由、实际 resolved font 和剩余 P2；未真实渲染不得声称已验证。
+不做字体比较或独立试排。首次未知字体 preview 用 `pdffonts` 确认解析结果；同一 LibreOffice、fontconfig 和字体文件 SHA-256 下项目级只验证一次，并在 `fallback_trace` 记录请求/实际字体、PDF SHA-256 和运行身份。身份变化即重验。
+
+每个最终 PDF 均用 `pdffonts` 检查字体清单；意外 fallback、缺字或额外字体须先修复或披露。仅特殊字符、生僻字、公式、多语言、缺字、意外 fallback、换行、溢出或截断触发局部调查；不逐框验证 resolved font。
 
 macOS preview 显式使用 `FONTCONFIG_FILE="$PWD/assets/fontconfig-macos.conf"`。该文件只增加字体发现路径，不保证字体或中文字形存在。renderer fallback 与 PPTX 内部声明分开记录；不得只因 LibreOffice 错误 fallback 就擅自改变目标字体。
 
-调整顺序：字体 → 字号 → box 宽高 → margin → 字间距 → 行/段间距。不得优先硬换行、拆框、过度缩字、改写内容或把可编辑文字图片化。表格/矩阵文字另查 cell margin、行高、基线、水平/垂直对齐和边线距离，不得为防压线缩小整表字号。
+调整顺序：字体 → 字号 → box → margin → 字距 → 行/段距。不得优先硬换行、拆框、过度缩字、改写或图片化文字。表格/矩阵另查 cell margin、行高、基线、对齐和边线距离。
 
-文字修复先用一个代表性高风险 TextBox 验证字号、行距、hard/soft break 和 margin，通过后才把同根因修复用于同组对象，禁止未经试验进行全页统一换行批改。candidate 只重渲染受影响文本框及相邻段落边界，检查孤字、单字换行、溢出、截断和 Text Run；出现新回退即拒绝。进入 reviewer 前仍生成全页证据。
+文字修复先验证一个代表性高风险 TextBox，再应用于同组；不得全页盲改换行。candidate 只重渲染受影响框及相邻边界，检查孤字、溢出、截断和 Text Run；出现回退即拒绝。reviewer 前仍生成全页证据。
 
 ## 特殊文本
 

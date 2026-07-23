@@ -595,88 +595,6 @@ def _rerun_pptx_validator(
     return result
 
 
-def _validate_font_trial_report(
-    artifact: tuple[str, str] | None,
-    item: dict[str, Any],
-    errors: list[dict[str, str]],
-    path: str,
-) -> None:
-    if artifact is None:
-        return
-    report_path = Path(artifact[0])
-    try:
-        payload = json.loads(report_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        _error(
-            errors,
-            "SPEC_FONT_TRIAL_REPORT_INVALID",
-            f"{path}.font_trial_report",
-            "font trial report must contain valid JSON",
-        )
-        return
-    trials = payload.get("trials") if isinstance(payload, dict) else None
-    if not isinstance(trials, list) or not trials:
-        _error(
-            errors,
-            "SPEC_FONT_TRIAL_REPORT_INVALID",
-            f"{path}.font_trial_report",
-            "font trial report must contain a non-empty trials array",
-        )
-        return
-
-    selected_font = item.get("selected_font")
-    run_sizes = {
-        float(run["font_size"])
-        for run in item.get("runs", [])
-        if isinstance(run, dict) and _is_number(run.get("font_size"))
-    }
-    text_box = item.get("text_box")
-    expected_box = None
-    if isinstance(text_box, dict) and all(
-        _is_number(text_box.get(key)) for key in ("w", "h")
-    ):
-        expected_box = (text_box["w"] / 914400, text_box["h"] / 914400)
-    expected_lines = None
-    metrics = item.get("render_metrics")
-    if isinstance(metrics, dict) and isinstance(metrics.get("lines"), int):
-        expected_lines = metrics["lines"]
-
-    def matches(trial: Any) -> bool:
-        if not isinstance(trial, dict):
-            return False
-        if trial.get("requested_font") != selected_font:
-            return False
-        if not _is_number(trial.get("size_pt")) or float(trial["size_pt"]) not in run_sizes:
-            return False
-        if not isinstance(trial.get("resolved_fonts"), list) or not trial["resolved_fonts"]:
-            return False
-        if trial.get("clipped") is not False:
-            return False
-        if expected_lines is not None and trial.get("line_count") != expected_lines:
-            return False
-        box_in = trial.get("box_in")
-        if expected_box is not None:
-            if not (
-                isinstance(box_in, list)
-                and len(box_in) == 2
-                and all(_is_number(value) for value in box_in)
-                and all(
-                    abs(float(actual) - expected) <= 0.02
-                    for actual, expected in zip(box_in, expected_box)
-                )
-            ):
-                return False
-        return True
-
-    if not any(matches(trial) for trial in trials):
-        _error(
-            errors,
-            "SPEC_FONT_TRIAL_REPORT_MISMATCH",
-            f"{path}.font_trial_report",
-            "no real trial matches selected font, run size, box, line count and unclipped state",
-        )
-
-
 def _validate_coverage(
     items: Any,
     text: str,
@@ -877,7 +795,6 @@ def _validate_typography(
         "element_id",
         "text",
         "source_font_guess",
-        "candidates",
         "selected_font",
         "fallback_reason",
         "fallback_trace",
@@ -907,10 +824,38 @@ def _validate_typography(
         if not isinstance(text, str) or not text:
             _error(errors, "SPEC_TYPOGRAPHY_TEXT_INVALID", f"{path}.text", "text must be non-empty")
             continue
-        candidates = item.get("candidates")
+        removed_fields = {
+            "candidates",
+            "candidate_trials",
+            "render_metrics",
+            "font_trial_report",
+        }
+        for field in sorted(removed_fields.intersection(item)):
+            _error(
+                errors,
+                "SPEC_REMOVED_FONT_WORKFLOW_FIELD",
+                f"{path}.{field}",
+                f"{field} was removed from the single-font typography workflow",
+            )
+        source_font_guess = item.get("source_font_guess")
         selected = item.get("selected_font")
-        if not isinstance(candidates, list) or not candidates or selected not in candidates:
-            _error(errors, "SPEC_FONT_CANDIDATES_INVALID", f"{path}.candidates", "selected_font must be in non-empty candidates")
+        if not isinstance(selected, str) or not selected.strip():
+            _error(
+                errors,
+                "SPEC_SELECTED_FONT_INVALID",
+                f"{path}.selected_font",
+                "selected_font must be a non-empty font family",
+            )
+        if source_font_guess == "unknown" and (
+            selected != "Noto Sans CJK SC"
+            or item.get("fallback_reason") != "source_font_uncertain"
+        ):
+            _error(
+                errors,
+                "SPEC_UNCERTAIN_FONT_FALLBACK_INVALID",
+                path,
+                "unknown source fonts require selected_font=Noto Sans CJK SC and fallback_reason=source_font_uncertain",
+            )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)
         _validate_text_run_styles(runs, f"{path}.runs", errors)
@@ -934,36 +879,6 @@ def _validate_typography(
             if _valid_bbox(expected) and _valid_bbox(actual) and _valid_size(slide_size):
                 if any(abs(a - e) / slide_size[index % 2] > 0.01 for index, (a, e) in enumerate(zip(actual, expected))):
                     _error(errors, "SPEC_TEXT_BOX_MAPPING_INVALID", f"{path}.text_box", "text_box must match its element EMU bbox")
-        trials = item.get("candidate_trials")
-        metrics = item.get("render_metrics")
-        report_artifact = item.get("font_trial_report")
-        if trials is not None or metrics is not None or report_artifact is not None:
-            if not isinstance(trials, list) or not trials or not isinstance(metrics, dict):
-                _error(
-                    errors,
-                    "SPEC_FONT_TRIALS_INVALID",
-                    path,
-                    "candidate_trials and render_metrics must appear together",
-                )
-            if report_artifact is None:
-                _error(
-                    errors,
-                    "SPEC_FONT_TRIAL_EVIDENCE_REQUIRED",
-                    f"{path}.font_trial_report",
-                    "present font trials require a traceable font trial report",
-                )
-            else:
-                font_trial_identity = _validate_gate_artifact(
-                    report_artifact,
-                    f"{path}.font_trial_report",
-                    errors,
-                )
-                _validate_font_trial_report(
-                    font_trial_identity,
-                    item,
-                    errors,
-                    path,
-                )
         if not isinstance(item.get("font_declaration_verified"), bool):
             _error(errors, "SPEC_FONT_VERIFICATION_INVALID", f"{path}.font_declaration_verified", "must be boolean")
         elif stage == "final" and not item["font_declaration_verified"]:
