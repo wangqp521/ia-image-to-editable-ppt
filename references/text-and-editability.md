@@ -14,9 +14,11 @@
 
 ## 字体与字号
 
-标题、正文、表头、矩阵小字、说明和页码分别判断，不把单一字体结论套全页。先看字形骨架、宽高比和视觉重量，再核对本机真实字体；建立 2–5 个候选，以同文字、同 box、同段落结构试排。判断顺序：行数/换行点 → 字面宽高 → 基线 → 视觉重量 → 相邻留白。字号可用小数；OCR 高度和层级名称只作初值。
+标题、正文、表头、矩阵小字、说明和页码分别判断，不把单一字体结论套全页。普通低风险文字默认不执行字体试排，直接进入 PPTX 构建、结构校验和整页 preview/diff；仍须核对本机真实字体、内部字体声明和实际 resolved font。
 
-普通低风险文字可省略 `candidate_trials/render_metrics/font_trial_report`。标题、fallback、密集小字、换行敏感或判断不稳时必须运行 `render_font_trials.py`；三字段同时存在并绑定真实 `font-trials.json`，不得编造数值。原字体不可用时记录候选、替代理由、实际 resolved font 和剩余 P2；未真实渲染不得声称已验证。
+字体试排只作为高风险文字诊断工具。原字体不可用或发生 renderer fallback、标题或艺术感文字、密集小字、窄文本框、换行敏感、孤字、单字换行、溢出、截断、明显基线差异、字体相关 P1 无法直接收敛，或字体/字号/视觉重量判断不稳时，建立 2–5 个候选，以同文字、同 box、同段落结构运行 `render_font_trials.py`。标题若目标字体已确认可用，且字宽与换行在当前整页 preview/diff 中完全匹配，可不单独生成字体试排证据。判断顺序：行数/换行点 → 字面宽高 → 基线 → 视觉重量 → 相邻留白。字号可用小数；OCR 高度和层级名称只作初值。
+
+未触发试排时省略 `candidate_trials/render_metrics/font_trial_report`。触发后，三字段同时存在并绑定真实 `font-trials.json`，不得编造数值。原字体不可用时记录候选、替代理由、实际 resolved font 和剩余 P2；未真实渲染不得声称已完成字体试排验证。
 
 macOS preview 显式使用 `FONTCONFIG_FILE="$PWD/assets/fontconfig-macos.conf"`。该文件只增加字体发现路径，不保证字体或中文字形存在。renderer fallback 与 PPTX 内部声明分开记录；不得只因 LibreOffice 错误 fallback 就擅自改变目标字体。
 

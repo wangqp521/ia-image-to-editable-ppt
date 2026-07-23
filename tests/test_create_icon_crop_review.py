@@ -20,7 +20,28 @@ def sha256(path: Path) -> str:
 
 
 class CreateIconCropReviewTest(unittest.TestCase):
+    def _ensure_batch_extraction(self, spec_path: Path) -> None:
+        spec = json.loads(spec_path.read_text(encoding="utf-8"))
+        module = spec.get("modules", {}).get("icons")
+        if not isinstance(module, dict) or "batch_extraction" in module:
+            return
+        icons = module.get("icons")
+        if not isinstance(icons, list) or not icons:
+            return
+        source_path = Path(icons[0]["source_path"])
+        module["batch_extraction"] = {
+            "processor": "extract_icon_asset.py",
+            "algorithm_version": "edge-connected-v2",
+            "processor_sha256": "1" * 64,
+            "source_path": str(source_path),
+            "source_sha256": sha256(source_path),
+            "icon_count": len(icons),
+            "result": "passed",
+        }
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
     def _run(self, spec_path: Path, output: Path) -> subprocess.CompletedProcess[str]:
+        self._ensure_batch_extraction(spec_path)
         return subprocess.run(
             [sys.executable, str(SCRIPT_PATH), str(spec_path), "--output", str(output)],
             check=False,
@@ -194,6 +215,28 @@ class CreateIconCropReviewTest(unittest.TestCase):
                 }
             self.assertIn((20, 40, 180), colors, "context must show pixels outside the ROI")
             self.assertIn((255, 0, 255), colors, "context must draw the ROI bbox")
+
+    def test_context_is_true_400_percent_and_labels_bind_crop_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec_path, _, _ = self._write_alpha_case(root)
+            output = root / "review.png"
+
+            completed = self._run(spec_path, output)
+
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["context_scale"], 4)
+            self.assertEqual(
+                result["labels"],
+                [
+                    {
+                        "icon_id": "first",
+                        "crop_mode": "alpha_isolation",
+                        "source_bbox": [2, 2, 8, 8],
+                    }
+                ],
+            )
 
     def test_background_preserved_also_shows_asset_on_green_canvas(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -411,6 +454,28 @@ class CreateIconCropReviewTest(unittest.TestCase):
             second_result = json.loads(second.stdout)
             self.assertIn("reused", second_result)
             self.assertIn("icon_manifest_sha256", second_result)
+            self.assertFalse(second_result["reused"])
+            self.assertNotEqual(
+                first_result["icon_manifest_sha256"],
+                second_result["icon_manifest_sha256"],
+            )
+
+    def test_processor_hash_change_invalidates_existing_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec_path, _, _ = self._write_alpha_case(root)
+            output = root / "review.png"
+            first = self._run(spec_path, output)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            first_result = json.loads(first.stdout)
+
+            spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            spec["modules"]["icons"]["batch_extraction"]["processor_sha256"] = "2" * 64
+            spec_path.write_text(json.dumps(spec), encoding="utf-8")
+            second = self._run(spec_path, output)
+
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            second_result = json.loads(second.stdout)
             self.assertFalse(second_result["reused"])
             self.assertNotEqual(
                 first_result["icon_manifest_sha256"],

@@ -17,12 +17,12 @@ from PIL.PngImagePlugin import PngInfo
 GREEN = (0, 255, 0)
 ROI_COLOR = (255, 0, 255)
 SCALE = 4
-CONTEXT_SCALE = 2
+CONTEXT_SCALE = 4
 GAP = 16
 MARGIN = 16
 LABEL_HEIGHT = 18
 RESAMPLING = getattr(Image, "Resampling", Image).NEAREST
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 MANIFEST_METADATA_KEY = "icon_manifest_sha256"
 
 
@@ -77,7 +77,10 @@ def _source_descriptor(
     }
 
 
-def _icon_manifest_sha256(entries: list[dict[str, Any]]) -> str:
+def _icon_manifest_sha256(
+    entries: list[dict[str, Any]],
+    batch_extraction: dict[str, Any],
+) -> str:
     payload = {
         "version": MANIFEST_VERSION,
         "renderer": {
@@ -90,6 +93,7 @@ def _icon_manifest_sha256(entries: list[dict[str, Any]]) -> str:
             "label_height": LABEL_HEIGHT,
             "resampling": "nearest",
         },
+        "batch_extraction": batch_extraction,
         "icons": entries,
     }
     encoded = json.dumps(
@@ -122,6 +126,9 @@ def icon_manifest_sha256_for_module(
     icons = module.get("icons") if isinstance(module, dict) else None
     if not isinstance(icons, list) or not icons:
         raise ValueError("modules.icons.icons must contain at least one icon")
+    batch_extraction = module.get("batch_extraction")
+    if not isinstance(batch_extraction, dict):
+        raise ValueError("modules.icons.batch_extraction must be an object")
     base_dir = Path(base_dir).expanduser().resolve()
     entries: list[dict[str, Any]] = []
     for index, item in enumerate(icons):
@@ -144,7 +151,7 @@ def icon_manifest_sha256_for_module(
                 "alpha_mask_sha256": item.get("alpha_mask_sha256"),
             }
         )
-    return _icon_manifest_sha256(entries)
+    return _icon_manifest_sha256(entries, batch_extraction)
 
 
 def _load_source_evidence(
@@ -268,6 +275,8 @@ def _source_and_asset_preview(
     asset: Image.Image,
     index: int,
     icon_id: str,
+    crop_mode: str,
+    source_bbox: list[int],
 ) -> Image.Image:
     if source.size != asset.size:
         raise ValueError(f"icon {index + 1} asset size must match source crop")
@@ -277,7 +286,10 @@ def _source_and_asset_preview(
     source_scaled = source.resize(
         (source.width * SCALE, source.height * SCALE), RESAMPLING
     )
-    context_panel = _labeled_panel(context_scaled, f"{icon_id} | context+bbox")
+    context_panel = _labeled_panel(
+        context_scaled,
+        f"{icon_id} | {crop_mode} | bbox={source_bbox}",
+    )
     source_panel = _labeled_panel(source_scaled, "source crop")
     asset_panel = _labeled_panel(_asset_on_green(asset), "asset on green")
     preview = Image.new(
@@ -301,9 +313,13 @@ def create_icon_crop_review(spec_path: Path, output_path: Path) -> dict[str, Any
     spec_path = Path(spec_path).expanduser().resolve()
     output_path = Path(output_path).expanduser().resolve()
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
-    icons = spec.get("modules", {}).get("icons", {}).get("icons")
+    icons_module = spec.get("modules", {}).get("icons", {})
+    icons = icons_module.get("icons") if isinstance(icons_module, dict) else None
     if not isinstance(icons, list) or not icons:
         raise ValueError("modules.icons.icons must contain at least one icon")
+    batch_extraction = icons_module.get("batch_extraction")
+    if not isinstance(batch_extraction, dict):
+        raise ValueError("modules.icons.batch_extraction must be an object")
 
     prepared: list[dict[str, Any]] = []
     evidence_assets: list[dict[str, str]] = []
@@ -347,7 +363,10 @@ def create_icon_crop_review(spec_path: Path, output_path: Path) -> dict[str, Any
         else:
             background_preserved_icon_count += 1
 
-    manifest_sha256 = _icon_manifest_sha256(manifest_entries)
+    manifest_sha256 = _icon_manifest_sha256(
+        manifest_entries,
+        batch_extraction,
+    )
     reused = _cached_manifest_sha256(output_path) == manifest_sha256
     if not reused:
         previews: list[Image.Image] = []
@@ -362,6 +381,8 @@ def create_icon_crop_review(spec_path: Path, output_path: Path) -> dict[str, Any
                     entry["asset"],
                     entry["index"],
                     entry["icon_id"],
+                    entry["item"]["crop_mode"],
+                    entry["item"]["source_bbox"],
                 )
             )
 
@@ -402,6 +423,14 @@ def create_icon_crop_review(spec_path: Path, output_path: Path) -> dict[str, Any
         "roi_outline": "#FF00FF",
         "panels": ["context_with_bbox", "source_crop", "asset_on_green"],
         "icon_ids": icon_ids,
+        "labels": [
+            {
+                "icon_id": entry["icon_id"],
+                "crop_mode": entry["item"]["crop_mode"],
+                "source_bbox": entry["item"]["source_bbox"],
+            }
+            for entry in prepared
+        ],
     }
 
 

@@ -9,6 +9,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image
 from pptx import Presentation
@@ -694,6 +695,15 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "slide_coordinate_unit": "EMU",
             "clean_visual_reference": source["path"],
             "clean_visual_sha256": source["sha256"],
+            "batch_extraction": {
+                "processor": "extract_icon_asset.py",
+                "algorithm_version": "edge-connected-v2",
+                "processor_sha256": "1" * 64,
+                "source_path": source["path"],
+                "source_sha256": source["sha256"],
+                "icon_count": 1,
+                "result": "passed",
+            },
             "icons": [
                 {
                     "icon_id": "status-icon",
@@ -799,6 +809,9 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         candidate["content_reference"]["sha256"] = source_sha256
         candidate["clean_visual_reference"]["sha256"] = source_sha256
         candidate["modules"]["icons"]["clean_visual_sha256"] = source_sha256
+        candidate["modules"]["icons"]["batch_extraction"]["source_sha256"] = (
+            source_sha256
+        )
         icon["source_sha256"] = source_sha256
 
     def test_valid_prebuild_spec_passes(self):
@@ -897,6 +910,8 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             icons = candidate["modules"]["icons"]
             icons["clean_visual_reference"] = identity["path"]
             icons["clean_visual_sha256"] = identity["sha256"]
+            icons["batch_extraction"]["source_path"] = identity["path"]
+            icons["batch_extraction"]["source_sha256"] = identity["sha256"]
             icon = icons["icons"][0]
             icon["source_path"] = identity["path"]
             icon["source_sha256"] = identity["sha256"]
@@ -1060,6 +1075,84 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             self._add_valid_icon_contract(candidate, Path(directory))
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertTrue(result["valid"], result)
+
+    def test_icon_batch_extraction_is_required(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._add_valid_icon_contract(candidate, Path(directory))
+            del candidate["modules"]["icons"]["batch_extraction"]
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_BATCH_EXTRACTION_MISSING",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_icon_batch_extraction_must_bind_to_current_source(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._add_valid_icon_contract(candidate, Path(directory))
+            candidate["modules"]["icons"]["batch_extraction"]["source_sha256"] = "0" * 64
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_BATCH_SOURCE_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_icon_validation_reuses_source_hash_and_decode(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._add_valid_icon_contract(candidate, root)
+            icons_module = candidate["modules"]["icons"]
+            second_element = copy.deepcopy(candidate["elements"][-1])
+            second_element["element_id"] = "status-icon-2"
+            candidate["elements"].append(second_element)
+            second_icon = copy.deepcopy(icons_module["icons"][0])
+            second_icon["icon_id"] = "status-icon-2"
+            second_icon["element_id"] = "status-icon-2"
+            icons_module["icons"].append(second_icon)
+            icons_module["batch_extraction"]["icon_count"] = 2
+
+            source_path = Path(candidate["clean_visual_reference"]["path"]).resolve()
+            source_hash_calls = 0
+            source_open_calls = 0
+            original_file_sha256 = MODULE._file_sha256
+            original_image_open = MODULE.Image.open
+
+            def counted_file_sha256(path):
+                nonlocal source_hash_calls
+                if Path(path).resolve() == source_path:
+                    source_hash_calls += 1
+                return original_file_sha256(path)
+
+            def counted_image_open(path, *args, **kwargs):
+                nonlocal source_open_calls
+                if Path(path).resolve() == source_path:
+                    source_open_calls += 1
+                return original_image_open(path, *args, **kwargs)
+
+            errors = []
+            with (
+                mock.patch.object(MODULE, "_file_sha256", side_effect=counted_file_sha256),
+                mock.patch.object(MODULE.Image, "open", side_effect=counted_image_open),
+            ):
+                MODULE._validate_icons(
+                    icons_module,
+                    {item["element_id"]: item for item in candidate["elements"]},
+                    candidate["canvas"],
+                    candidate["clean_visual_reference"],
+                    candidate["page_id"],
+                    "prebuild",
+                    errors,
+                )
+
+        self.assertEqual([], errors)
+        self.assertEqual(1, source_hash_calls)
+        self.assertEqual(1, source_open_calls)
 
     def test_icon_page_requires_current_crop_review_for_every_profile(self):
         for profile in ("rapid", "reviewed", "strict"):

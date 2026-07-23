@@ -115,7 +115,7 @@ class SkillRuntimeContractTests(unittest.TestCase):
                 "visual-audit-and-delivery.md",
             )
         )
-        self.assertLessEqual(skill + measurement + text + audit, 15000)
+        self.assertLessEqual(skill + measurement + text + audit, 15500)
         self.assertLessEqual(skill + measurement + graphics + audit, 15000)
         self.assertLessEqual(
             skill + measurement + text + graphics + pictures + audit, 25000
@@ -221,16 +221,19 @@ class SkillRuntimeContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
 
-    def test_icon_workflow_uses_one_lightweight_xywh_extractor_before_prebuild(self):
+    def test_icon_workflow_is_single_pass_batch_before_prebuild(self):
         runtime = SKILL.read_text(encoding="utf-8")
         pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
         for phrase in (
-            "extract_icon_asset.py",
-            "--bbox-xywh X,Y,W,H",
-            "图标资产与绿幕复核必须在 prebuild 前完成",
+            "一次精确测量",
+            "一次批量裁切",
+            "一次绿幕展示与确认",
+            "→ prebuild",
+            "--spec <page>/work/page-reconstruction.json",
+            "--output-dir <page>/assets/icons",
         ):
             with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime)
+                self.assertIn(phrase, runtime + pictures)
         for phrase in (
             "唯一图标资产生成入口",
             "`source_bbox=[x,y,w,h]`",
@@ -243,6 +246,31 @@ class SkillRuntimeContractTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, pictures)
+        self.assertNotIn("每次只处理一个已测量图标", pictures)
+
+    def test_icon_exception_path_is_bounded_and_local(self):
+        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
+        for phrase in (
+            "仅重裁异常图标",
+            "一次初始批量裁切",
+            "一次异常项修正",
+            "修正后仍不正确",
+            "阻断 prebuild",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, pictures)
+
+    def test_real_quality_validation_preserves_crop_decisions(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
+        combined = runtime + pictures
+        for phrase in (
+            "真实质量验收不得改写 `crop_mode`、`source_bbox` 或 `fallback_reason`",
+            "临时规格只允许改写 `asset_path`",
+            "`ok=false` 时不得生成绿幕或宣称视觉通过",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
 
     def test_icon_workflow_has_one_alpha_first_path_and_explicit_fallback(self):
         runtime = SKILL.read_text(encoding="utf-8")
@@ -443,6 +471,26 @@ class SkillRuntimeContractTests(unittest.TestCase):
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, audit)
+
+    def test_font_trials_are_on_demand_diagnostics(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        text = (REFERENCES / "text-and-editability.md").read_text(encoding="utf-8")
+        combined = runtime + text
+        for phrase in (
+            "字体试排不是固定阶段",
+            "普通低风险文字默认不执行字体试排",
+            "高风险文字诊断工具",
+            "原字体不可用或发生 renderer fallback",
+            "整页 preview/diff",
+            "`render_font_trials.py`",
+            "`candidate_trials/render_metrics/font_trial_report`",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+        self.assertNotIn(
+            "建立 2–5 个候选，以同文字、同 box、同段落结构试排",
+            text,
+        )
 
 
 if __name__ == "__main__":

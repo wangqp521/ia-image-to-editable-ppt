@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -192,6 +193,39 @@ class ExtractIconAssetTests(unittest.TestCase):
                     crop_mode="alpha_isolation",
                 )
 
+    def test_rejects_low_contrast_foreground_erased_before_edge_check(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = self._paths(root)
+            image = Image.new("RGB", (12, 12), "white")
+            draw = ImageDraw.Draw(image)
+            draw.line((0, 6, 5, 6), fill=(242, 242, 242), width=1)
+            draw.rectangle((5, 4, 9, 8), fill=(30, 30, 30))
+            image.save(source)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "raw foreground may touch crop edge: left",
+            ):
+                module.extract_icon_asset(
+                    source,
+                    output,
+                    (0, 0, 12, 12),
+                    icon_id="low-contrast-edge",
+                    crop_mode="alpha_isolation",
+                )
+
+    def test_edge_models_remain_side_specific(self) -> None:
+        module = load_module()
+        crop = Image.new("RGBA", (12, 12), (255, 255, 255, 255))
+        ImageDraw.Draw(crop).rectangle((0, 0, 2, 2), fill=(255, 0, 0, 255))
+
+        models = module._edge_models(crop)
+
+        self.assertIn((255, 0, 0), models["top"])
+        self.assertNotIn((255, 0, 0), models["bottom"])
+
     def test_rejects_alpha_asset_without_visible_foreground(self) -> None:
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
@@ -241,6 +275,111 @@ class ExtractIconAssetTests(unittest.TestCase):
             self.assertEqual(result["size"], [12, 12])
             self.assertEqual(len(result["asset_sha256"]), 64)
             self.assertEqual(len(result["alpha_mask_sha256"]), 64)
+
+    def test_batch_extracts_in_spec_order_and_opens_source_once(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            image = Image.new("RGB", (40, 20), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((4, 4, 10, 10), fill="black")
+            draw.rectangle((24, 4, 30, 10), fill="blue")
+            image.save(source)
+            output_dir = root / "assets" / "icons"
+            output_dir.mkdir(parents=True)
+            spec_path = root / "work" / "page-reconstruction.json"
+            spec_path.parent.mkdir()
+            icons = [
+                {
+                    "icon_id": "first",
+                    "source_path": str(source),
+                    "source_bbox": [0, 0, 16, 16],
+                    "crop_mode": "alpha_isolation",
+                    "asset_path": str(output_dir / "first.png"),
+                },
+                {
+                    "icon_id": "second",
+                    "source_path": str(source),
+                    "source_bbox": [20, 0, 16, 16],
+                    "crop_mode": "alpha_isolation",
+                    "asset_path": str(output_dir / "second.png"),
+                },
+            ]
+            spec_path.write_text(
+                json.dumps({"modules": {"icons": {"icons": icons}}}),
+                encoding="utf-8",
+            )
+            original_open = module.Image.open
+            source_opens = 0
+
+            def counted_open(path, *args, **kwargs):
+                nonlocal source_opens
+                if Path(path).resolve() == source.resolve():
+                    source_opens += 1
+                return original_open(path, *args, **kwargs)
+
+            with mock.patch.object(module.Image, "open", side_effect=counted_open):
+                result = module.extract_icon_assets_from_spec(spec_path, output_dir)
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [item["icon_id"] for item in result["results"]],
+                ["first", "second"],
+            )
+            self.assertEqual(source_opens, 1)
+
+    def test_batch_keeps_successes_and_does_not_overwrite_failed_asset(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            image = Image.new("RGB", (40, 20), "white")
+            draw = ImageDraw.Draw(image)
+            draw.rectangle((4, 4, 10, 10), fill="black")
+            draw.rectangle((20, 4, 26, 10), fill="blue")
+            image.save(source)
+            output_dir = root / "assets" / "icons"
+            output_dir.mkdir(parents=True)
+            first_path = output_dir / "first.png"
+            second_path = output_dir / "second.png"
+            second_path.write_bytes(b"sentinel")
+            spec_path = root / "work" / "page-reconstruction.json"
+            spec_path.parent.mkdir()
+            spec_path.write_text(
+                json.dumps(
+                    {
+                        "modules": {
+                            "icons": {
+                                "icons": [
+                                    {
+                                        "icon_id": "first",
+                                        "source_path": str(source),
+                                        "source_bbox": [0, 0, 16, 16],
+                                        "crop_mode": "alpha_isolation",
+                                        "asset_path": str(first_path),
+                                    },
+                                    {
+                                        "icon_id": "second",
+                                        "source_path": str(source),
+                                        "source_bbox": [20, 0, 16, 16],
+                                        "crop_mode": "alpha_isolation",
+                                        "asset_path": str(second_path),
+                                    },
+                                ]
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = module.extract_icon_assets_from_spec(spec_path, output_dir)
+
+            self.assertFalse(result["ok"])
+            self.assertTrue(first_path.is_file())
+            self.assertEqual(second_path.read_bytes(), b"sentinel")
+            self.assertEqual(result["failures"][0]["icon_id"], "second")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,18 @@
 
 ## 图标
 
-图标必须从当前页视觉参考裁切为各自独立 picture，放回原 bbox；简单或复杂图标都不得用 Shape、字符、重绘 SVG 或图标库替代。编号圆点、标签、文字、bullet 和分隔线不是图标，不得混入 `icon_only`。`extract_icon_asset.py` 是唯一图标资产生成入口，每次只处理一个已测量图标；不得编写页面专用裁切脚本，也不增加对象检测、批处理状态机或第二套资产规格。
+图标必须从当前页视觉参考裁切为各自独立 picture，放回原 bbox；简单或复杂图标都不得用 Shape、字符、重绘 SVG 或图标库替代。编号圆点、标签、文字、bullet 和分隔线不是图标，不得混入 `icon_only`。`extract_icon_asset.py` 是唯一图标资产生成入口；正常路径只运行一次批量模式，不得编写页面专用裁切脚本，也不增加对象检测、长期批处理状态机或第二套资产规格。
+
+固定主流程只有四步：
+
+一次精确测量
+→ 一次批量裁切
+→ 一次绿幕展示与确认
+→ prebuild
+
+测量阶段必须一次性确认全部 `source_bbox`、`padding=0` 和初始 crop mode，再运行 `extract_icon_asset.py --spec <page>/work/page-reconstruction.json --output-dir <page>/assets/icons`。批量脚本只按规格顺序裁切，不得自动识别图标、修改 bbox、切换模式或批准结果；同一源图只读取和哈希一次，结果回填 `modules.icons.batch_extraction`，绑定 processor/algorithm/source 哈希、图标数与整批状态。
+
+真实质量验收不得改写 `crop_mode`、`source_bbox` 或 `fallback_reason`；临时规格只允许改写 `asset_path`，原规格已有的 `background_preserved` 决定仍原样保留。`ok=false` 时不得生成绿幕或宣称视觉通过，必须按失败项进入 bbox 修正。
 
 规格坐标统一为 `source_bbox=[x,y,w,h]`。bbox 本身必须包含完整轮廓、阴影和少量周边背景，大图标和小图标遵守同一规则；新任务固定 `padding=0`，不得在生成器里再次扩框。资产生成前必须查看带 bbox 的局部上下文，确认只包含目标图标且没有邻近文字、边框或分隔线，将 `roi_context_400` 写为 passed。任何可见前景触边都视为坐标不足，先扩大 bbox 再重跑；前景触边时不得回退到 `background_preserved`，也不得在裁后补边或删除小连通部件。
 
@@ -18,7 +29,9 @@
 
 生成全部图标资产并写入路径/hash 后、prebuild 前运行 `create_icon_crop_review.py`。每个图标按 `icon_id` 展示“带 bbox 的局部上下文 / source/asset 400%”三栏证据，资产侧固定使用 `#00FF00` 绿幕。工具以真实源图、图标顺序与 `icon_id`、`source_bbox`、padding、crop mode、真实资产 SHA-256、背景处理/fallback、alpha mask 和固定渲染参数生成 `icon_manifest_sha256`；命中 PNG metadata 时返回 `reused=true`，不得重建 contact sheet。`spec_sha256` 只用于追踪，非图标字段变化不得使旧绿幕复核图失效。真实源图或任一图标依赖变化、metadata 缺失/损坏时必须重建；缓存命中也不得跳过真实输入校验。
 
-通过 commentary 以 `[第 N/总页数] 图标裁切绿幕复核` 展示本会话尚未展示的当前 `icon-crop-review.png`；无图标时不生成也不展示。将工具返回的 output path/hash、`icon_manifest_sha256` 和 `inspection=passed` 写入 `modules.icons.crop_review_evidence`；prebuild 对三种 profile 统一重算 manifest，来源、bbox、padding、crop mode、fallback、alpha 或 asset 任一改变时旧证据立即失效。缓存不替代首次展示和审查。放大只供审查，不写回资产或 PPTX；先确认 ROI 语义正确，再确认轮廓完整、背景处理正确、开放线框/封闭区符合连通规则且没有白边、色晕或漏裁，才运行 prebuild。bbox 不足先扩大重跑；仅透明结果本身损坏时才改用 `background_preserved`。回填后仍以 `placement_400` 检查位置、比例、清晰度和局部底色接缝。
+通过 commentary 以 `[第 N/总页数] 图标裁切绿幕复核` 展示本会话尚未展示的当前 `icon-crop-review.png`；无图标时不生成也不展示。将工具返回的 output path/hash、`icon_manifest_sha256` 和 `inspection=passed` 写入 `modules.icons.crop_review_evidence`；prebuild 对三种 profile 统一重算 manifest，来源、bbox、padding、crop mode、fallback、alpha、asset 或批次处理器身份任一改变时旧证据立即失效。缓存不替代首次展示和审查。放大只供审查，不写回资产或 PPTX；先确认 ROI 语义正确，再确认轮廓完整、背景处理正确、开放线框/封闭区符合连通规则且没有白边、色晕或漏裁。绿幕无问题直接进入 prebuild。
+
+绿幕发现误裁或漏裁时只允许一个有界异常分支：bbox 错误只修 bbox；bbox 正确但透明化损伤轮廓、阴影或色晕时，才将该项切换为 `background_preserved` 并写具体 `fallback_reason`。仅重裁异常图标并重建一次当前绿幕，不得重跑已通过项。每页最多“一次初始批量裁切 + 一次异常项修正”；修正后仍不正确即记录失败并阻断 prebuild，不得继续调阈值、反复试裁或用不透明色块遮盖。回填后仍以 `placement_400` 检查位置、比例、清晰度和局部底色接缝。
 
 ## 非图标图片
 

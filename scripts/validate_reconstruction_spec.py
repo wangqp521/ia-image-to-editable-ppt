@@ -1005,6 +1005,82 @@ def _validate_typography(
             _error(errors, "SPEC_FONT_NOT_VERIFIED", f"{path}.font_declaration_verified", "final spec requires verified font declaration")
 
 
+def _validate_icon_batch_extraction(
+    module: dict[str, Any],
+    expected_source_path: Any,
+    expected_source_hash: Any,
+    errors: list[dict[str, str]],
+) -> None:
+    """Require one complete extraction batch bound to the current clean source."""
+    batch = module.get("batch_extraction")
+    path = "modules.icons.batch_extraction"
+    if not isinstance(batch, dict):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_EXTRACTION_MISSING",
+            path,
+            "batch extraction evidence is required",
+        )
+        return
+    required = {
+        "processor",
+        "algorithm_version",
+        "processor_sha256",
+        "source_path",
+        "source_sha256",
+        "icon_count",
+        "result",
+    }
+    if required - set(batch):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_EXTRACTION_INVALID",
+            path,
+            "batch extraction fields are incomplete",
+        )
+        return
+    if (
+        batch["processor"] != "extract_icon_asset.py"
+        or batch["algorithm_version"] != "edge-connected-v2"
+    ):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_PROCESSOR_INVALID",
+            path,
+            "unexpected icon extractor identity",
+        )
+    if (
+        not isinstance(batch["processor_sha256"], str)
+        or not SHA256_PATTERN.fullmatch(batch["processor_sha256"])
+    ):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_PROCESSOR_INVALID",
+            f"{path}.processor_sha256",
+            "invalid processor sha256",
+        )
+    if (
+        batch["source_path"] != expected_source_path
+        or batch["source_sha256"] != expected_source_hash
+    ):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_SOURCE_INVALID",
+            path,
+            "batch source must match clean_visual_reference",
+        )
+    if (
+        batch["icon_count"] != len(module.get("icons", []))
+        or batch["result"] != "passed"
+    ):
+        _error(
+            errors,
+            "SPEC_ICON_BATCH_RESULT_INVALID",
+            path,
+            "batch result must cover every icon and pass",
+        )
+
+
 def _validate_icons(
     module: Any,
     element_map: dict[str, dict[str, Any]],
@@ -1048,10 +1124,18 @@ def _validate_icons(
     if not isinstance(icons, list) or not icons:
         _error(errors, "SPEC_ICONS_ITEMS_INVALID", "modules.icons.icons", "icons must be a non-empty array")
         return
+    _validate_icon_batch_extraction(
+        module,
+        expected_reference_path,
+        expected_reference_hash,
+        errors,
+    )
 
     icon_element_ids = {element_id for element_id, element in element_map.items() if element.get("kind") == "icon"}
     seen_icon_ids: set[str] = set()
     seen_element_ids: set[str] = set()
+    source_hash_cache: dict[Path, str] = {}
+    source_image_cache: dict[Path, Image.Image] = {}
     required_item = {
         "icon_id",
         "element_id",
@@ -1139,10 +1223,14 @@ def _validate_icons(
         if item.get("source_path") != expected_reference_path or item.get("source_sha256") != expected_reference_hash:
             _error(errors, "SPEC_ICON_SOURCE_BINDING_INVALID", path, "source must exactly bind to clean_visual_reference")
         source_path = Path(item["source_path"]).expanduser() if isinstance(item.get("source_path"), str) else None
+        resolved_source: Path | None = None
         if source_path is None or not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
             _error(errors, "SPEC_ICON_SOURCE_INVALID", f"{path}.source_path", "source must be a readable non-symlink file")
         elif isinstance(item.get("source_sha256"), str) and SHA256_PATTERN.fullmatch(item["source_sha256"]):
-            if _file_sha256(source_path.resolve()).lower() != item["source_sha256"].lower():
+            resolved_source = source_path.resolve()
+            if resolved_source not in source_hash_cache:
+                source_hash_cache[resolved_source] = _file_sha256(resolved_source)
+            if source_hash_cache[resolved_source].lower() != item["source_sha256"].lower():
                 _error(errors, "SPEC_ICON_SOURCE_HASH_MISMATCH", f"{path}.source_sha256", "source hash does not match current file")
 
         crop_mode = item.get("crop_mode")
@@ -1276,15 +1364,21 @@ def _validate_icons(
                             and isinstance(padding, int)
                             and padding >= 0
                         ):
-                            with Image.open(source_path.resolve()) as source_image:
-                                source_image.load()
-                                left = source_bbox[0] - padding
-                                top = source_bbox[1] - padding
-                                right = source_bbox[0] + source_bbox[2] + padding
-                                bottom = source_bbox[1] + source_bbox[3] + padding
-                                source_crop = source_image.convert("RGB").crop(
-                                    (left, top, right, bottom)
-                                )
+                            if resolved_source is None:
+                                resolved_source = source_path.resolve()
+                            if resolved_source not in source_image_cache:
+                                with Image.open(resolved_source) as source_image:
+                                    source_image.load()
+                                    source_image_cache[resolved_source] = (
+                                        source_image.convert("RGB").copy()
+                                    )
+                            left = source_bbox[0] - padding
+                            top = source_bbox[1] - padding
+                            right = source_bbox[0] + source_bbox[2] + padding
+                            bottom = source_bbox[1] + source_bbox[3] + padding
+                            source_crop = source_image_cache[resolved_source].crop(
+                                (left, top, right, bottom)
+                            )
                             asset_rgb = image.convert("RGB")
                             if (
                                 source_crop.size == asset_rgb.size
@@ -1354,6 +1448,8 @@ def _validate_icons(
     missing_elements = sorted(icon_element_ids - seen_element_ids)
     if missing_elements:
         _error(errors, "SPEC_ICON_ELEMENT_MISSING", "modules.icons.icons", f"missing icon records: {', '.join(missing_elements)}")
+    for source_image in source_image_cache.values():
+        source_image.close()
 
 
 def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
