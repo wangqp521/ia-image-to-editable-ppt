@@ -47,6 +47,22 @@ class SkillRuntimeContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, combined)
 
+    def test_prebuild_input_quality_checks_apply_to_all_profiles(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        combined = runtime + audit
+        for phrase in (
+            "写规格前通过 commentary 展示当前坐标定位图并检查",
+            "图标页面在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图并检查",
+            "profile 只控制终态证明成本，不得降低构建前输入质量",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+        self.assertNotRegex(runtime, r"`strict`[^。\n]*坐标定位图")
+        self.assertNotRegex(runtime, r"`strict`[^。\n]*图标裁切绿幕复核图")
+
     def test_reviewed_contract_is_bounded_and_never_enters_strict(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
             encoding="utf-8"

@@ -51,6 +51,9 @@ PROFILE_DELIVERY_STATUSES = {
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 RGB_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_IMAGE_PIXELS = 100_000_000
+COORDINATE_MANIFEST_METADATA_KEY = "coordinate_overlay_manifest_sha256"
+ICON_MANIFEST_METADATA_KEY = "icon_manifest_sha256"
+_LOCAL_MODULE_CACHE: dict[str, Any] = {}
 
 
 def _error(errors: list[dict[str, str]], code: str, path: str, detail: str) -> None:
@@ -210,6 +213,161 @@ def _file_sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _load_local_script(filename: str) -> Any:
+    cached = _LOCAL_MODULE_CACHE.get(filename)
+    if cached is not None:
+        return cached
+    script_path = Path(__file__).resolve().with_name(filename)
+    module_spec = importlib.util.spec_from_file_location(
+        f"ia_prebuild_evidence_{script_path.stem}",
+        script_path,
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise RuntimeError(f"cannot load {script_path}")
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+    _LOCAL_MODULE_CACHE[filename] = module
+    return module
+
+
+def _validate_png_evidence(
+    evidence: Any,
+    *,
+    path: str,
+    missing_code: str,
+    stale_code: str,
+    metadata_key: str,
+    errors: list[dict[str, str]],
+) -> tuple[Path, str] | None:
+    if not isinstance(evidence, dict):
+        _error(errors, missing_code, path, "current prebuild visual evidence is required")
+        return None
+    required = {"path", "sha256", "inspection"}
+    if not required.issubset(evidence):
+        _error(errors, missing_code, path, "evidence requires path, sha256, and inspection")
+        return None
+    if evidence.get("inspection") != "passed":
+        _error(
+            errors,
+            "SPEC_PREBUILD_VISUAL_INSPECTION_NOT_PASSED",
+            f"{path}.inspection",
+            "prebuild visual evidence must be displayed, inspected, and passed",
+        )
+    evidence_path_value = evidence.get("path")
+    evidence_hash = evidence.get("sha256")
+    if (
+        not isinstance(evidence_path_value, str)
+        or not evidence_path_value
+        or not Path(evidence_path_value).is_absolute()
+        or not isinstance(evidence_hash, str)
+        or not SHA256_PATTERN.fullmatch(evidence_hash)
+    ):
+        _error(errors, stale_code, path, "evidence path and sha256 must be current and absolute")
+        return None
+    evidence_path = Path(evidence_path_value).expanduser()
+    if evidence_path.is_symlink() or not evidence_path.is_file() or evidence_path.suffix.lower() != ".png":
+        _error(errors, stale_code, f"{path}.path", "evidence must be a readable non-symlink PNG")
+        return None
+    resolved = evidence_path.resolve()
+    if _file_sha256(resolved).lower() != evidence_hash.lower():
+        _error(errors, stale_code, f"{path}.sha256", "evidence sha256 does not match the current PNG")
+        return None
+    try:
+        with Image.open(resolved) as image:
+            image.load()
+            metadata_value = image.info.get(metadata_key)
+    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
+        _error(errors, stale_code, f"{path}.path", "evidence must be a decodable PNG")
+        return None
+    if not isinstance(metadata_value, str) or not SHA256_PATTERN.fullmatch(metadata_value):
+        _error(errors, stale_code, path, f"PNG metadata {metadata_key} is missing or invalid")
+        return None
+    return resolved, metadata_value.lower()
+
+
+def _validate_coordinate_overlay_evidence(
+    page_layout: Any,
+    clean_visual_reference: Any,
+    errors: list[dict[str, str]],
+) -> None:
+    path = "modules.page_layout.coordinate_overlay_evidence"
+    evidence = page_layout.get("coordinate_overlay_evidence") if isinstance(page_layout, dict) else None
+    checked = _validate_png_evidence(
+        evidence,
+        path=path,
+        missing_code="SPEC_COORDINATE_OVERLAY_EVIDENCE_MISSING",
+        stale_code="SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE",
+        metadata_key=COORDINATE_MANIFEST_METADATA_KEY,
+        errors=errors,
+    )
+    if checked is None or not isinstance(evidence, dict):
+        return
+    source_path = clean_visual_reference.get("path") if isinstance(clean_visual_reference, dict) else None
+    source_sha256 = clean_visual_reference.get("sha256") if isinstance(clean_visual_reference, dict) else None
+    grid = evidence.get("grid")
+    declared_manifest = evidence.get("manifest_sha256")
+    if (
+        not isinstance(source_path, str)
+        or evidence.get("source_sha256") != source_sha256
+        or not isinstance(grid, dict)
+        or type(grid.get("cols")) is not int
+        or type(grid.get("rows")) is not int
+        or grid.get("labels") not in {"none", "x", "y", "both"}
+        or not isinstance(declared_manifest, str)
+        or not SHA256_PATTERN.fullmatch(declared_manifest)
+    ):
+        _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate evidence binding is incomplete or stale")
+        return
+    try:
+        coordinate_module = _load_local_script("create_coordinate_overlay.py")
+        expected = coordinate_module.coordinate_overlay_manifest(
+            source_path,
+            cols=grid["cols"],
+            rows=grid["rows"],
+            labels=grid["labels"],
+        )[COORDINATE_MANIFEST_METADATA_KEY]
+    except (OSError, ValueError, UnidentifiedImageError, RuntimeError):
+        _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "cannot recompute coordinate overlay manifest")
+        return
+    metadata_manifest = checked[1]
+    if declared_manifest.lower() != expected.lower() or metadata_manifest != expected.lower():
+        _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate overlay does not bind the current source and grid")
+
+
+def _validate_icon_crop_review_evidence(
+    icons_module: Any,
+    errors: list[dict[str, str]],
+) -> None:
+    path = "modules.icons.crop_review_evidence"
+    evidence = icons_module.get("crop_review_evidence") if isinstance(icons_module, dict) else None
+    checked = _validate_png_evidence(
+        evidence,
+        path=path,
+        missing_code="SPEC_ICON_CROP_REVIEW_EVIDENCE_MISSING",
+        stale_code="SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
+        metadata_key=ICON_MANIFEST_METADATA_KEY,
+        errors=errors,
+    )
+    if checked is None or not isinstance(evidence, dict) or not isinstance(icons_module, dict):
+        return
+    declared_manifest = evidence.get("icon_manifest_sha256")
+    if not isinstance(declared_manifest, str) or not SHA256_PATTERN.fullmatch(declared_manifest):
+        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "icon review manifest is missing or invalid")
+        return
+    try:
+        icon_module = _load_local_script("create_icon_crop_review.py")
+        expected = icon_module.icon_manifest_sha256_for_module(
+            icons_module,
+            Path.cwd(),
+        )
+    except (OSError, ValueError, UnidentifiedImageError, RuntimeError):
+        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "cannot recompute current icon review manifest")
+        return
+    metadata_manifest = checked[1]
+    if declared_manifest.lower() != expected.lower() or metadata_manifest != expected.lower():
+        _error(errors, "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE", path, "icon review does not bind the current source, bbox, crop mode, and asset")
 
 
 def _module_element_references(value: Any) -> set[str]:
@@ -1431,9 +1589,15 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 f"modules.{module_name}",
                 f"unknown element references: {', '.join(unknown_references)}",
             )
+    _validate_coordinate_overlay_evidence(
+        modules.get("page_layout"),
+        spec.get("clean_visual_reference"),
+        errors,
+    )
     if "typography" in activated:
         _validate_typography(modules.get("typography"), element_map, canvas, stage, errors)
     if "icons" in activated:
+        _validate_icon_crop_review_evidence(modules.get("icons"), errors)
         _validate_icons(
             modules.get("icons"),
             element_map,

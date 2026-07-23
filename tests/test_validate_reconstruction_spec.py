@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib.util
 import io
@@ -35,24 +36,59 @@ if VISUAL_DIFF_SPEC is None or VISUAL_DIFF_SPEC.loader is None:
 VISUAL_DIFF = importlib.util.module_from_spec(VISUAL_DIFF_SPEC)
 VISUAL_DIFF_SPEC.loader.exec_module(VISUAL_DIFF)
 
+COORDINATE_OVERLAY_PATH = Path(__file__).resolve().parents[1] / "scripts" / "create_coordinate_overlay.py"
+COORDINATE_OVERLAY_SPEC = importlib.util.spec_from_file_location(
+    "coordinate_overlay_for_spec_tests",
+    COORDINATE_OVERLAY_PATH,
+)
+if COORDINATE_OVERLAY_SPEC is None or COORDINATE_OVERLAY_SPEC.loader is None:
+    raise RuntimeError(f"Cannot load {COORDINATE_OVERLAY_PATH}")
+COORDINATE_OVERLAY = importlib.util.module_from_spec(COORDINATE_OVERLAY_SPEC)
+COORDINATE_OVERLAY_SPEC.loader.exec_module(COORDINATE_OVERLAY)
+
+ICON_REVIEW_PATH = Path(__file__).resolve().parents[1] / "scripts" / "create_icon_crop_review.py"
+ICON_REVIEW_SPEC = importlib.util.spec_from_file_location(
+    "icon_review_for_spec_tests",
+    ICON_REVIEW_PATH,
+)
+if ICON_REVIEW_SPEC is None or ICON_REVIEW_SPEC.loader is None:
+    raise RuntimeError(f"Cannot load {ICON_REVIEW_PATH}")
+ICON_REVIEW = importlib.util.module_from_spec(ICON_REVIEW_SPEC)
+ICON_REVIEW_SPEC.loader.exec_module(ICON_REVIEW)
+
 
 REFERENCE_ROOT: tempfile.TemporaryDirectory[str] | None = None
 REFERENCE_PATH: Path | None = None
+COORDINATE_EVIDENCE: dict | None = None
 
 
 def setUpModule() -> None:
-    global REFERENCE_ROOT, REFERENCE_PATH
+    global REFERENCE_ROOT, REFERENCE_PATH, COORDINATE_EVIDENCE
     REFERENCE_ROOT = tempfile.TemporaryDirectory()
     REFERENCE_PATH = Path(REFERENCE_ROOT.name) / "source.png"
     Image.new("RGB", (1600, 900), "white").save(REFERENCE_PATH)
+    overlay_path = Path(REFERENCE_ROOT.name) / "coordinate-overlay.png"
+    report = COORDINATE_OVERLAY.create_coordinate_overlay(
+        REFERENCE_PATH,
+        overlay_path,
+    )
+    COORDINATE_EVIDENCE = {
+        "path": str(overlay_path.resolve()),
+        "sha256": hashlib.sha256(overlay_path.read_bytes()).hexdigest(),
+        "source_sha256": report["source"]["sha256"],
+        "manifest_sha256": report["coordinate_overlay_manifest_sha256"],
+        "grid": report["grid"],
+        "inspection": "passed",
+    }
 
 
 def tearDownModule() -> None:
-    global REFERENCE_ROOT, REFERENCE_PATH
+    global REFERENCE_ROOT, REFERENCE_PATH, COORDINATE_EVIDENCE
     if REFERENCE_ROOT is not None:
         REFERENCE_ROOT.cleanup()
     REFERENCE_ROOT = None
     REFERENCE_PATH = None
+    COORDINATE_EVIDENCE = None
 
 
 def image_identity(path: Path) -> dict:
@@ -64,7 +100,7 @@ def image_identity(path: Path) -> dict:
 
 def valid_spec() -> dict:
     text = "标题"
-    if REFERENCE_PATH is None:
+    if REFERENCE_PATH is None or COORDINATE_EVIDENCE is None:
         raise RuntimeError("reference fixture is not initialized")
     reference = image_identity(REFERENCE_PATH)
     return {
@@ -94,6 +130,7 @@ def valid_spec() -> dict:
                 "relationships": [],
                 "layout_invariants": [],
                 "density_targets": {},
+                "coordinate_overlay_evidence": copy.deepcopy(COORDINATE_EVIDENCE),
             },
             "typography": {
                 "slide_coordinate_unit": "EMU",
@@ -245,6 +282,65 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                     "SPEC_VERIFICATION_PROFILE_INVALID",
                     {item["code"] for item in result["errors"]},
                 )
+
+    def test_prebuild_requires_coordinate_overlay_for_every_profile(self):
+        for profile in ("rapid", "reviewed", "strict"):
+            with self.subTest(profile=profile):
+                candidate = valid_spec()
+                candidate["verification_profile"] = profile
+                del candidate["modules"]["page_layout"]["coordinate_overlay_evidence"]
+
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+
+                self.assertIn(
+                    "SPEC_COORDINATE_OVERLAY_EVIDENCE_MISSING",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_prebuild_rejects_stale_or_uninspected_coordinate_overlay(self):
+        stale = valid_spec()
+        stale["modules"]["page_layout"]["coordinate_overlay_evidence"][
+            "manifest_sha256"
+        ] = "0" * 64
+        uninspected = valid_spec()
+        uninspected["modules"]["page_layout"]["coordinate_overlay_evidence"][
+            "inspection"
+        ] = "pending"
+
+        stale_result = MODULE.validate_spec(stale, stage="prebuild")
+        uninspected_result = MODULE.validate_spec(uninspected, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE",
+            {item["code"] for item in stale_result["errors"]},
+        )
+        self.assertIn(
+            "SPEC_PREBUILD_VISUAL_INSPECTION_NOT_PASSED",
+            {item["code"] for item in uninspected_result["errors"]},
+        )
+
+    def test_source_change_invalidates_old_coordinate_overlay(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "source.png"
+            Image.new("RGB", (1600, 900), "white").save(source_path)
+            identity = image_identity(source_path)
+            candidate["content_reference"] = dict(identity)
+            candidate["clean_visual_reference"] = dict(identity)
+            self._refresh_prebuild_visual_evidence(candidate, root)
+
+            Image.new("RGB", (1600, 900), "black").save(source_path)
+            changed_identity = image_identity(source_path)
+            candidate["content_reference"] = dict(changed_identity)
+            candidate["clean_visual_reference"] = dict(changed_identity)
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE",
+            {item["code"] for item in result["errors"]},
+        )
 
     def test_prebuild_rejects_unknown_verification_profile(self):
         candidate = valid_spec()
@@ -634,6 +730,36 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 }
             ],
         }
+        self._refresh_prebuild_visual_evidence(candidate, root)
+
+    def _refresh_prebuild_visual_evidence(self, candidate: dict, root: Path) -> None:
+        work_dir = root / "work"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        coordinate_path = work_dir / "coordinate-overlay.png"
+        coordinate = COORDINATE_OVERLAY.create_coordinate_overlay(
+            Path(candidate["clean_visual_reference"]["path"]),
+            coordinate_path,
+        )
+        candidate["modules"]["page_layout"]["coordinate_overlay_evidence"] = {
+            "path": str(coordinate_path.resolve()),
+            "sha256": hashlib.sha256(coordinate_path.read_bytes()).hexdigest(),
+            "source_sha256": coordinate["source"]["sha256"],
+            "manifest_sha256": coordinate["coordinate_overlay_manifest_sha256"],
+            "grid": coordinate["grid"],
+            "inspection": "passed",
+        }
+        if "icons" not in candidate["activated_modules"]:
+            return
+        spec_path = work_dir / "icon-review-spec.json"
+        spec_path.write_text(json.dumps(candidate), encoding="utf-8")
+        review_path = root / "comparisons" / "icon-crop-review.png"
+        review = ICON_REVIEW.create_icon_crop_review(spec_path, review_path)
+        candidate["modules"]["icons"]["crop_review_evidence"] = {
+            "path": str(review_path.resolve()),
+            "sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
+            "icon_manifest_sha256": review["icon_manifest_sha256"],
+            "inspection": "passed",
+        }
 
     def _replace_icon_asset(self, candidate: dict, image: Image.Image) -> None:
         icon = candidate["modules"]["icons"]["icons"][0]
@@ -774,6 +900,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             icon = icons["icons"][0]
             icon["source_path"] = identity["path"]
             icon["source_sha256"] = identity["sha256"]
+            self._refresh_prebuild_visual_evidence(candidate, root)
 
             result = MODULE.validate_spec(candidate, stage="prebuild")
 
@@ -934,6 +1061,86 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertTrue(result["valid"], result)
 
+    def test_icon_page_requires_current_crop_review_for_every_profile(self):
+        for profile in ("rapid", "reviewed", "strict"):
+            with self.subTest(profile=profile), tempfile.TemporaryDirectory() as directory:
+                candidate = valid_spec()
+                candidate["verification_profile"] = profile
+                self._add_valid_icon_contract(candidate, Path(directory))
+                del candidate["modules"]["icons"]["crop_review_evidence"]
+
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+
+                self.assertIn(
+                    "SPEC_ICON_CROP_REVIEW_EVIDENCE_MISSING",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_icon_page_rejects_stale_crop_review_manifest(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._add_valid_icon_contract(candidate, Path(directory))
+            candidate["modules"]["icons"]["crop_review_evidence"][
+                "icon_manifest_sha256"
+            ] = "0" * 64
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_icon_asset_change_invalidates_old_crop_review(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._add_valid_icon_contract(candidate, Path(directory))
+            changed = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+            changed.paste((0, 120, 255, 255), (4, 4, 28, 28))
+            self._replace_icon_asset(candidate, changed)
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_icon_bbox_change_invalidates_old_crop_review(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._add_valid_icon_contract(candidate, Path(directory))
+            candidate["modules"]["icons"]["icons"][0]["source_bbox"][0] += 1
+            candidate["elements"][1]["source_bbox"][0] += 1
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_icon_crop_mode_change_invalidates_old_crop_review(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._add_valid_icon_contract(candidate, root)
+            old_evidence = copy.deepcopy(
+                candidate["modules"]["icons"]["crop_review_evidence"]
+            )
+            self._set_background_preserved_icon(
+                candidate,
+                Image.new("RGB", (32, 32), (242, 241, 235)),
+            )
+            candidate["modules"]["icons"]["crop_review_evidence"] = old_evidence
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ICON_CROP_REVIEW_EVIDENCE_STALE",
+            {item["code"] for item in result["errors"]},
+        )
+
     def test_icon_contract_requires_roi_context_inspection(self):
         candidate = valid_spec()
         with tempfile.TemporaryDirectory() as directory:
@@ -996,6 +1203,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 candidate,
                 Image.new("RGB", (32, 32), (242, 241, 235)),
             )
+            self._refresh_prebuild_visual_evidence(candidate, Path(directory))
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertTrue(result["valid"], result)
 
@@ -1007,6 +1215,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 candidate,
                 Image.new("RGBA", (32, 32), (242, 241, 235, 255)),
             )
+            self._refresh_prebuild_visual_evidence(candidate, Path(directory))
             result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertTrue(result["valid"], result)
 

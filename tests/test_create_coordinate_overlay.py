@@ -37,8 +37,16 @@ class CoordinateOverlayTests(unittest.TestCase):
             self.assertTrue(report["source"]["has_alpha"])
             self.assertEqual("direct_16_9", report["mapping"]["mode"])
             self.assertRegex(report["source"]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(
+                report["coordinate_overlay_manifest_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
             with Image.open(output) as overlay:
                 self.assertEqual((320, 180), overlay.size)
+                self.assertEqual(
+                    report["coordinate_overlay_manifest_sha256"],
+                    overlay.info["coordinate_overlay_manifest_sha256"],
+                )
 
     def test_non_16_9_image_uses_contain_mapping(self):
         module = load_module()
@@ -62,6 +70,39 @@ class CoordinateOverlayTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "cols and rows must be positive"):
                 module.create_coordinate_overlay(source, root / "overlay.png", cols=0)
+
+    def test_manifest_is_stable_and_changes_with_source_or_grid(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.png"
+            Image.new("RGB", (160, 90), "white").save(source)
+
+            first = module.create_coordinate_overlay(source, root / "first.png")
+            second = module.create_coordinate_overlay(source, root / "second.png")
+            changed_grid = module.create_coordinate_overlay(
+                source,
+                root / "changed-grid.png",
+                cols=16,
+            )
+            Image.new("RGB", (160, 90), "black").save(source)
+            changed_source = module.create_coordinate_overlay(
+                source,
+                root / "changed-source.png",
+            )
+
+            self.assertEqual(
+                first["coordinate_overlay_manifest_sha256"],
+                second["coordinate_overlay_manifest_sha256"],
+            )
+            self.assertNotEqual(
+                first["coordinate_overlay_manifest_sha256"],
+                changed_grid["coordinate_overlay_manifest_sha256"],
+            )
+            self.assertNotEqual(
+                first["coordinate_overlay_manifest_sha256"],
+                changed_source["coordinate_overlay_manifest_sha256"],
+            )
 
 
 if __name__ == "__main__":

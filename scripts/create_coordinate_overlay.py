@@ -10,9 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, UnidentifiedImageError
+from PIL.PngImagePlugin import PngInfo
 
 
 SLIDE_SIZE_IN = (13.333333, 7.5)
+MANIFEST_VERSION = 1
+MANIFEST_METADATA_KEY = "coordinate_overlay_manifest_sha256"
 
 
 def _sha256(path: Path) -> str:
@@ -37,6 +40,67 @@ def _draw_grid(image: Image.Image, cols: int, rows: int, labels: str) -> None:
             draw.text((2, min(y + 2, max(0, image.height - 14))), str(y), fill=(180, 20, 20, 255))
 
 
+def coordinate_overlay_manifest(
+    source_path: Path | str,
+    *,
+    cols: int = 32,
+    rows: int = 18,
+    labels: str = "both",
+) -> dict[str, Any]:
+    """Return the canonical identity used to bind one coordinate overlay."""
+    if cols <= 0 or rows <= 0:
+        raise ValueError("cols and rows must be positive")
+    if labels not in {"none", "x", "y", "both"}:
+        raise ValueError("labels must be none, x, y, or both")
+
+    source_path = Path(source_path).expanduser().resolve()
+    with Image.open(source_path) as opened:
+        mode = opened.mode
+        has_alpha = "A" in opened.getbands()
+        width, height = opened.size
+
+    scale = min(SLIDE_SIZE_IN[0] / width, SLIDE_SIZE_IN[1] / height)
+    content_width = width * scale
+    content_height = height * scale
+    source = {
+        "path": str(source_path),
+        "sha256": _sha256(source_path),
+        "pixel_size": [width, height],
+        "mode": mode,
+        "has_alpha": has_alpha,
+    }
+    mapping = {
+        "mode": "direct_16_9" if abs(width / height - 16 / 9) <= 0.001 else "contain",
+        "slide_size_in": list(SLIDE_SIZE_IN),
+        "scale_in_per_px": round(scale, 9),
+        "content_size_in": [round(content_width, 6), round(content_height, 6)],
+        "offset_in": [
+            round((SLIDE_SIZE_IN[0] - content_width) / 2, 6),
+            round((SLIDE_SIZE_IN[1] - content_height) / 2, 6),
+        ],
+    }
+    grid = {"cols": cols, "rows": rows, "labels": labels}
+    payload = {
+        "version": MANIFEST_VERSION,
+        "renderer": "create_coordinate_overlay.py",
+        "source": source,
+        "mapping": mapping,
+        "grid": grid,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "source": source,
+        "mapping": mapping,
+        "grid": grid,
+        MANIFEST_METADATA_KEY: hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def create_coordinate_overlay(
     source_path: Path | str,
     output_path: Path | str,
@@ -51,41 +115,29 @@ def create_coordinate_overlay(
     if labels not in {"none", "x", "y", "both"}:
         raise ValueError("labels must be none, x, y, or both")
 
+    manifest = coordinate_overlay_manifest(
+        source_path,
+        cols=cols,
+        rows=rows,
+        labels=labels,
+    )
     source_path = Path(source_path).expanduser().resolve()
     output_path = Path(output_path).expanduser().resolve()
     with Image.open(source_path) as opened:
-        mode = opened.mode
-        has_alpha = "A" in opened.getbands()
         image = opened.convert("RGBA")
-
-    scale = min(SLIDE_SIZE_IN[0] / image.width, SLIDE_SIZE_IN[1] / image.height)
-    content_width = image.width * scale
-    content_height = image.height * scale
-    mapping = {
-        "mode": "direct_16_9" if abs(image.width / image.height - 16 / 9) <= 0.001 else "contain",
-        "slide_size_in": list(SLIDE_SIZE_IN),
-        "scale_in_per_px": round(scale, 9),
-        "content_size_in": [round(content_width, 6), round(content_height, 6)],
-        "offset_in": [
-            round((SLIDE_SIZE_IN[0] - content_width) / 2, 6),
-            round((SLIDE_SIZE_IN[1] - content_height) / 2, 6),
-        ],
-    }
 
     _draw_grid(image, cols, rows, labels)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    image.save(output_path)
+    pnginfo = PngInfo()
+    pnginfo.add_text(
+        MANIFEST_METADATA_KEY,
+        manifest[MANIFEST_METADATA_KEY],
+    )
+    image.save(output_path, pnginfo=pnginfo)
     return {
-        "source": {
-            "path": str(source_path),
-            "sha256": _sha256(source_path),
-            "pixel_size": list(image.size),
-            "mode": mode,
-            "has_alpha": has_alpha,
-        },
-        "mapping": mapping,
-        "grid": {"cols": cols, "rows": rows, "labels": labels},
+        **manifest,
         "overlay": str(output_path),
+        "overlay_sha256": _sha256(output_path),
     }
 
 

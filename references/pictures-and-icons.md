@@ -18,7 +18,7 @@
 
 生成全部图标资产并写入路径/hash 后、prebuild 前运行 `create_icon_crop_review.py`。每个图标按 `icon_id` 展示“带 bbox 的局部上下文 / source/asset 400%”三栏证据，资产侧固定使用 `#00FF00` 绿幕。工具以真实源图、图标顺序与 `icon_id`、`source_bbox`、padding、crop mode、真实资产 SHA-256、背景处理/fallback、alpha mask 和固定渲染参数生成 `icon_manifest_sha256`；命中 PNG metadata 时返回 `reused=true`，不得重建 contact sheet。`spec_sha256` 只用于追踪，非图标字段变化不得使旧绿幕复核图失效。真实源图或任一图标依赖变化、metadata 缺失/损坏时必须重建；缓存命中也不得跳过真实输入校验。
 
-通过 commentary 以 `[第 N/总页数] 图标裁切绿幕复核` 展示本会话尚未展示的当前 `icon-crop-review.png`；无图标时不生成也不展示。缓存不替代首次展示和审查。放大只供审查，不写回资产或 PPTX；先确认 ROI 语义正确，再确认轮廓完整、背景处理正确、开放线框/封闭区符合连通规则且没有白边、色晕或漏裁，才运行 prebuild。bbox 不足先扩大重跑；仅透明结果本身损坏时才改用 `background_preserved`。回填后仍以 `placement_400` 检查位置、比例、清晰度和局部底色接缝。
+通过 commentary 以 `[第 N/总页数] 图标裁切绿幕复核` 展示本会话尚未展示的当前 `icon-crop-review.png`；无图标时不生成也不展示。将工具返回的 output path/hash、`icon_manifest_sha256` 和 `inspection=passed` 写入 `modules.icons.crop_review_evidence`；prebuild 对三种 profile 统一重算 manifest，来源、bbox、padding、crop mode、fallback、alpha 或 asset 任一改变时旧证据立即失效。缓存不替代首次展示和审查。放大只供审查，不写回资产或 PPTX；先确认 ROI 语义正确，再确认轮廓完整、背景处理正确、开放线框/封闭区符合连通规则且没有白边、色晕或漏裁，才运行 prebuild。bbox 不足先扩大重跑；仅透明结果本身损坏时才改用 `background_preserved`。回填后仍以 `placement_400` 检查位置、比例、清晰度和局部底色接缝。
 
 ## 非图标图片
 

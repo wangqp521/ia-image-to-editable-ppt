@@ -114,6 +114,39 @@ def _cached_manifest_sha256(output_path: Path) -> str | None:
     return value if isinstance(value, str) and len(value) == 64 else None
 
 
+def icon_manifest_sha256_for_module(
+    module: dict[str, Any],
+    base_dir: Path | str,
+) -> str:
+    """Recompute the current review manifest without rendering a contact sheet."""
+    icons = module.get("icons") if isinstance(module, dict) else None
+    if not isinstance(icons, list) or not icons:
+        raise ValueError("modules.icons.icons must contain at least one icon")
+    base_dir = Path(base_dir).expanduser().resolve()
+    entries: list[dict[str, Any]] = []
+    for index, item in enumerate(icons):
+        if not isinstance(item, dict):
+            raise ValueError(f"icon {index + 1} must be an object")
+        icon_id = item.get("icon_id")
+        if not isinstance(icon_id, str) or not icon_id.strip():
+            icon_id = f"icon-{index + 1}"
+        source_descriptor = _source_descriptor(item, index, base_dir)
+        _, asset_path, actual_sha256 = _load_asset(item, index, base_dir)
+        entries.append(
+            {
+                "icon_id": icon_id,
+                "source": source_descriptor,
+                "crop_mode": item.get("crop_mode"),
+                "asset_path": str(asset_path),
+                "asset_sha256": actual_sha256,
+                "background_handling": item.get("background_handling"),
+                "fallback_reason": item.get("fallback_reason"),
+                "alpha_mask_sha256": item.get("alpha_mask_sha256"),
+            }
+        )
+    return _icon_manifest_sha256(entries)
+
+
 def _load_source_evidence(
     item: dict[str, Any], index: int, base_dir: Path
 ) -> tuple[Image.Image, Image.Image]:
@@ -362,6 +395,7 @@ def create_icon_crop_review(spec_path: Path, output_path: Path) -> dict[str, Any
         "reused": reused,
         "assets": evidence_assets,
         "output": str(output_path),
+        "output_sha256": _sha256(output_path),
         "background": "#00FF00",
         "scale": SCALE,
         "context_scale": CONTEXT_SCALE,

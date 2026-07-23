@@ -30,8 +30,8 @@ description: Use when converting one or more uploaded images, screenshots, expor
 ## 单页流程
 
 1. 每页建独立目录；非续作时写 `session_reuse.mode=fresh_reconstruction`。主代理是 PPTX、规格、脚本和资产的唯一写入者。
-2. 首次运行 `preflight_runtime.py`，原子输出 `work/preflight-runtime.json`；失败不得生成。完成测量后，`strict` 写规格前通过 commentary 展示当前坐标定位图。
-3. 只加载命中的 reference，先写唯一 schema v2 `work/page-reconstruction.json`、项目 `verification_profile` 和 `pending`。图标先确认带 bbox 的局部上下文与 `roi_context_400`，默认先执行 `alpha_isolation`；前景触边时不得回退，应扩大 bbox。只有透明结果损失轮廓、阴影或色晕时才改用 `background_preserved` 并记录 `fallback_reason`。图标资产与绿幕复核必须在 prebuild 前完成；`strict` 在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图。随后首次运行 `validate_reconstruction_spec.py --stage prebuild --output <report.json>`，不得事后反补规格。
+2. 首次运行 `preflight_runtime.py`，原子输出 `work/preflight-runtime.json`；失败不得生成。完成测量后，写规格前通过 commentary 展示当前坐标定位图并检查。
+3. 只加载命中的 reference，先写唯一 schema v2 `work/page-reconstruction.json`、项目 `verification_profile` 和 `pending`。图标先确认带 bbox 的局部上下文与 `roi_context_400`，默认先执行 `alpha_isolation`；前景触边时不得回退，应扩大 bbox。只有透明结果损失轮廓、阴影或色晕时才改用 `background_preserved` 并记录 `fallback_reason`。图标资产与绿幕复核必须在 prebuild 前完成；图标页面在 prebuild 前通过 commentary 展示当前图标裁切绿幕复核图并检查。随后首次运行 `validate_reconstruction_spec.py --stage prebuild --output <report.json>`，不得事后反补规格。
 4. 生成一页 16:9 PPTX。主要对象反查 `element_id`；OOXML 名称写 `ia:<element_id>`，多部件写 `ia:<element_id>:<part>`。画布外、隐藏或透明空对象不得充当可编辑证据。
 5. 运行 `validate_pptx.py --expected-slides 1 --spec ... --output <report.json>`，修正后重验。再按[视觉审计与交付](references/visual-audit-and-delivery.md)执行当前模式：`rapid` 运行 `create_visual_diff.py --profile rapid`；`reviewed` 生成必要区域证据并独立复核；`strict` 执行完整证据与 candidate 收敛。中间修复只重建受影响区域证据。
 6. 终态只显式运行一次 `validate_reconstruction_spec.py --stage final`。失败不切换模式、不伪造通过状态，按当前模式交付现有产物。

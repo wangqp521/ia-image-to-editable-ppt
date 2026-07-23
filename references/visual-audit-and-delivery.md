@@ -10,7 +10,7 @@
 | `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `reviewed_passed` |
 | `strict` | 全页证据 + 完整 regions 200% 证据 + accepted/candidate 证据链 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
 
-三个模式共享同一套复刻、prebuild、结构校验、tripwire、终态对象身份和失败诚实性要求。轻量化只减少“证明结果合格”的证据量与独立审查成本，不降低内容正确性、视觉复刻、可编辑性和 16:9 结构标准。
+三个模式共享复刻、prebuild、结构、tripwire、对象身份和失败诚实性。profile 只控制终态证明成本，不得降低构建前输入质量。
 
 ### `rapid` 快速校验
 

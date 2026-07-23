@@ -6,7 +6,7 @@
 
 `content_reference` 唯一裁决文字、数字、单位、数量、分组和语义；`clean_visual_reference` 唯一裁决坐标、比例、颜色、字体观感、图标、纹理和层级。直通页两者均指向原图；清洗页内容仍服从原图，清洗图改变的内容不得进入 PPTX。每页不得借用其他页事实。
 
-preflight 记录当前输入绝对路径/SHA-256、像素尺寸、alpha、页边界、分类、依赖和页目录。先运行 `create_coordinate_overlay.py`；需要取色或确认边界时对明确点/bbox 运行 `inspect_image_region.py`。写规格前通过 commentary 以 `[第 N/总页数] 坐标定位图` 展示当前 `coordinate-overlay.png`；同一来源 SHA-256 下每页只展示一次。来源图改变时，旧坐标定位图立即失效，必须重新生成并展示。工具输出是测量证据，不是新的事实源。
+preflight绑定输入路径/hash、尺寸和边界。运行 `create_coordinate_overlay.py`；按需运行 `inspect_image_region.py`。写规格前通过 commentary 以 `[第 N/总页数] 坐标定位图` 展示 PNG；同一来源 SHA-256 下每页只展示一次。把 overlay path/hash、source hash、grid、manifest 和 `inspection=passed` 写入 `modules.page_layout.coordinate_overlay_evidence`。来源或 grid 改变时旧坐标定位图立即失效并重建展示；各 profile 不得跳过。工具证据不是新事实源。
 
 ## 唯一 schema v2 规格
 

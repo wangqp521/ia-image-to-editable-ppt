@@ -114,6 +114,7 @@ class CreateIconCropReviewTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             result = json.loads(completed.stdout)
             self.assertEqual(result["spec_sha256"], sha256(spec_path))
+            self.assertEqual(result["output_sha256"], sha256(output))
             self.assertIn("reused", result)
             self.assertIn("icon_manifest_sha256", result)
             self.assertFalse(result["reused"])
