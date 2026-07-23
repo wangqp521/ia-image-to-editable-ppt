@@ -987,6 +987,36 @@ def _bold_vector(length: int, runs: Any) -> list[bool] | None:
     return [bool(value) for value in values]
 
 
+def _font_size_vector(length: int, runs: Any) -> list[float] | None:
+    if not isinstance(runs, list) or not runs:
+        return None
+    values: list[float | None] = [None] * length
+    for run in runs:
+        if not isinstance(run, dict):
+            return None
+        start, end, size = run.get("start"), run.get("end"), run.get("font_size")
+        if (
+            not isinstance(start, int)
+            or isinstance(start, bool)
+            or not isinstance(end, int)
+            or isinstance(end, bool)
+            or not isinstance(size, (int, float))
+            or isinstance(size, bool)
+            or size <= 0
+            or start < 0
+            or end <= start
+            or end > length
+        ):
+            return None
+        for offset in range(start, end):
+            if values[offset] is not None:
+                return None
+            values[offset] = float(size)
+    if any(value is None for value in values):
+        return None
+    return [float(value) for value in values]
+
+
 def _validate_text_run_contracts(
     result: dict[str, Any],
     spec: dict[str, Any],
@@ -1028,6 +1058,25 @@ def _validate_text_run_contracts(
         if expected_bold is None or actual_bold is None or expected_bold != actual_bold:
             result["errors"].append("TEXT_RUN_FONT_WEIGHT_MISMATCH")
             result["warnings"].append(f"{element_id}: Text Run bold ranges do not match the reconstruction spec")
+        expected_runs = item.get("runs")
+        if isinstance(expected_runs, list) and any(
+            isinstance(run, dict) and "font_size" in run
+            for run in expected_runs
+        ):
+            expected_sizes = _font_size_vector(len(text), expected_runs)
+            actual_sizes = _font_size_vector(len(text), actual_object.get("runs"))
+            if (
+                expected_sizes is None
+                or actual_sizes is None
+                or any(
+                    not _same_value(expected, actual)
+                    for expected, actual in zip(expected_sizes, actual_sizes)
+                )
+            ):
+                result["errors"].append("TEXT_RUN_FONT_SIZE_MISMATCH")
+                result["warnings"].append(
+                    f"{element_id}: Text Run point sizes do not match the reconstruction spec"
+                )
 
 
 def _validate_native_list_contracts(

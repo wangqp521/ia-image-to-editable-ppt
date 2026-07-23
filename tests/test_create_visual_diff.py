@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +21,58 @@ SPEC.loader.exec_module(MODULE)
 class CreateVisualDiffTests(unittest.TestCase):
     def _save(self, path: Path, color: tuple[int, int, int]) -> None:
         Image.new("RGB", (160, 90), color).save(path)
+
+    def _sha256(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def _write_render_report(self, root: Path, preview: Path) -> Path:
+        pptx = root / "page.pptx"
+        pdf = root / "page.pdf"
+        font_report = root / "pdffonts.json"
+        pptx.write_bytes(b"pptx")
+        pdf.write_bytes(b"pdf")
+        font_report.write_text('{"resolved_fonts":[]}', encoding="utf-8")
+        report = root / "render-report.json"
+        report.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "pptx": {"path": str(pptx), "sha256": self._sha256(pptx)},
+                    "renderer": {
+                        "backend": "libreoffice",
+                        "path": "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                        "version": "LibreOffice 26.2.3.2",
+                        "executable_sha256": "a" * 64,
+                        "fontconfig_path": str(root / "fontconfig.xml"),
+                        "fontconfig_sha256": "b" * 64,
+                        "isolated_profile": True,
+                    },
+                    "pdf": {
+                        "path": str(pdf),
+                        "sha256": self._sha256(pdf),
+                        "pages": 1,
+                        "page_size_pt": [960, 540],
+                    },
+                    "font_report": {
+                        "path": str(font_report),
+                        "sha256": self._sha256(font_report),
+                        "resolved_fonts": [],
+                    },
+                    "rasterizer": {
+                        "path": "/opt/homebrew/bin/pdftoppm",
+                        "version": "pdftoppm 26.07.0",
+                        "output_size": [160, 90],
+                    },
+                    "preview": {
+                        "path": str(preview),
+                        "sha256": self._sha256(preview),
+                        "size": [160, 90],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return report
 
     def test_identical_images_generate_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -246,6 +300,106 @@ class CreateVisualDiffTests(unittest.TestCase):
                     root / "out",
                     profile="automatic",
                 )
+
+    def test_report_binding_records_pptx_renderer_and_pdf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (255, 255, 255))
+            render_report = self._write_render_report(root, preview)
+
+            report = MODULE.build_visual_diff_from_render_report(
+                reference, render_report, root / "out", profile="rapid"
+            )
+
+            payload = json.loads(render_report.read_text(encoding="utf-8"))
+            self.assertEqual(payload["pptx"]["sha256"], report["pptx_sha256"])
+            self.assertEqual(
+                self._sha256(render_report), report["render_report"]["sha256"]
+            )
+            self.assertEqual(payload["renderer"], report["renderer"])
+            self.assertEqual(payload["pdf"]["sha256"], report["pdf_sha256"])
+
+    def test_report_binding_rejects_preview_hash_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            preview = root / "preview.png"
+            self._save(preview, (255, 255, 255))
+            render_report = self._write_render_report(root, preview)
+            payload = json.loads(render_report.read_text(encoding="utf-8"))
+            payload["preview"]["sha256"] = "f" * 64
+            render_report.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "preview sha256"):
+                MODULE.load_render_report(render_report)
+
+    def test_rapid_region_presence_flags_catastrophic_missing_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            Image.new("RGB", (160, 90), "white").save(reference)
+            with Image.open(reference) as source:
+                source.load()
+                for x in range(10, 70):
+                    for y in range(5, 35):
+                        source.putpixel((x, y), (0, 0, 0))
+                source.save(reference)
+            self._save(preview, (255, 255, 255))
+            render_report = self._write_render_report(root, preview)
+
+            report = MODULE.build_visual_diff_from_render_report(
+                reference,
+                render_report,
+                root / "out",
+                regions=[
+                    {
+                        "region_id": "main-content",
+                        "source_bbox": [0, 0, 80, 40],
+                        "element_ids": ["title-1"],
+                    }
+                ],
+                profile="rapid",
+            )
+
+            self.assertEqual("failed", report["region_presence"]["status"])
+            self.assertEqual(
+                ["main-content"], report["region_presence"]["missing"]
+            )
+            self.assertEqual([], report["regions"])
+
+    def test_region_presence_ignores_decorative_or_empty_regions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (255, 255, 255))
+            render_report = self._write_render_report(root, preview)
+
+            report = MODULE.build_visual_diff_from_render_report(
+                reference,
+                render_report,
+                root / "out",
+                regions=[
+                    {
+                        "region_id": "decorative",
+                        "source_bbox": [0, 0, 80, 40],
+                        "element_ids": [],
+                    },
+                    {
+                        "region_id": "empty",
+                        "source_bbox": [80, 0, 80, 40],
+                        "element_ids": ["empty-1"],
+                    },
+                ],
+                profile="rapid",
+            )
+
+            self.assertEqual("passed", report["region_presence"]["status"])
+            self.assertEqual(0, report["region_presence"]["checked"])
 
 
 if __name__ == "__main__":

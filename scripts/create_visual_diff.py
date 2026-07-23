@@ -15,6 +15,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageStat
 
 
 RESAMPLING = getattr(Image, "Resampling", Image).LANCZOS
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _sha256(path: Path) -> str:
@@ -23,6 +24,71 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _reported_file(
+    report: dict[str, Any],
+    key: str,
+    *,
+    report_path: Path,
+) -> tuple[Path, str]:
+    value = report.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"render report {key} must be an object")
+    raw_path = value.get("path")
+    expected_sha = value.get("sha256")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise ValueError(f"render report {key} path is missing")
+    if not isinstance(expected_sha, str) or not SHA256_PATTERN.fullmatch(expected_sha):
+        raise ValueError(f"render report {key} sha256 is invalid")
+    path = Path(raw_path).expanduser()
+    if not path.is_absolute():
+        path = report_path.parent / path
+    path = path.resolve()
+    if not path.is_file():
+        raise ValueError(f"render report {key} file does not exist: {path}")
+    actual_sha = _sha256(path)
+    if actual_sha != expected_sha:
+        raise ValueError(
+            f"render report {key} sha256 mismatch: expected {expected_sha}, got {actual_sha}"
+        )
+    return path, expected_sha
+
+
+def load_render_report(path: Path | str) -> tuple[dict[str, Any], Path]:
+    """Load a render report and verify its minimum immutable file bindings."""
+    report_path = Path(path).expanduser().resolve()
+    if not report_path.is_file():
+        raise ValueError(f"render report does not exist: {report_path}")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"render report is not valid JSON: {error}") from error
+    if not isinstance(report, dict):
+        raise ValueError("render report root must be an object")
+    pptx = report.get("pptx")
+    pptx_sha = pptx.get("sha256") if isinstance(pptx, dict) else None
+    if not isinstance(pptx_sha, str) or not SHA256_PATTERN.fullmatch(pptx_sha):
+        raise ValueError("render report pptx sha256 is invalid")
+    renderer = report.get("renderer")
+    if not isinstance(renderer, dict) or renderer.get("backend") != "libreoffice":
+        raise ValueError("render report renderer must be libreoffice")
+    _reported_file(report, "pdf", report_path=report_path)
+    preview_path, _ = _reported_file(report, "preview", report_path=report_path)
+    preview_size = report["preview"].get("size")
+    if not (
+        isinstance(preview_size, list)
+        and len(preview_size) == 2
+        and all(isinstance(item, int) and item > 0 for item in preview_size)
+    ):
+        raise ValueError("render report preview size is invalid")
+    with Image.open(preview_path) as preview:
+        if list(preview.size) != preview_size:
+            raise ValueError(
+                f"render report preview size mismatch: expected {preview_size}, "
+                f"got {list(preview.size)}"
+            )
+    return report, report_path
 
 
 def _align_preview(reference: Image.Image, preview: Image.Image) -> tuple[Image.Image, str]:
@@ -198,6 +264,55 @@ def _save_region_evidence(
     return results, skipped
 
 
+def _foreground_ratio(image: Image.Image) -> float:
+    grayscale = image.convert("L")
+    pixels = grayscale.get_flattened_data()
+    total = image.width * image.height
+    if total == 0:
+        return 0.0
+    return sum(1 for value in pixels if value < 245) / total
+
+
+def _region_presence(
+    reference: Image.Image,
+    preview: Image.Image,
+    regions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    missing: list[str] = []
+    checks: list[dict[str, Any]] = []
+    for index, region in enumerate(regions):
+        if not isinstance(region, dict):
+            continue
+        element_ids = region.get("element_ids")
+        if not isinstance(element_ids, list) or not element_ids:
+            continue
+        bbox = _region_bbox(region.get("source_bbox"), reference.width, reference.height)
+        if bbox is None:
+            continue
+        source_ratio = _foreground_ratio(reference.crop(bbox))
+        if source_ratio < 0.02:
+            continue
+        preview_ratio = _foreground_ratio(preview.crop(bbox))
+        region_id = str(region.get("region_id") or f"region-{index + 1:03d}")
+        is_missing = preview_ratio < 0.002 and preview_ratio < source_ratio * 0.10
+        if is_missing:
+            missing.append(region_id)
+        checks.append(
+            {
+                "region_id": region_id,
+                "source_foreground_ratio": round(source_ratio, 6),
+                "preview_foreground_ratio": round(preview_ratio, 6),
+                "missing": is_missing,
+            }
+        )
+    return {
+        "checked": len(checks),
+        "missing": missing,
+        "status": "failed" if missing else "passed",
+        "checks": checks,
+    }
+
+
 def build_visual_diff(
     reference_path: Path | str,
     preview_path: Path | str,
@@ -301,10 +416,66 @@ def build_visual_diff(
     return report
 
 
+def build_visual_diff_from_render_report(
+    reference_path: Path | str,
+    render_report_path: Path | str,
+    output_dir: Path | str,
+    *,
+    regions: list[dict[str, Any]] | None = None,
+    minimum_similarity: float | None = None,
+    changed_threshold: int = 8,
+    profile: str = "strict",
+) -> dict[str, Any]:
+    """Create visual evidence using only the preview bound by a render report."""
+    render_report, resolved_report_path = load_render_report(render_report_path)
+    preview_path, _ = _reported_file(
+        render_report, "preview", report_path=resolved_report_path
+    )
+    report = build_visual_diff(
+        reference_path,
+        preview_path,
+        output_dir,
+        regions=regions,
+        minimum_similarity=minimum_similarity,
+        changed_threshold=changed_threshold,
+        profile=profile,
+    )
+    reference_path = Path(reference_path).expanduser().resolve()
+    with Image.open(reference_path) as source_image:
+        reference = source_image.convert("RGB")
+    with Image.open(preview_path) as preview_image:
+        preview_original = preview_image.convert("RGB")
+    preview, _ = _align_preview(reference, preview_original)
+    report.update(
+        {
+            "pptx_sha256": render_report["pptx"]["sha256"],
+            "render_report": {
+                "path": str(resolved_report_path),
+                "sha256": _sha256(resolved_report_path),
+            },
+            "renderer": render_report["renderer"],
+            "pdf_sha256": render_report["pdf"]["sha256"],
+            "region_presence": _region_presence(
+                reference, preview, regions or []
+            ),
+        }
+    )
+    report_path = Path(report["report"])
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return report
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("reference", type=Path, help="Clean visual reference image")
-    parser.add_argument("preview", type=Path, help="Preview rendered from the current PPTX")
+    parser.add_argument(
+        "--render-report",
+        type=Path,
+        required=True,
+        help="render-report.json produced by render_preview.py",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--spec", type=Path, help="Optional page-reconstruction.json for region crops")
     parser.add_argument("--minimum-similarity", type=float)
@@ -324,9 +495,9 @@ def main(argv: list[str] | None = None) -> int:
             regions = value
         if isinstance(spec, dict) and isinstance(spec.get("verification_profile"), str):
             spec_profile = spec["verification_profile"]
-    report = build_visual_diff(
+    report = build_visual_diff_from_render_report(
         args.reference,
-        args.preview,
+        args.render_report,
         args.output_dir,
         regions=regions,
         minimum_similarity=args.minimum_similarity,
@@ -334,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         profile=args.profile or spec_profile or "strict",
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    if report["tripwire"]["triggered"]:
+    if report["tripwire"]["triggered"] or report["region_presence"]["status"] == "failed":
         return 2
     return 1 if report["region_summary"]["skipped"] else 0
 

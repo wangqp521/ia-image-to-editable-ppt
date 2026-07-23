@@ -9,6 +9,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -17,12 +18,23 @@ from pathlib import Path
 from typing import Any
 
 
+PRERELEASE_RENDERER_PATTERN = re.compile(
+    r"(?:libreofficedev|\b(?:alpha|beta|rc)\d*\b)",
+    re.IGNORECASE,
+)
+PREVIEW_SIZE = [1920, 1080]
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def is_stable_libreoffice_version(version: str) -> bool:
+    return bool(version.strip()) and PRERELEASE_RENDERER_PATTERN.search(version) is None
 
 
 def _resolve_executable(requested: str) -> Path | None:
@@ -88,6 +100,7 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
             "available": resolved is not None,
             "path": str(resolved) if resolved else None,
             "version": _version(resolved) if resolved else None,
+            "sha256": _sha256(resolved) if resolved else None,
         }
         if resolved is None:
             errors.append(
@@ -96,6 +109,19 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
                     "detail": requested,
                 }
             )
+
+    soffice_version = executables["soffice"]["version"]
+    if (
+        executables["soffice"]["available"]
+        and isinstance(soffice_version, str)
+        and not is_stable_libreoffice_version(soffice_version)
+    ):
+        errors.append(
+            {
+                "code": "RUNTIME_RENDERER_PRERELEASE_FORBIDDEN",
+                "detail": soffice_version,
+            }
+        )
 
     fontconfig = args.fontconfig.expanduser().resolve()
     fontconfig_entry = {
@@ -129,9 +155,11 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
 
-    return {
-        "valid": not errors,
+    result = {
+        "valid": False,
         "errors": errors,
+        "renderer_backend": "libreoffice",
+        "preview_size": PREVIEW_SIZE,
         "python": {
             "executable": str(Path(sys.executable).resolve()),
             "version": sys.version.split()[0],
@@ -140,6 +168,43 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         "fontconfig": fontconfig_entry,
         "python_modules": modules,
     }
+    expected_runtime = getattr(args, "expected_runtime", None)
+    if expected_runtime is not None:
+        try:
+            expected = json.loads(
+                expected_runtime.expanduser().resolve().read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            errors.append(
+                {
+                    "code": "RUNTIME_RENDERER_IDENTITY_MISMATCH",
+                    "detail": f"cannot read expected runtime: {exc}",
+                }
+            )
+        else:
+            keys = (
+                ("renderer_backend", result.get("renderer_backend"), expected.get("renderer_backend")),
+                ("preview_size", result.get("preview_size"), expected.get("preview_size")),
+                ("fontconfig.sha256", result["fontconfig"].get("sha256"), expected.get("fontconfig", {}).get("sha256")),
+            )
+            mismatches = [
+                key for key, actual, wanted in keys if actual != wanted
+            ]
+            for name in ("soffice", "pdftoppm", "pdffonts"):
+                actual_tool = result["executables"].get(name, {})
+                expected_tool = expected.get("executables", {}).get(name, {})
+                for field in ("version", "sha256"):
+                    if actual_tool.get(field) != expected_tool.get(field):
+                        mismatches.append(f"executables.{name}.{field}")
+            if mismatches:
+                errors.append(
+                    {
+                        "code": "RUNTIME_RENDERER_IDENTITY_MISMATCH",
+                        "detail": ", ".join(sorted(mismatches)),
+                    }
+                )
+    result["valid"] = not errors
+    return result
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -148,6 +213,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdftoppm", required=True)
     parser.add_argument("--pdffonts", required=True)
     parser.add_argument("--fontconfig", type=Path, required=True)
+    parser.add_argument("--expected-runtime", type=Path)
     parser.add_argument("--python-module", action="append", default=[])
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)

@@ -378,6 +378,193 @@ def _validate_gate_artifact(
     return str(resolved), actual.lower()
 
 
+def _load_json_artifact(
+    artifact: tuple[str, str] | None,
+    *,
+    code: str,
+    path: str,
+    errors: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    if artifact is None:
+        return None
+    try:
+        payload = json.loads(Path(artifact[0]).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        _error(errors, code, path, "artifact must contain valid JSON")
+        return None
+    if not isinstance(payload, dict):
+        _error(errors, code, path, "artifact root must be an object")
+        return None
+    return payload
+
+
+def _render_file_identity(
+    value: Any,
+    *,
+    path: str,
+    errors: list[dict[str, str]],
+) -> tuple[str, str] | None:
+    if not isinstance(value, dict):
+        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "file identity is required")
+        return None
+    raw_path = value.get("path")
+    digest = value.get("sha256")
+    if (
+        not isinstance(raw_path, str)
+        or not Path(raw_path).is_absolute()
+        or not isinstance(digest, str)
+        or not SHA256_PATTERN.fullmatch(digest)
+    ):
+        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "path and sha256 are invalid")
+        return None
+    resolved = Path(raw_path).expanduser().resolve()
+    if not resolved.is_file() or _file_sha256(resolved).lower() != digest.lower():
+        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "reported file is missing or stale")
+        return None
+    return str(resolved), digest.lower()
+
+
+def _validate_render_report(
+    artifact: tuple[str, str] | None,
+    visual_pptx: tuple[str, str] | None,
+    preview: tuple[str, str] | None,
+    preflight_artifact: tuple[str, str] | None,
+    errors: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    report = _load_json_artifact(
+        artifact,
+        code="SPEC_RENDER_REPORT_INVALID",
+        path="visual_gate.render_report",
+        errors=errors,
+    )
+    preflight = _load_json_artifact(
+        preflight_artifact,
+        code="SPEC_RUNTIME_PREFLIGHT_INVALID",
+        path="runtime_preflight",
+        errors=errors,
+    )
+    if report is None:
+        return None
+    if report.get("schema_version") != 1:
+        _error(
+            errors,
+            "SPEC_RENDER_REPORT_INVALID",
+            "visual_gate.render_report.schema_version",
+            "expected render report schema_version 1",
+        )
+    pptx = report.get("pptx")
+    reported_pptx_sha = pptx.get("sha256") if isinstance(pptx, dict) else None
+    if visual_pptx is None or reported_pptx_sha != visual_pptx[1]:
+        _error(
+            errors,
+            "SPEC_RENDER_PPTX_MISMATCH",
+            "visual_gate.render_report.pptx",
+            "render report must bind the current visual-gate PPTX",
+        )
+    reported_preview = _render_file_identity(
+        report.get("preview"),
+        path="visual_gate.render_report.preview",
+        errors=errors,
+    )
+    if (
+        preview is None
+        or reported_preview is None
+        or reported_preview != preview
+        or report.get("preview", {}).get("size") != [1920, 1080]
+    ):
+        _error(
+            errors,
+            "SPEC_RENDER_PREVIEW_MISMATCH",
+            "visual_gate.render_report.preview",
+            "render report must bind the current 1920x1080 preview",
+        )
+    _render_file_identity(
+        report.get("pdf"),
+        path="visual_gate.render_report.pdf",
+        errors=errors,
+    )
+    _render_file_identity(
+        report.get("font_report"),
+        path="visual_gate.render_report.font_report",
+        errors=errors,
+    )
+    pdf = report.get("pdf")
+    if (
+        not isinstance(pdf, dict)
+        or pdf.get("pages") != 1
+        or pdf.get("page_size_pt") != [960, 540]
+    ):
+        _error(
+            errors,
+            "SPEC_RENDER_REPORT_INVALID",
+            "visual_gate.render_report.pdf",
+            "rendered PDF must contain one 960x540 point page",
+        )
+    renderer = report.get("renderer")
+    rasterizer = report.get("rasterizer")
+    runtime_matches = (
+        isinstance(preflight, dict)
+        and preflight.get("valid") is True
+        and preflight.get("renderer_backend") == "libreoffice"
+        and preflight.get("preview_size") == [1920, 1080]
+        and isinstance(renderer, dict)
+        and renderer.get("backend") == "libreoffice"
+        and renderer.get("isolated_profile") is True
+        and renderer.get("path")
+        == preflight.get("executables", {}).get("soffice", {}).get("path")
+        and renderer.get("version")
+        == preflight.get("executables", {}).get("soffice", {}).get("version")
+        and renderer.get("executable_sha256")
+        == preflight.get("executables", {}).get("soffice", {}).get("sha256")
+        and renderer.get("fontconfig_path")
+        == preflight.get("fontconfig", {}).get("path")
+        and renderer.get("fontconfig_sha256")
+        == preflight.get("fontconfig", {}).get("sha256")
+        and isinstance(rasterizer, dict)
+        and rasterizer.get("path")
+        == preflight.get("executables", {}).get("pdftoppm", {}).get("path")
+        and rasterizer.get("version")
+        == preflight.get("executables", {}).get("pdftoppm", {}).get("version")
+        and rasterizer.get("executable_sha256")
+        == preflight.get("executables", {}).get("pdftoppm", {}).get("sha256")
+        and rasterizer.get("output_size") == [1920, 1080]
+    )
+    if not runtime_matches:
+        _error(
+            errors,
+            "SPEC_RENDER_RUNTIME_MISMATCH",
+            "visual_gate.render_report.renderer",
+            "render report must match the fixed stable LibreOffice preflight identity",
+        )
+    return report
+
+
+def _validate_font_traces_against_render(
+    typography: Any,
+    render_report: dict[str, Any] | None,
+    errors: list[dict[str, str]],
+) -> None:
+    if not isinstance(typography, dict) or not isinstance(render_report, dict):
+        return
+    pdf_sha = render_report.get("pdf", {}).get("sha256")
+    resolved_fonts = render_report.get("font_report", {}).get("resolved_fonts")
+    for index, item in enumerate(typography.get("items", [])):
+        trace = item.get("fallback_trace") if isinstance(item, dict) else None
+        if trace is None:
+            continue
+        if (
+            not isinstance(trace, dict)
+            or trace.get("pdf_sha256") != pdf_sha
+            or trace.get("resolved_fonts") != resolved_fonts
+        ):
+            _error(
+                errors,
+                "SPEC_FONT_TRACE_RENDER_MISMATCH",
+                f"modules.typography.items[{index}].fallback_trace",
+                "font fallback trace must bind the current rendered PDF and resolved-font list",
+            )
+
+
 def _validate_validator_report(
     artifact: tuple[str, str] | None,
     expected_native_list_contracts: int,
@@ -481,6 +668,8 @@ def _validate_visual_diff_report(
     artifact: tuple[str, str] | None,
     spec: dict[str, Any],
     preview: tuple[str, str] | None,
+    render_report: tuple[str, str] | None,
+    visual_pptx: tuple[str, str] | None,
     errors: list[dict[str, str]],
     *,
     require_all_regions: bool = True,
@@ -515,6 +704,34 @@ def _validate_visual_diff_report(
         or report_preview.get("sha256") != preview[1]
     ):
         _error(errors, "SPEC_VISUAL_DIFF_PREVIEW_MISMATCH", "visual_gate.report.preview", "visual diff must bind the current preview")
+    report_render = payload.get("render_report")
+    if (
+        render_report is None
+        or not isinstance(report_render, dict)
+        or report_render.get("path") != render_report[0]
+        or report_render.get("sha256") != render_report[1]
+        or payload.get("pptx_sha256") != (
+            visual_pptx[1] if visual_pptx is not None else None
+        )
+    ):
+        _error(
+            errors,
+            "SPEC_RENDER_REPORT_INVALID",
+            "visual_gate.report.render_report",
+            "visual diff must bind the current render report and PPTX",
+        )
+    region_presence = payload.get("region_presence")
+    if (
+        not isinstance(region_presence, dict)
+        or region_presence.get("status") != "passed"
+        or region_presence.get("missing") != []
+    ):
+        _error(
+            errors,
+            "SPEC_REGION_PRESENCE_FAILED",
+            "visual_gate.report.region_presence",
+            "region presence must pass before final delivery",
+        )
     summary = payload.get("region_summary")
     if require_all_regions:
         requested = len(spec.get("regions", [])) if isinstance(spec.get("regions"), list) else 0
@@ -1660,6 +1877,32 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             "visual_gate.report",
             errors,
         )
+        if not isinstance(visual_gate, dict) or not isinstance(
+            visual_gate.get("render_report"), dict
+        ):
+            _error(
+                errors,
+                "SPEC_RENDER_REPORT_MISSING",
+                "visual_gate.render_report",
+                "final validation requires the current render-report.json identity",
+            )
+        render_report_artifact = _validate_gate_artifact(
+            visual_gate.get("render_report") if isinstance(visual_gate, dict) else None,
+            "visual_gate.render_report",
+            errors,
+        )
+        if not isinstance(spec.get("runtime_preflight"), dict):
+            _error(
+                errors,
+                "SPEC_RUNTIME_PREFLIGHT_MISSING",
+                "runtime_preflight",
+                "final validation requires the fixed LibreOffice preflight identity",
+            )
+        preflight_artifact = _validate_gate_artifact(
+            spec.get("runtime_preflight"),
+            "runtime_preflight",
+            errors,
+        )
         editability_pptx = _validate_gate_artifact(
             editability_gate.get("pptx") if isinstance(editability_gate, dict) else None,
             "editability_gate.pptx",
@@ -1698,10 +1941,24 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             "visual_gate.preview",
             errors,
         )
+        render_payload = _validate_render_report(
+            render_report_artifact,
+            visual_pptx,
+            preview_artifact,
+            preflight_artifact,
+            errors,
+        )
+        _validate_font_traces_against_render(
+            modules.get("typography") if isinstance(modules, dict) else None,
+            render_payload,
+            errors,
+        )
         verified_visual_evidence = _validate_visual_diff_report(
             report_artifact,
             spec,
             preview_artifact,
+            render_report_artifact,
+            visual_pptx,
             errors,
             require_all_regions=verification_profile == "strict",
         )

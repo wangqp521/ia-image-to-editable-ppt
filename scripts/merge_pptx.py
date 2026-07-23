@@ -109,6 +109,43 @@ def _artifact_identity(value: Any, code: str) -> tuple[Path, str]:
     return path.resolve(), actual.lower()
 
 
+def _render_identity(
+    spec: dict[str, Any],
+) -> tuple[str, str, str, str, tuple[int, int]]:
+    visual_gate = spec.get("visual_gate")
+    artifact = (
+        visual_gate.get("render_report") if isinstance(visual_gate, dict) else None
+    )
+    report_path, _ = _artifact_identity(artifact, "RENDER_REPORT_INVALID")
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MergeError(
+            "RENDER_REPORT_INVALID",
+            f"Render report is not valid JSON: {report_path}",
+        ) from exc
+    renderer = report.get("renderer") if isinstance(report, dict) else None
+    rasterizer = report.get("rasterizer") if isinstance(report, dict) else None
+    output_size = rasterizer.get("output_size") if isinstance(rasterizer, dict) else None
+    identity = (
+        renderer.get("backend") if isinstance(renderer, dict) else None,
+        renderer.get("version") if isinstance(renderer, dict) else None,
+        renderer.get("executable_sha256") if isinstance(renderer, dict) else None,
+        renderer.get("fontconfig_sha256") if isinstance(renderer, dict) else None,
+        tuple(output_size) if isinstance(output_size, list) else (),
+    )
+    if (
+        identity[0] != "libreoffice"
+        or not all(isinstance(item, str) and item for item in identity[:4])
+        or identity[4] != (1920, 1080)
+    ):
+        raise MergeError(
+            "RENDER_REPORT_INVALID",
+            f"Render report identity is incomplete: {report_path}",
+        )
+    return identity  # type: ignore[return-value]
+
+
 def _validate_page_binding(
     input_path: Path,
     spec: dict[str, Any],
@@ -545,6 +582,13 @@ def merge_presentations(
             profiles=verification_profiles,
         )
     verification_profile = verification_profiles[0]
+    render_identities = [_render_identity(spec) for spec in page_specs]
+    if len(set(render_identities)) != 1:
+        raise MergeError(
+            "RENDER_RUNTIME_MIXED",
+            "All merge inputs must use the same LibreOffice, fontconfig, and preview size",
+            identities=render_identities,
+        )
     page_ids = [spec.get("page_id") for spec in page_specs]
     if any(not isinstance(page_id, str) or not page_id for page_id in page_ids):
         raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
@@ -630,6 +674,13 @@ def merge_presentations(
         "specs": [str(path) for path in spec_paths],
         "page_ids": page_ids,
         "verification_profile": verification_profile,
+        "render_identity": {
+            "backend": render_identities[0][0],
+            "version": render_identities[0][1],
+            "executable_sha256": render_identities[0][2],
+            "fontconfig_sha256": render_identities[0][3],
+            "preview_size": list(render_identities[0][4]),
+        },
         "delivery_label": delivery_labels[verification_profile][0 if all_passed else 1],
         "imported_slide_parts": imported_parts,
         "validation": validation,

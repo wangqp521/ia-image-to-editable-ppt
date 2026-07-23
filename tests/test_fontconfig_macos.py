@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = SKILL_ROOT / "assets" / "fontconfig-macos.conf"
 SKILL_PATH = SKILL_ROOT / "SKILL.md"
+RENDER_PATH = SKILL_ROOT / "scripts" / "render_preview.py"
 
 
 class MacOSFontconfigTests(unittest.TestCase):
@@ -25,23 +26,23 @@ class MacOSFontconfigTests(unittest.TestCase):
 
     def test_skill_uses_config_for_macos_soffice_preview(self):
         skill_text = SKILL_PATH.read_text(encoding="utf-8")
+        render_text = RENDER_PATH.read_text(encoding="utf-8")
 
-        self.assertIn(
-            'FONTCONFIG_FILE="$PWD/assets/fontconfig-macos.conf"',
-            skill_text,
-        )
-        self.assertIn("soffice ", skill_text)
-        self.assertIn("--headless", skill_text)
-        self.assertIn("--convert-to pdf", skill_text)
+        self.assertIn("--fontconfig assets/fontconfig-macos.conf", skill_text)
+        self.assertIn("render_preview.py", skill_text)
+        self.assertIn('env["FONTCONFIG_FILE"]', render_text)
+        self.assertIn('"--headless"', render_text)
+        self.assertIn('"--convert-to"', render_text)
+        self.assertIn('"pdf"', render_text)
 
     def test_skill_uses_isolated_libreoffice_user_installation(self):
         skill_text = SKILL_PATH.read_text(encoding="utf-8")
+        render_text = RENDER_PATH.read_text(encoding="utf-8")
 
-        self.assertIn(
-            'soffice "-env:UserInstallation=file://$(mktemp -d)"',
-            skill_text,
-        )
-        self.assertIn("test -s <preview-dir>/<page>.pdf", skill_text)
+        self.assertIn("render_preview.py", skill_text)
+        self.assertIn('f"-env:UserInstallation={profile.resolve().as_uri()}"', render_text)
+        self.assertIn("tempfile.mkdtemp", render_text)
+        self.assertIn("RENDER_PDF_INVALID", render_text)
 
 
 if __name__ == "__main__":

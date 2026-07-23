@@ -1,0 +1,350 @@
+#!/usr/bin/env python3
+"""Render one immutable PPTX through stable LibreOffice into traceable PDF/PNG evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+from PIL import Image, UnidentifiedImageError
+
+
+SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+PRERELEASE_PATTERN = re.compile(
+    r"(?:libreofficedev|\b(?:alpha|beta|rc)\d*\b)",
+    re.IGNORECASE,
+)
+PAGE_SIZE = (960.0, 540.0)
+PREVIEW_SIZE = (1920, 1080)
+
+
+class RenderError(RuntimeError):
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _load_runtime(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RenderError("RENDER_RUNTIME_INVALID", str(exc)) from exc
+    if (
+        not isinstance(payload, dict)
+        or payload.get("valid") is not True
+        or payload.get("renderer_backend") != "libreoffice"
+        or payload.get("preview_size") != list(PREVIEW_SIZE)
+    ):
+        raise RenderError("RENDER_RUNTIME_INVALID", str(path))
+    version = payload.get("executables", {}).get("soffice", {}).get("version")
+    if not isinstance(version, str) or PRERELEASE_PATTERN.search(version):
+        raise RenderError("RENDER_RUNTIME_INVALID", f"unstable LibreOffice: {version}")
+    for name in ("soffice", "pdftoppm", "pdffonts"):
+        entry = payload.get("executables", {}).get(name)
+        if not isinstance(entry, dict):
+            raise RenderError("RENDER_RUNTIME_INVALID", f"missing {name}")
+        executable = Path(str(entry.get("path", ""))).expanduser().resolve()
+        if (
+            not executable.is_file()
+            or not os.access(executable, os.X_OK)
+            or not isinstance(entry.get("sha256"), str)
+            or _sha256(executable) != entry["sha256"]
+        ):
+            raise RenderError("RENDER_RUNTIME_INVALID", f"invalid {name}")
+    fontconfig = payload.get("fontconfig")
+    if not isinstance(fontconfig, dict):
+        raise RenderError("RENDER_RUNTIME_INVALID", "missing fontconfig")
+    fontconfig_path = Path(str(fontconfig.get("path", ""))).expanduser().resolve()
+    if (
+        not fontconfig_path.is_file()
+        or not isinstance(fontconfig.get("sha256"), str)
+        or _sha256(fontconfig_path) != fontconfig["sha256"]
+    ):
+        raise RenderError("RENDER_RUNTIME_INVALID", "invalid fontconfig")
+    return payload
+
+
+def _run(
+    command: list[str],
+    *,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RenderError("RENDER_COMMAND_FAILED", str(exc)) from exc
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise RenderError(
+            "RENDER_COMMAND_FAILED",
+            f"exit={completed.returncode}: {detail}",
+        )
+    return completed
+
+
+def _parse_pdffonts(text: str) -> list[str]:
+    fonts: set[str] = set()
+    for line in text.splitlines()[2:]:
+        fields = line.split()
+        if fields:
+            fonts.add(fields[0].split("+", 1)[-1])
+    return sorted(fonts)
+
+
+def _pdfinfo_executable(pdftoppm: Path) -> Path:
+    sibling = pdftoppm.with_name("pdfinfo")
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return sibling
+    found = shutil.which("pdfinfo")
+    if found:
+        return Path(found).resolve()
+    raise RenderError("RENDER_RUNTIME_INVALID", "pdfinfo is unavailable")
+
+
+def _inspect_pdf(pdf: Path, pdftoppm: Path) -> tuple[int, list[float]]:
+    completed = _run([str(_pdfinfo_executable(pdftoppm)), str(pdf)])
+    pages_match = re.search(r"^Pages:\s+(\d+)\s*$", completed.stdout, re.MULTILINE)
+    size_match = re.search(
+        r"^Page size:\s+([0-9.]+)\s+x\s+([0-9.]+)\s+pts\s*$",
+        completed.stdout,
+        re.MULTILINE,
+    )
+    if not pages_match or not size_match:
+        raise RenderError("RENDER_PDF_INVALID", "pdfinfo did not report pages and size")
+    return int(pages_match.group(1)), [
+        float(size_match.group(1)),
+        float(size_match.group(2)),
+    ]
+
+
+def _validate_output_dir(output_dir: Path) -> None:
+    if output_dir.exists():
+        if not output_dir.is_dir() or any(output_dir.iterdir()):
+            raise RenderError("RENDER_OUTPUT_NOT_EMPTY", str(output_dir))
+
+
+def render_preview(
+    pptx: Path,
+    output_dir: Path,
+    runtime_path: Path,
+    expected_slides: int = 1,
+) -> dict[str, Any]:
+    pptx = pptx.expanduser().resolve()
+    output_dir = output_dir.expanduser().resolve()
+    if not pptx.is_file():
+        raise RenderError("RENDER_INPUT_INVALID", str(pptx))
+    if expected_slides < 1:
+        raise RenderError("RENDER_INPUT_INVALID", "expected_slides must be positive")
+    _validate_output_dir(output_dir)
+    runtime = _load_runtime(runtime_path)
+    initial_pptx_hash = _sha256(pptx)
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(
+        tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent)
+    )
+    try:
+        profile = temp_dir / "lo-profile"
+        profile.mkdir()
+        soffice = Path(runtime["executables"]["soffice"]["path"]).resolve()
+        pdftoppm = Path(runtime["executables"]["pdftoppm"]["path"]).resolve()
+        pdffonts = Path(runtime["executables"]["pdffonts"]["path"]).resolve()
+        fontconfig = Path(runtime["fontconfig"]["path"]).resolve()
+        env = os.environ.copy()
+        env["FONTCONFIG_FILE"] = str(fontconfig)
+        _run(
+            [
+                str(soffice),
+                f"-env:UserInstallation={profile.resolve().as_uri()}",
+                "--headless",
+                "--convert-to",
+                "pdf",
+                "--outdir",
+                str(temp_dir),
+                str(pptx),
+            ],
+            env=env,
+        )
+        pdf_path = temp_dir / f"{pptx.stem}.pdf"
+        if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
+            raise RenderError("RENDER_PDF_INVALID", str(pdf_path))
+        pages, page_size = _inspect_pdf(pdf_path, pdftoppm)
+        if pages != expected_slides:
+            raise RenderError(
+                "RENDER_PDF_PAGE_MISMATCH",
+                f"expected {expected_slides}, got {pages}",
+            )
+        if any(abs(actual - expected) > 1.0 for actual, expected in zip(page_size, PAGE_SIZE)):
+            raise RenderError(
+                "RENDER_PDF_INVALID",
+                f"unexpected page size: {page_size}",
+            )
+
+        fonts_completed = _run([str(pdffonts), str(pdf_path)])
+        fonts_text_path = temp_dir / "pdffonts.txt"
+        fonts_text_path.write_text(fonts_completed.stdout, encoding="utf-8")
+        fonts_json_path = temp_dir / "pdffonts.json"
+        resolved_fonts = _parse_pdffonts(fonts_completed.stdout)
+        fonts_json_path.write_text(
+            json.dumps(
+                {"resolved_fonts": resolved_fonts},
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        preview_prefix = temp_dir / "current-preview"
+        _run(
+            [
+                str(pdftoppm),
+                "-png",
+                "-singlefile",
+                "-f",
+                "1",
+                "-l",
+                "1",
+                "-scale-to-x",
+                str(PREVIEW_SIZE[0]),
+                "-scale-to-y",
+                str(PREVIEW_SIZE[1]),
+                str(pdf_path),
+                str(preview_prefix),
+            ]
+        )
+        preview_path = temp_dir / "current-preview.png"
+        try:
+            with Image.open(preview_path) as image:
+                image.load()
+                if image.size != PREVIEW_SIZE:
+                    raise RenderError(
+                        "RENDER_PREVIEW_SIZE_MISMATCH",
+                        f"expected {PREVIEW_SIZE}, got {image.size}",
+                    )
+                if image.convert("L").getextrema()[0] >= 245:
+                    raise RenderError("RENDER_PREVIEW_INVALID", "preview is blank")
+        except RenderError:
+            raise
+        except (OSError, ValueError, UnidentifiedImageError) as exc:
+            raise RenderError("RENDER_PREVIEW_INVALID", str(exc)) from exc
+
+        if _sha256(pptx) != initial_pptx_hash:
+            raise RenderError("RENDER_INPUT_CHANGED", str(pptx))
+
+        final_pdf = output_dir / pdf_path.name
+        final_fonts_text = output_dir / fonts_text_path.name
+        final_fonts_json = output_dir / fonts_json_path.name
+        final_preview = output_dir / preview_path.name
+        report = {
+            "schema_version": 1,
+            "pptx": {"path": str(pptx), "sha256": initial_pptx_hash},
+            "renderer": {
+                "backend": "libreoffice",
+                "path": str(soffice),
+                "version": runtime["executables"]["soffice"]["version"],
+                "executable_sha256": runtime["executables"]["soffice"]["sha256"],
+                "fontconfig_path": str(fontconfig),
+                "fontconfig_sha256": runtime["fontconfig"]["sha256"],
+                "isolated_profile": True,
+            },
+            "pdf": {
+                "path": str(final_pdf),
+                "sha256": _sha256(pdf_path),
+                "pages": pages,
+                "page_size_pt": page_size,
+            },
+            "font_report": {
+                "path": str(final_fonts_json),
+                "sha256": _sha256(fonts_json_path),
+                "raw_path": str(final_fonts_text),
+                "raw_sha256": _sha256(fonts_text_path),
+                "resolved_fonts": resolved_fonts,
+            },
+            "rasterizer": {
+                "path": str(pdftoppm),
+                "version": runtime["executables"]["pdftoppm"]["version"],
+                "executable_sha256": runtime["executables"]["pdftoppm"]["sha256"],
+                "output_size": list(PREVIEW_SIZE),
+            },
+            "preview": {
+                "path": str(final_preview),
+                "sha256": _sha256(preview_path),
+                "size": list(PREVIEW_SIZE),
+            },
+        }
+        report_path = temp_dir / "render-report.json"
+        report_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        if output_dir.exists():
+            output_dir.rmdir()
+        os.replace(temp_dir, output_dir)
+        return report
+    except BaseException:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+        raise
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("pptx", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--expected-slides", type=int, default=1)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    try:
+        report = render_preview(
+            args.pptx,
+            args.output_dir,
+            args.runtime,
+            expected_slides=args.expected_slides,
+        )
+    except RenderError as exc:
+        print(
+            json.dumps(
+                {
+                    "valid": False,
+                    "error": {"code": exc.code, "detail": exc.detail},
+                },
+                ensure_ascii=False,
+            ),
+            file=sys.stderr,
+        )
+        return 2
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

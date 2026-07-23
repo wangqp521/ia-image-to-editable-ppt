@@ -456,6 +456,67 @@ class SkillRuntimeContractTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, runtime)
 
+    def test_all_profiles_share_one_stable_libreoffice_renderer(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        combined = runtime + audit
+        for phrase in (
+            "三个模式统一使用稳定版 LibreOffice",
+            "`render_preview.py`",
+            "`PPTX → PDF → PNG`",
+            "`1920×1080`",
+            "`render-report.json`",
+            "不承诺 PowerPoint 原生像素一致",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+
+    def test_font_size_workflow_uses_point_units_and_bounded_preview_calibration(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        typography = (REFERENCES / "text-and-editability.md").read_text(
+            encoding="utf-8"
+        )
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        combined = runtime + typography + audit
+        for phrase in (
+            "`runs[].font_size` 固定使用 point（pt）",
+            "不使用固定 96 DPI",
+            "统一预览渲染器",
+            "首次整页预览",
+            "代表性高风险 TextBox",
+            "标题、正文、数字/KPI、列表/表格",
+            "不逐框试排",
+            "不做自动字号搜索",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, combined)
+        self.assertNotIn("目标渲染器", combined)
+
+    def test_visual_diff_cli_consumes_render_report_not_free_preview(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        combined = runtime + audit
+        self.assertIn("--render-report", combined)
+        self.assertIn("SHA-256 只用于身份与溯源，不是视觉评分", combined)
+        self.assertNotIn(
+            'soffice "-env:UserInstallation=file://$(mktemp -d)"',
+            runtime,
+        )
+
+    def test_abnormal_second_render_is_conditional_diagnostic_only(self):
+        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("只在渲染异常时", audit)
+        self.assertIn("全新空目录复渲染", audit)
+        self.assertIn("正常路径不做双重渲染", audit)
+
     def test_same_run_reuse_requires_complete_composite_identity(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
             encoding="utf-8"

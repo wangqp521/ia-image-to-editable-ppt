@@ -16,6 +16,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE, MSO_SHAPE_TYPE
 from pptx.oxml.xmlchemy import OxmlElement
+from pptx.util import Pt
 
 
 VALIDATOR_PATH = Path(__file__).parents[1] / "scripts" / "validate_pptx.py"
@@ -72,6 +73,25 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         source = identity(source_path)
         preview = identity(preview_path)
         pptx = identity(pptx_path)
+        render_report_path = directory / f"{page_id}-render-report.json"
+        render_report_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "pptx": pptx,
+                    "renderer": {
+                        "backend": "libreoffice",
+                        "version": "LibreOffice 26.2.3.2",
+                        "executable_sha256": "a" * 64,
+                        "fontconfig_sha256": "b" * 64,
+                    },
+                    "rasterizer": {"output_size": [1920, 1080]},
+                    "preview": preview,
+                }
+            ),
+            encoding="utf-8",
+        )
+        render_report = identity(render_report_path)
         decision = "passed" if visual_status == "passed" else "changes_required"
         delivery_status = {
             "rapid": "rapid_validated" if visual_status == "passed" else "rapid_validation_failed",
@@ -100,6 +120,7 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
                 ),
                 "pptx": pptx,
                 "preview": preview,
+                "render_report": render_report,
             },
             "editability_gate": {"status": "passed", "pptx": pptx},
         }
@@ -235,6 +256,78 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["result"]["slide_count"], 2)
         self.assertTrue(result["result"]["validation"]["valid"])
+
+    def test_merge_rejects_mixed_libreoffice_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            first = self._presentation(
+                directory, "page-001.pptx", full_picture=True, text=True
+            )
+            second = self._presentation(
+                directory, "page-002.pptx", full_picture=True, text=True
+            )
+            first_spec = self._merge_spec(directory, first, "page-001")
+            second_spec = self._merge_spec(directory, second, "page-002")
+            second_payload = json.loads(second_spec.read_text(encoding="utf-8"))
+            render_path = Path(
+                second_payload["visual_gate"]["render_report"]["path"]
+            )
+            render_payload = json.loads(render_path.read_text(encoding="utf-8"))
+            render_payload["renderer"]["version"] = "LibreOffice 99.0.0"
+            render_path.write_text(json.dumps(render_payload), encoding="utf-8")
+            second_payload["visual_gate"]["render_report"] = {
+                "path": str(render_path.resolve()),
+                "sha256": hashlib.sha256(render_path.read_bytes()).hexdigest(),
+            }
+            second_spec.write_text(json.dumps(second_payload), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MERGER_PATH),
+                    "--input", str(first), "--spec", str(first_spec),
+                    "--input", str(second), "--spec", str(second_spec),
+                    "--output", str(directory / "merged.pptx"),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        self.assertEqual(2, completed.returncode)
+        self.assertEqual("RENDER_RUNTIME_MIXED", json.loads(completed.stderr)["code"])
+
+    def test_merge_rejects_mixed_fontconfig(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            directory = Path(temp_dir)
+            first = self._presentation(
+                directory, "page-001.pptx", full_picture=True, text=True
+            )
+            second = self._presentation(
+                directory, "page-002.pptx", full_picture=True, text=True
+            )
+            first_spec = self._merge_spec(directory, first, "page-001")
+            second_spec = self._merge_spec(directory, second, "page-002")
+            second_payload = json.loads(second_spec.read_text(encoding="utf-8"))
+            render_path = Path(
+                second_payload["visual_gate"]["render_report"]["path"]
+            )
+            render_payload = json.loads(render_path.read_text(encoding="utf-8"))
+            render_payload["renderer"]["fontconfig_sha256"] = "f" * 64
+            render_path.write_text(json.dumps(render_payload), encoding="utf-8")
+            second_payload["visual_gate"]["render_report"] = {
+                "path": str(render_path.resolve()),
+                "sha256": hashlib.sha256(render_path.read_bytes()).hexdigest(),
+            }
+            second_spec.write_text(json.dumps(second_payload), encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(MERGER_PATH),
+                    "--input", str(first), "--spec", str(first_spec),
+                    "--input", str(second), "--spec", str(second_spec),
+                    "--output", str(directory / "merged.pptx"),
+                ],
+                check=False, capture_output=True, text=True,
+            )
+
+        self.assertEqual(2, completed.returncode)
+        self.assertEqual("RENDER_RUNTIME_MIXED", json.loads(completed.stderr)["code"])
 
     def test_merge_requires_one_spec_per_input(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -678,7 +771,11 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
             },
         }
 
-    def _presentation(self, run_values: list[tuple[str, bool]]) -> Presentation:
+    def _presentation(
+        self,
+        run_values: list[tuple[str, bool]],
+        font_sizes: list[float] | None = None,
+    ) -> Presentation:
         presentation = Presentation()
         presentation.slide_width = 12_192_000
         presentation.slide_height = 6_858_000
@@ -686,10 +783,12 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
         text_box = slide.shapes.add_textbox(self.X, self.Y, self.W, self.H)
         text_box.name = "ia:title-01"
         paragraph = text_box.text_frame.paragraphs[0]
-        for value, bold in run_values:
+        for index, (value, bold) in enumerate(run_values):
             run = paragraph.add_run()
             run.text = value
             run.font.bold = bold
+            if font_sizes is not None:
+                run.font.size = Pt(font_sizes[index])
         return presentation
 
     def test_expected_bold_run_rejects_nonbold_pptx(self) -> None:
@@ -728,6 +827,48 @@ class ValidatePptxTypographyRunContractTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             output = Path(temp_dir) / "matching-bold-range.pptx"
             presentation = self._presentation([(self.TEXT[:2], True), (self.TEXT[2:], False)])
+            presentation.save(output)
+            result = VALIDATOR.validate_pptx(output, 1, self._contract(expected))
+
+        self.assertTrue(result["valid"], result)
+
+    def test_expected_font_size_rejects_different_pptx_size(self) -> None:
+        expected = [
+            {
+                "start": 0,
+                "end": len(self.TEXT),
+                "font_weight": 400,
+                "font_size": 18,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "wrong-font-size.pptx"
+            presentation = self._presentation(
+                [(self.TEXT, False)],
+                font_sizes=[24],
+            )
+            presentation.save(output)
+            result = VALIDATOR.validate_pptx(output, 1, self._contract(expected))
+
+        self.assertFalse(result["valid"])
+        self.assertIn("TEXT_RUN_FONT_SIZE_MISMATCH", result["errors"])
+
+    def test_matching_partial_font_sizes_pass(self) -> None:
+        expected = [
+            {"start": 0, "end": 2, "font_weight": 700, "font_size": 22},
+            {
+                "start": 2,
+                "end": len(self.TEXT),
+                "font_weight": 400,
+                "font_size": 12,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "matching-font-sizes.pptx"
+            presentation = self._presentation(
+                [(self.TEXT[:2], True), (self.TEXT[2:], False)],
+                font_sizes=[22, 12],
+            )
             presentation.save(output)
             result = VALIDATOR.validate_pptx(output, 1, self._contract(expected))
 

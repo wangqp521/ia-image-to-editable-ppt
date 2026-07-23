@@ -389,11 +389,87 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         pptx = image_identity(pptx_path)
 
         preview_path = root / "preview.png"
-        Image.new("RGB", (1600, 900), "white").save(preview_path)
+        Image.new("RGB", (1920, 1080), "white").save(preview_path)
         preview = image_identity(preview_path)
-        visual_report = VISUAL_DIFF.build_visual_diff(
+        pdf_path = root / "page.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% render fixture\n")
+        font_report_path = root / "pdffonts.json"
+        font_report_path.write_text(
+            json.dumps({"resolved_fonts": ["NotoSansCJKsc-Regular"]}),
+            encoding="utf-8",
+        )
+        fontconfig_path = root / "fontconfig.xml"
+        fontconfig_path.write_text("<fontconfig/>", encoding="utf-8")
+        soffice_path = root / "soffice"
+        pdftoppm_path = root / "pdftoppm"
+        pdffonts_path = root / "pdffonts"
+        for executable in (soffice_path, pdftoppm_path, pdffonts_path):
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+        runtime_payload = {
+            "valid": True,
+            "errors": [],
+            "renderer_backend": "libreoffice",
+            "preview_size": [1920, 1080],
+            "executables": {
+                "soffice": {
+                    "path": str(soffice_path.resolve()),
+                    "version": "LibreOffice 26.2.3.2",
+                    "sha256": image_identity(soffice_path)["sha256"],
+                },
+                "pdftoppm": {
+                    "path": str(pdftoppm_path.resolve()),
+                    "version": "pdftoppm 26.07.0",
+                    "sha256": image_identity(pdftoppm_path)["sha256"],
+                },
+                "pdffonts": {
+                    "path": str(pdffonts_path.resolve()),
+                    "version": "pdffonts 26.07.0",
+                    "sha256": image_identity(pdffonts_path)["sha256"],
+                },
+            },
+            "fontconfig": {
+                "path": str(fontconfig_path.resolve()),
+                "sha256": image_identity(fontconfig_path)["sha256"],
+            },
+        }
+        runtime_path = root / "preflight-runtime.json"
+        runtime_path.write_text(json.dumps(runtime_payload), encoding="utf-8")
+        candidate["runtime_preflight"] = image_identity(runtime_path)
+        render_payload = {
+            "schema_version": 1,
+            "pptx": pptx,
+            "renderer": {
+                "backend": "libreoffice",
+                "path": str(soffice_path.resolve()),
+                "version": runtime_payload["executables"]["soffice"]["version"],
+                "executable_sha256": runtime_payload["executables"]["soffice"]["sha256"],
+                "fontconfig_path": str(fontconfig_path.resolve()),
+                "fontconfig_sha256": runtime_payload["fontconfig"]["sha256"],
+                "isolated_profile": True,
+            },
+            "pdf": {
+                **image_identity(pdf_path),
+                "pages": 1,
+                "page_size_pt": [960, 540],
+            },
+            "font_report": {
+                **image_identity(font_report_path),
+                "resolved_fonts": ["NotoSansCJKsc-Regular"],
+            },
+            "rasterizer": {
+                "path": str(pdftoppm_path.resolve()),
+                "version": runtime_payload["executables"]["pdftoppm"]["version"],
+                "executable_sha256": runtime_payload["executables"]["pdftoppm"]["sha256"],
+                "output_size": [1920, 1080],
+            },
+            "preview": {**preview, "size": [1920, 1080]},
+        }
+        render_report_path = root / "render-report.json"
+        render_report_path.write_text(json.dumps(render_payload), encoding="utf-8")
+        visual_report = VISUAL_DIFF.build_visual_diff_from_render_report(
             Path(candidate["clean_visual_reference"]["path"]),
-            preview_path,
+            render_report_path,
             root / "visual-diff",
             regions=candidate["regions"],
             profile=profile,
@@ -451,6 +527,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "pptx": pptx,
             "preview": preview,
             "report": report,
+            "render_report": image_identity(render_report_path),
             "reviewer": {
                 "mode": "independent_read_only_subagent",
                 "page_id": candidate["page_id"],
@@ -498,6 +575,122 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             )
             result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
+
+    def test_final_rejects_missing_render_report(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            del candidate["visual_gate"]["render_report"]
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_REPORT_MISSING",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rejects_render_report_pptx_mismatch(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            report_path = Path(candidate["visual_gate"]["render_report"]["path"])
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            payload["pptx"]["sha256"] = "f" * 64
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            candidate["visual_gate"]["render_report"] = image_identity(report_path)
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_PPTX_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rejects_render_report_preview_mismatch(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            report_path = Path(candidate["visual_gate"]["render_report"]["path"])
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            payload["preview"]["sha256"] = "f" * 64
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            candidate["visual_gate"]["render_report"] = image_identity(report_path)
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_PREVIEW_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rejects_render_report_runtime_mismatch(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            report_path = Path(candidate["visual_gate"]["render_report"]["path"])
+            payload = json.loads(report_path.read_text(encoding="utf-8"))
+            payload["renderer"]["version"] = "LibreOffice 99.0.0"
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            candidate["visual_gate"]["render_report"] = image_identity(report_path)
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_RUNTIME_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rejects_visual_diff_render_report_mismatch(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            visual_path = Path(candidate["visual_gate"]["report"]["path"])
+            payload = json.loads(visual_path.read_text(encoding="utf-8"))
+            payload["render_report"]["sha256"] = "f" * 64
+            visual_path.write_text(json.dumps(payload), encoding="utf-8")
+            candidate["visual_gate"]["report"] = image_identity(visual_path)
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_REPORT_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rejects_font_trace_pdf_mismatch(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+            )
+            candidate["modules"]["typography"]["items"][0]["fallback_trace"] = {
+                "requested_font": "Noto Sans CJK SC",
+                "resolved_fonts": ["NotoSansCJKsc-Regular"],
+                "pdf_sha256": "f" * 64,
+            }
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_FONT_TRACE_RENDER_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
 
     def test_final_rapid_rejects_independent_passed_status(self):
         candidate = valid_spec()
@@ -606,9 +799,9 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 profile="reviewed",
             )
             preview_path = Path(candidate["visual_gate"]["preview"]["path"])
-            report = VISUAL_DIFF.build_visual_diff(
+            report = VISUAL_DIFF.build_visual_diff_from_render_report(
                 Path(candidate["clean_visual_reference"]["path"]),
-                preview_path,
+                Path(candidate["visual_gate"]["render_report"]["path"]),
                 root / "visual-diff-light",
                 regions=[],
                 profile="reviewed",
