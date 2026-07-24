@@ -130,6 +130,20 @@ class SkillRuntimeContractTests(unittest.TestCase):
         self.assertIn("旧 schema v2 终态规格", runtime)
         self.assertIn("重建 visual gate", runtime)
 
+    def test_native_list_normalization_precedes_structure_validation(self):
+        runtime = SKILL.read_text(encoding="utf-8")
+        typography = (REFERENCES / "text-and-editability.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("normalize_native_list_ooxml.py", runtime)
+        self.assertLess(
+            runtime.index("normalize_native_list_ooxml.py"),
+            runtime.index("validate_pptx.py --expected-slides 1"),
+        )
+        for phrase in ("`buFontTx`", "`buSzTx`", "`buClrTx`", "当前字体、字号或颜色快照"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, typography)
+
     def test_graphics_reference_neutralizes_theme_effects_without_deleting_style(self):
         graphics = (REFERENCES / "graphics-and-diagrams.md").read_text(
             encoding="utf-8"
