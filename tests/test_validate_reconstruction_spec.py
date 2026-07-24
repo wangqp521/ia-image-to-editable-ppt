@@ -363,6 +363,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         validator_payload: dict,
         *,
         profile: str = "strict",
+        page_size_pt: list[float] | None = None,
     ) -> None:
         candidate["verification_profile"] = profile
         candidate["delivery_status"] = {
@@ -451,7 +452,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             "pdf": {
                 **image_identity(pdf_path),
                 "pages": 1,
-                "page_size_pt": [960, 540],
+                "page_size_pt": page_size_pt or [960, 540],
             },
             "font_report": {
                 **image_identity(font_report_path),
@@ -575,6 +576,35 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             )
             result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
+
+    def test_final_accepts_libreoffice_hundredth_mm_page_size(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+                page_size_pt=[960.009448818898, 540.0],
+            )
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertTrue(result["valid"], result)
+
+    def test_final_rejects_page_size_outside_render_tolerance(self):
+        candidate = valid_spec()
+        with tempfile.TemporaryDirectory() as directory:
+            self._attach_final_gates(
+                candidate,
+                Path(directory),
+                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
+                profile="rapid",
+                page_size_pt=[961.01, 540.0],
+            )
+            result = MODULE.validate_spec(candidate, stage="final")
+        self.assertIn(
+            "SPEC_RENDER_REPORT_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
 
     def test_final_rejects_missing_render_report(self):
         candidate = valid_spec()

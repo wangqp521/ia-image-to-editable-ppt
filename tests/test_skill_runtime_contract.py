@@ -530,6 +530,12 @@ class SkillRuntimeContractTests(unittest.TestCase):
         self.assertIn("只在渲染异常时", audit)
         self.assertIn("全新空目录复渲染", audit)
         self.assertIn("正常路径不做双重渲染", audit)
+        self.assertIn("仅对 macOS `SIGABRT` 自动重试一次", audit)
+        self.assertIn("第二次仍失败", audit)
+        self.assertIn("不得切换渲染器或无限重试", audit)
+        self.assertIn("macOS 沙箱环境", audit)
+        self.assertIn("首次渲染即使用沙箱外执行", audit)
+        self.assertIn("自动重试不能替代权限升级", audit)
 
     def test_same_run_reuse_requires_complete_composite_identity(self):
         audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(

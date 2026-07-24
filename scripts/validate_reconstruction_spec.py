@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 import tempfile
@@ -52,6 +53,8 @@ SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 RGB_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
 MAX_IMAGE_PIXELS = 100_000_000
 COORDINATE_MANIFEST_METADATA_KEY = "coordinate_overlay_manifest_sha256"
+PDF_PAGE_SIZE_PT = (960.0, 540.0)
+PDF_PAGE_SIZE_TOLERANCE_PT = 1.0
 _LOCAL_MODULE_CACHE: dict[str, Any] = {}
 
 
@@ -61,6 +64,18 @@ def _error(errors: list[dict[str, str]], code: str, path: str, detail: str) -> N
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _pdf_page_size_matches(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == len(PDF_PAGE_SIZE_PT)
+        and all(_is_number(item) and math.isfinite(float(item)) for item in value)
+        and all(
+            abs(float(actual) - expected) <= PDF_PAGE_SIZE_TOLERANCE_PT
+            for actual, expected in zip(value, PDF_PAGE_SIZE_PT)
+        )
+    )
 
 
 def _verification_profile(spec: dict[str, Any]) -> str:
@@ -492,7 +507,7 @@ def _validate_render_report(
     if (
         not isinstance(pdf, dict)
         or pdf.get("pages") != 1
-        or pdf.get("page_size_pt") != [960, 540]
+        or not _pdf_page_size_matches(pdf.get("page_size_pt"))
     ):
         _error(
             errors,

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -28,10 +30,11 @@ PREVIEW_SIZE = (1920, 1080)
 
 
 class RenderError(RuntimeError):
-    def __init__(self, code: str, detail: str):
+    def __init__(self, code: str, detail: str, *, returncode: int | None = None):
         super().__init__(detail)
         self.code = code
         self.detail = detail
+        self.returncode = returncode
 
 
 def _sha256(path: Path) -> str:
@@ -103,6 +106,7 @@ def _run(
         raise RenderError(
             "RENDER_COMMAND_FAILED",
             f"exit={completed.returncode}: {detail}",
+            returncode=completed.returncode,
         )
     return completed
 
@@ -148,6 +152,26 @@ def _validate_output_dir(output_dir: Path) -> None:
             raise RenderError("RENDER_OUTPUT_NOT_EMPTY", str(output_dir))
 
 
+@contextlib.contextmanager
+def _macos_soffice_lock():
+    if sys.platform != "darwin":
+        yield
+        return
+    import fcntl
+
+    lock_path = Path(tempfile.gettempdir()) / "ia-image-to-editable-ppt-soffice.lock"
+    with lock_path.open("a+", encoding="utf-8") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _new_render_temp(output_dir: Path) -> Path:
+    return Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
+
+
 def render_preview(
     pptx: Path,
     output_dir: Path,
@@ -164,31 +188,65 @@ def render_preview(
     runtime = _load_runtime(runtime_path)
     initial_pptx_hash = _sha256(pptx)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(
-        tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent)
-    )
+    soffice = Path(runtime["executables"]["soffice"]["path"]).resolve()
+    pdftoppm = Path(runtime["executables"]["pdftoppm"]["path"]).resolve()
+    pdffonts = Path(runtime["executables"]["pdffonts"]["path"]).resolve()
+    fontconfig = Path(runtime["fontconfig"]["path"]).resolve()
+    env = os.environ.copy()
+    env["FONTCONFIG_FILE"] = str(fontconfig)
+    temp_dir: Path | None = None
+    attempt_count = 0
+    recovered_from: str | None = None
     try:
-        profile = temp_dir / "lo-profile"
-        profile.mkdir()
-        soffice = Path(runtime["executables"]["soffice"]["path"]).resolve()
-        pdftoppm = Path(runtime["executables"]["pdftoppm"]["path"]).resolve()
-        pdffonts = Path(runtime["executables"]["pdffonts"]["path"]).resolve()
-        fontconfig = Path(runtime["fontconfig"]["path"]).resolve()
-        env = os.environ.copy()
-        env["FONTCONFIG_FILE"] = str(fontconfig)
-        _run(
-            [
-                str(soffice),
-                f"-env:UserInstallation={profile.resolve().as_uri()}",
-                "--headless",
-                "--convert-to",
-                "pdf",
-                "--outdir",
-                str(temp_dir),
-                str(pptx),
-            ],
-            env=env,
-        )
+        while True:
+            attempt_count += 1
+            temp_dir = _new_render_temp(output_dir)
+            profile = temp_dir / "lo-profile"
+            profile.mkdir()
+            pdf_path = temp_dir / f"{pptx.stem}.pdf"
+            try:
+                with _macos_soffice_lock():
+                    _run(
+                        [
+                            str(soffice),
+                            f"-env:UserInstallation={profile.resolve().as_uri()}",
+                            "--headless",
+                            "--convert-to",
+                            "pdf",
+                            "--outdir",
+                            str(temp_dir),
+                            str(pptx),
+                        ],
+                        env=env,
+                    )
+            except RenderError as exc:
+                macos_sigabrt_without_pdf = (
+                    sys.platform == "darwin"
+                    and exc.returncode == -signal.SIGABRT
+                    and (
+                        not pdf_path.is_file()
+                        or pdf_path.stat().st_size == 0
+                    )
+                )
+                if macos_sigabrt_without_pdf and attempt_count == 1:
+                    if _sha256(pptx) != initial_pptx_hash:
+                        raise RenderError("RENDER_INPUT_CHANGED", str(pptx)) from exc
+                    shutil.rmtree(temp_dir)
+                    temp_dir = None
+                    recovered_from = "SIGABRT"
+                    continue
+                if macos_sigabrt_without_pdf:
+                    raise RenderError(
+                        "RENDER_MACOS_APPLICATION_REGISTRATION_FAILED",
+                        (
+                            "LibreOffice aborted twice before producing a PDF; "
+                            "run the render outside the macOS sandbox"
+                        ),
+                        returncode=exc.returncode,
+                    ) from exc
+                raise
+            break
+
         pdf_path = temp_dir / f"{pptx.stem}.pdf"
         if not pdf_path.is_file() or pdf_path.stat().st_size == 0:
             raise RenderError("RENDER_PDF_INVALID", str(pdf_path))
@@ -260,18 +318,22 @@ def render_preview(
         final_fonts_text = output_dir / fonts_text_path.name
         final_fonts_json = output_dir / fonts_json_path.name
         final_preview = output_dir / preview_path.name
+        renderer = {
+            "backend": "libreoffice",
+            "path": str(soffice),
+            "version": runtime["executables"]["soffice"]["version"],
+            "executable_sha256": runtime["executables"]["soffice"]["sha256"],
+            "fontconfig_path": str(fontconfig),
+            "fontconfig_sha256": runtime["fontconfig"]["sha256"],
+            "isolated_profile": True,
+            "attempt_count": attempt_count,
+        }
+        if recovered_from is not None:
+            renderer["recovered_from"] = recovered_from
         report = {
             "schema_version": 1,
             "pptx": {"path": str(pptx), "sha256": initial_pptx_hash},
-            "renderer": {
-                "backend": "libreoffice",
-                "path": str(soffice),
-                "version": runtime["executables"]["soffice"]["version"],
-                "executable_sha256": runtime["executables"]["soffice"]["sha256"],
-                "fontconfig_path": str(fontconfig),
-                "fontconfig_sha256": runtime["fontconfig"]["sha256"],
-                "isolated_profile": True,
-            },
+            "renderer": renderer,
             "pdf": {
                 "path": str(final_pdf),
                 "sha256": _sha256(pdf_path),
@@ -307,7 +369,7 @@ def render_preview(
         os.replace(temp_dir, output_dir)
         return report
     except BaseException:
-        if temp_dir.exists():
+        if temp_dir is not None and temp_dir.exists():
             shutil.rmtree(temp_dir)
         raise
 

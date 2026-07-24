@@ -18,7 +18,7 @@
 
 `create_visual_diff.py` 必须用 `--render-report` 取得 preview。SHA-256 只用于身份与溯源，不是视觉评分；视觉判断来自对照、指标、区域存在性和 reviewer。LibreOffice 是统一验收事实，不承诺 PowerPoint 原生像素一致。
 
-只在渲染异常时先确认 PPTX 对象仍存在，再到全新空目录复渲染，以区分 PPTX 内容缺失和渲染器状态问题；正常路径不做双重渲染。任何 PPTX 或运行身份变化都会使旧 report、PDF、PNG 和 visual diff 失效。
+macOS 沙箱环境中，首次渲染即使用沙箱外执行；自动重试不能替代权限升级。只在渲染异常时先确认 PPTX 对象仍存在，再到全新空目录复渲染，以区分 PPTX 内容缺失和渲染器状态问题；沙箱外执行时，脚本仅对 macOS `SIGABRT` 自动重试一次，第二次仍失败时按渲染失败处理，不得切换渲染器或无限重试。正常路径不做双重渲染。任何 PPTX 或运行身份变化都会使旧 report、PDF、PNG 和 visual diff 失效。
 
 ### `rapid` 快速校验
 

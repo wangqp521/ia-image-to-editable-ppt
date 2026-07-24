@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from PIL import Image, ImageDraw
 
@@ -120,6 +121,35 @@ class RenderPreviewTest(unittest.TestCase):
             "shutil.copy2(fixture, prefix.with_suffix('.png'))\n",
         )
 
+    def write_flaky_soffice(self, returncodes: list[int]) -> tuple[Path, Path]:
+        attempts_path = self.root / "soffice-attempts.txt"
+        invocations_path = self.root / "soffice-invocations.txt"
+        self.soffice = self.write_executable(
+            "soffice",
+            "import os, shutil, signal, sys\n"
+            "from pathlib import Path\n"
+            f"fixture = Path({str(self.pdf_fixture)!r})\n"
+            f"attempts_path = Path({str(attempts_path)!r})\n"
+            f"invocations_path = Path({str(invocations_path)!r})\n"
+            f"returncodes = {returncodes!r}\n"
+            "attempt = int(attempts_path.read_text()) + 1 if attempts_path.exists() else 1\n"
+            "attempts_path.write_text(str(attempt))\n"
+            "profile = next(arg for arg in sys.argv if arg.startswith('-env:UserInstallation='))\n"
+            "outdir = Path(sys.argv[sys.argv.index('--outdir') + 1])\n"
+            "with invocations_path.open('a', encoding='utf-8') as stream:\n"
+            "    stream.write(f'{profile}\\t{outdir}\\n')\n"
+            "returncode = returncodes[min(attempt - 1, len(returncodes) - 1)]\n"
+            "if returncode == -6:\n"
+            "    os.kill(os.getpid(), signal.SIGABRT)\n"
+            "if returncode:\n"
+            "    raise SystemExit(returncode)\n"
+            "source = Path(sys.argv[-1])\n"
+            "outdir.mkdir(parents=True, exist_ok=True)\n"
+            "shutil.copy2(fixture, outdir / (source.stem + '.pdf'))\n",
+        )
+        self.write_runtime()
+        return attempts_path, invocations_path
+
     def write_runtime(self) -> None:
         payload = {
             "valid": True,
@@ -211,6 +241,51 @@ class RenderPreviewTest(unittest.TestCase):
             module.render_preview(self.pptx, self.output, self.runtime)
 
         self.assertEqual("RENDER_PREVIEW_INVALID", caught.exception.code)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_preview_recovers_once_from_macos_sigabrt(self) -> None:
+        module = load_module()
+        attempts_path, invocations_path = self.write_flaky_soffice([-6, 0])
+
+        with mock.patch.object(module.sys, "platform", "darwin"):
+            report = module.render_preview(self.pptx, self.output, self.runtime)
+
+        self.assertEqual("2", attempts_path.read_text())
+        invocations = invocations_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(2, len(invocations))
+        self.assertNotEqual(invocations[0].split("\t")[1], invocations[1].split("\t")[1])
+        self.assertEqual(2, report["renderer"]["attempt_count"])
+        self.assertEqual("SIGABRT", report["renderer"]["recovered_from"])
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_preview_stops_after_second_macos_sigabrt(self) -> None:
+        module = load_module()
+        attempts_path, _ = self.write_flaky_soffice([-6, -6])
+
+        with mock.patch.object(module.sys, "platform", "darwin"):
+            with self.assertRaises(module.RenderError) as caught:
+                module.render_preview(self.pptx, self.output, self.runtime)
+
+        self.assertEqual(
+            "RENDER_MACOS_APPLICATION_REGISTRATION_FAILED",
+            caught.exception.code,
+        )
+        self.assertEqual(-6, caught.exception.returncode)
+        self.assertEqual("2", attempts_path.read_text())
+        self.assertFalse(self.output.exists())
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_preview_does_not_retry_non_sigabrt(self) -> None:
+        module = load_module()
+        attempts_path, _ = self.write_flaky_soffice([7, 0])
+
+        with mock.patch.object(module.sys, "platform", "darwin"):
+            with self.assertRaises(module.RenderError) as caught:
+                module.render_preview(self.pptx, self.output, self.runtime)
+
+        self.assertEqual(7, caught.exception.returncode)
+        self.assertEqual("1", attempts_path.read_text())
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":
