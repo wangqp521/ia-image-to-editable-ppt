@@ -7,9 +7,11 @@ import argparse
 import hashlib
 import io
 import json
+import math
 import os
 import posixpath
 import re
+import sys
 import tempfile
 import warnings
 import zipfile
@@ -19,6 +21,27 @@ from urllib.parse import unquote, urlsplit
 from xml.etree import ElementTree as ET
 
 from PIL import Image
+
+SCRIPTS_ROOT = Path(__file__).resolve().parent
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+from lib.capabilities import capability_manifest_sha256
+from lib.background_contracts import (
+    resolved_element_mode_map,
+    validate_background_prebuild,
+)
+from lib.element_contracts import expand_multipart_parts, expected_object_types
+from lib.error_codes import ToolError
+from lib.geometry import bbox_union, is_near_full_page_bbox
+from lib.hashing import canonical_json_sha256
+from lib.representation_contracts import (
+    REQUIRED_FIELDS as REPRESENTATION_FACT_FIELDS,
+    representation_summary,
+    validate_representation_plan,
+)
+from lib.schema_contracts import BACKGROUND_ITEM_FIELDS
+from lib.spec_identity import content_spec_sha256, input_spec_sha256
 
 
 NS = {
@@ -53,6 +76,43 @@ STRICT_TO_TRANSITIONAL = {
     "http://purl.oclc.org/ooxml/officeDocument/relationships": NS["r"],
     "http://purl.oclc.org/ooxml/package/relationships": NS["pr"],
 }
+BUILD_REPORT_FIELDS = frozenset(
+    {
+        "valid",
+        "schema_version",
+        "schema_sha256",
+        "content_spec_sha256",
+        "input_spec_sha256",
+        "compiler_sha256",
+        "capability_manifest_sha256",
+        "pptx_sha256",
+        "environment",
+        "elements",
+        "representation_summary",
+        "asset_fallbacks",
+        "background_summary",
+        "background_pictures",
+        "normalization",
+        "warnings",
+        "unsupported",
+    }
+)
+BUILD_REPORT_ELEMENT_FIELDS = frozenset(
+    {"semantic_kind", "selected_mode", "object_type", "objects"}
+)
+BUILD_REPORT_OBJECT_FIELDS = frozenset(
+    {
+        "ooxml_name",
+        "object_type",
+        "bbox",
+        "rotation",
+        "part_id",
+        "media_sha256",
+        "text_summary",
+        "font_declarations",
+    }
+)
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 class ValidationError(ValueError):
@@ -90,6 +150,10 @@ def _result(path: Path) -> dict[str, Any]:
         "text_runs": 0,
         "native_list_paragraphs": 0,
         "native_list_contracts_checked": 0,
+        "build_report_objects_checked": 0,
+        "multipart_contracts_checked": 0,
+        "representation_facts_checked": 0,
+        "asset_fallbacks_checked": 0,
         "text_objects": [],
         "native_shape_objects": [],
         "picture_objects": [],
@@ -362,6 +426,26 @@ def _collect_visible_objects(
             if None not in inherited_bbox:
                 local_bbox = inherited_bbox
         bbox = _transform_bbox(local_bbox, transform)
+        object_transform = node.find(geometry_paths[kind], NS)
+        rotation_units = _int_attr(object_transform, "rot")
+        rotation = 0.0 if rotation_units is None else rotation_units / 60000
+        if kind == "sp":
+            text_nodes = node.findall(".//a:t", NS)
+            text_summary = (
+                "".join(item.text or "" for item in text_nodes)
+                if text_nodes
+                else None
+            )
+        elif kind == "graphicFrame" and node.find(".//a:tbl", NS) is not None:
+            text_summary = "\n".join(
+                "".join(item.text or "" for item in cell.findall(".//a:t", NS))
+                for cell in node.findall(".//a:tbl/a:tr/a:tc", NS)
+                if cell.get("hMerge") not in {"1", "true"}
+                and cell.get("vMerge") not in {"1", "true"}
+            )
+        else:
+            text_summary = None
+        font_declarations = sorted(_declared_fonts(_font_properties(node)))
         geometry_known = None not in bbox
         visible = False if hidden else (
             _intersects_slide(*bbox, width, height) if geometry_known else None
@@ -374,9 +458,14 @@ def _collect_visible_objects(
             "layer": layer,
             "hidden": hidden,
             "x": bbox[0], "y": bbox[1], "cx": bbox[2], "cy": bbox[3],
+            "bbox": [bbox[0], bbox[1], bbox[2], bbox[3]],
             "geometry_known": geometry_known,
             "visible": visible,
             "has_text": kind == "sp" and bool(node.findall(".//a:t", NS)),
+            "rotation": rotation,
+            "text_summary": text_summary,
+            "font_declarations": font_declarations,
+            "media_sha256": None,
             "_element": node,
         }
         records.append(record)
@@ -732,10 +821,21 @@ def _text_object(
 def _load_reconstruction_spec(value: dict[str, Any] | Path | str) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
-    path = Path(value).expanduser().resolve()
-    if not path.is_file():
+    if not isinstance(value, (Path, str)):
+        raise ValidationError(
+            "RECONSTRUCTION_SPEC_INVALID", "spec must be an object or path"
+        )
+    try:
+        path = Path(value).expanduser().resolve()
+        is_file = path.is_file()
+        size = path.stat().st_size if is_file else None
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValidationError(
+            "RECONSTRUCTION_SPEC_INVALID", "cannot resolve or inspect spec path"
+        ) from exc
+    if not is_file:
         raise ValidationError("RECONSTRUCTION_SPEC_INVALID", f"spec not found: {path}")
-    if path.stat().st_size > MAX_XML_BYTES:
+    if size is not None and size > MAX_XML_BYTES:
         raise ValidationError("RECONSTRUCTION_SPEC_INVALID", f"spec too large: {path}")
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -744,6 +844,416 @@ def _load_reconstruction_spec(value: dict[str, Any] | Path | str) -> dict[str, A
     if not isinstance(payload, dict):
         raise ValidationError("RECONSTRUCTION_SPEC_INVALID", "spec root must be an object")
     return payload
+
+
+def _load_build_report(value: dict[str, Any] | Path | str) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, (Path, str)):
+        raise ValidationError("BUILD_REPORT_INVALID", "build report must be an object or path")
+    try:
+        path = Path(value).expanduser().resolve()
+        is_file = path.is_file()
+        size = path.stat().st_size if is_file else None
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "cannot resolve or inspect build report path"
+        ) from exc
+    if not is_file:
+        raise ValidationError("BUILD_REPORT_INVALID", f"build report not found: {path}")
+    if size is not None and size > MAX_XML_BYTES:
+        raise ValidationError("BUILD_REPORT_INVALID", f"build report too large: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValidationError("BUILD_REPORT_INVALID", f"invalid build report: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValidationError("BUILD_REPORT_INVALID", "build report root must be an object")
+    return payload
+
+
+def _validate_build_report_shape(report: dict[str, Any]) -> None:
+    if set(report) != BUILD_REPORT_FIELDS:
+        legacy_fields = BUILD_REPORT_FIELDS - {
+            "content_spec_sha256",
+            "input_spec_sha256",
+            "background_summary",
+            "background_pictures",
+        }
+        if set(report) == legacy_fields:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID",
+                "legacy build report is missing background and spec identity fields; rebuild the PPTX",
+            )
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build report fields do not match schema_version 1"
+        )
+    if report.get("valid") is not True or report.get("schema_version") != 1:
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build report must declare valid schema_version 1"
+        )
+    for field in (
+        "schema_sha256",
+        "content_spec_sha256",
+        "input_spec_sha256",
+        "compiler_sha256",
+        "capability_manifest_sha256",
+        "pptx_sha256",
+    ):
+        value = report.get(field)
+        if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", f"build_report.{field} must be lowercase sha256"
+            )
+    environment = report.get("environment")
+    if (
+        not isinstance(environment, dict)
+        or set(environment) != {"python", "python-pptx", "Pillow"}
+        or not all(
+        isinstance(key, str) and key
+        and isinstance(value, str) and value
+        for key, value in environment.items()
+        )
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.environment must contain string identities"
+        )
+    if report.get("warnings") != [] or report.get("unsupported") != []:
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "passing build report diagnostics must be empty"
+        )
+    normalization = report.get("normalization")
+    valid_normalization = False
+    if isinstance(normalization, dict) and type(normalization.get("applied")) is bool:
+        if normalization["applied"] is False:
+            valid_normalization = set(normalization) == {"applied"}
+        else:
+            valid_normalization = (
+                set(normalization)
+                == {"applied", "valid", "paragraphs_checked", "paragraphs_changed"}
+                and normalization.get("valid") is True
+                and type(normalization.get("paragraphs_checked")) is int
+                and normalization["paragraphs_checked"] >= 0
+                and type(normalization.get("paragraphs_changed")) is int
+                and 0
+                <= normalization["paragraphs_changed"]
+                <= normalization["paragraphs_checked"]
+            )
+    if not valid_normalization:
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.normalization is invalid"
+        )
+    summary = report.get("representation_summary")
+    if (
+        not isinstance(summary, dict)
+        or set(summary) != {"asset", "composite", "native", "not_applicable"}
+        or not all(type(value) is int and value >= 0 for value in summary.values())
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.representation_summary is invalid"
+        )
+    background_summary = report.get("background_summary")
+    if (
+        not isinstance(background_summary, dict)
+        or set(background_summary) != {"native", "background_picture"}
+        or not all(
+            type(value) is int and value >= 0
+            for value in background_summary.values()
+        )
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.background_summary is invalid"
+        )
+    background_pictures = report.get("background_pictures")
+    if not isinstance(background_pictures, list) or not all(
+        isinstance(item, dict) for item in background_pictures
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID",
+            "build_report.background_pictures must be an object array",
+        )
+    for index, item in enumerate(background_pictures):
+        if (
+            set(item) != BACKGROUND_ITEM_FIELDS | {"media_sha256"}
+            or item.get("selected_mode") != "background_picture"
+            or not isinstance(item.get("media_sha256"), str)
+            or SHA256_PATTERN.fullmatch(item["media_sha256"]) is None
+        ):
+            raise ValidationError(
+                "BUILD_REPORT_INVALID",
+                f"build_report.background_pictures[{index}] is invalid",
+            )
+    fallbacks = report.get("asset_fallbacks")
+    if not isinstance(fallbacks, list) or not all(
+        isinstance(item, dict) for item in fallbacks
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.asset_fallbacks must be an object array"
+        )
+    for index, fallback in enumerate(fallbacks):
+        fallback_path = f"build_report.asset_fallbacks[{index}]"
+        source_bbox = fallback.get("source_bbox")
+        bindings = fallback.get("bound_element_ids")
+        evidence = fallback.get("evidence")
+        if (
+            set(fallback) != REPRESENTATION_FACT_FIELDS
+            or not isinstance(fallback.get("source_fact_id"), str)
+            or not fallback["source_fact_id"].strip()
+            or not isinstance(fallback.get("semantic_role"), str)
+            or not fallback["semantic_role"].strip()
+            or not isinstance(source_bbox, list)
+            or len(source_bbox) != 4
+            or not all(type(value) is int for value in source_bbox)
+            or source_bbox[2] <= 0
+            or source_bbox[3] <= 0
+            or type(fallback.get("required")) is not bool
+            or fallback.get("selected_mode") != "asset"
+            or fallback.get("required_editability") not in {
+                "none",
+                "labels_only",
+                "labels_and_geometry",
+            }
+            or fallback.get("fallback_policy") != "allow_minimal_asset"
+            or not isinstance(bindings, list)
+            or not bindings
+            or not all(isinstance(value, str) and value for value in bindings)
+            or len(bindings) != len(set(bindings))
+            or not isinstance(fallback.get("reason"), str)
+            or not fallback["reason"].strip()
+            or fallback.get("coverage_status") != "covered"
+            or not isinstance(evidence, list)
+            or not evidence
+            or not all(isinstance(value, str) and value.strip() for value in evidence)
+        ):
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", f"{fallback_path} is invalid"
+            )
+    elements = report.get("elements")
+    if not isinstance(elements, dict) or not elements or not all(
+        isinstance(key, str) and key for key in elements
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "build_report.elements must be a non-empty object"
+        )
+    for element_id, element in elements.items():
+        element_path = f"build_report.elements.{element_id}"
+        if not isinstance(element, dict) or set(element) != BUILD_REPORT_ELEMENT_FIELDS:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", f"{element_path} has invalid fields"
+            )
+        if not all(
+            isinstance(element.get(field), str) and element[field]
+            for field in ("semantic_kind", "selected_mode", "object_type")
+        ):
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", f"{element_path} identities must be strings"
+            )
+        objects = element.get("objects")
+        if not isinstance(objects, list) or not objects:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", f"{element_path}.objects must be non-empty"
+            )
+        for index, item in enumerate(objects):
+            item_path = f"{element_path}.objects[{index}]"
+            if not isinstance(item, dict) or set(item) != BUILD_REPORT_OBJECT_FIELDS:
+                raise ValidationError(
+                    "BUILD_REPORT_INVALID", f"{item_path} has invalid fields"
+                )
+            name = item.get("ooxml_name")
+            object_type = item.get("object_type")
+            bbox = item.get("bbox")
+            rotation = item.get("rotation")
+            part_id = item.get("part_id")
+            media_sha256 = item.get("media_sha256")
+            text_summary = item.get("text_summary")
+            fonts = item.get("font_declarations")
+            if (
+                not isinstance(name, str)
+                or not name.startswith("ia:")
+                or not isinstance(object_type, str)
+                or not object_type
+                or not isinstance(bbox, list)
+                or len(bbox) != 4
+                or not all(type(value) is int for value in bbox)
+                or bbox[2] <= 0
+                or bbox[3] <= 0
+                or type(rotation) not in {int, float}
+                or not math.isfinite(rotation)
+                or not (part_id is None or isinstance(part_id, str) and part_id)
+                or not (
+                    media_sha256 is None
+                    or isinstance(media_sha256, str)
+                    and SHA256_PATTERN.fullmatch(media_sha256) is not None
+                )
+                or not (text_summary is None or isinstance(text_summary, str))
+                or not isinstance(fonts, list)
+                or not all(isinstance(font, str) and font for font in fonts)
+                or fonts != sorted(set(fonts))
+                or object_type == "pic"
+                and (
+                    media_sha256 is None
+                    or text_summary is not None
+                    or fonts != []
+                )
+                or object_type != "pic" and media_sha256 is not None
+                or object_type == "cxnSp"
+                and (text_summary is not None or fonts != [])
+            ):
+                raise ValidationError(
+                    "BUILD_REPORT_INVALID", f"{item_path} contains invalid object data"
+                )
+
+
+def _compiler_sha256() -> str:
+    scripts_root = Path(__file__).resolve().parent
+    paths = [scripts_root / "build_pptx_from_spec.py"]
+    paths.extend((scripts_root / "lib").glob("*.py"))
+    paths.extend((scripts_root / "pptx_builder").glob("*.py"))
+    identity = {
+        path.relative_to(scripts_root).as_posix(): _file_sha256(path)
+        for path in sorted(paths)
+        if path.is_file()
+    }
+    return canonical_json_sha256(identity)
+
+
+def _report_error(result: dict[str, Any], code: str, path: str, detail: str) -> None:
+    result["errors"].append(code)
+    result["warnings"].append(f"{path}: {detail}")
+
+
+def _validate_report_identities(
+    result: dict[str, Any],
+    spec: dict[str, Any] | None,
+    report: dict[str, Any],
+) -> None:
+    if report.get("valid") is not True or report.get("schema_version") != 1:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report",
+            "report must be a passing schema_version 1 report",
+        )
+    if report.get("pptx_sha256") != result.get("pptx_sha256"):
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.pptx_sha256",
+            "report does not bind the current PPTX",
+        )
+    if spec is None:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "reconstruction_spec",
+            "a reconstruction spec is required with a build report",
+        )
+    else:
+        representation_issues = validate_representation_plan(spec)
+        if representation_issues:
+            issue = representation_issues[0]
+            raise ValidationError(
+                "RECONSTRUCTION_SPEC_INVALID",
+                f"{issue.path}: {issue.detail}",
+            )
+        background_issues = validate_background_prebuild(spec)
+        if background_issues:
+            issue = background_issues[0]
+            raise ValidationError(
+                "RECONSTRUCTION_SPEC_INVALID",
+                f"{issue.path}: {issue.detail}",
+            )
+        try:
+            schema_digest = canonical_json_sha256(spec)
+            content_digest = content_spec_sha256(spec)
+            input_digest = input_spec_sha256(spec)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValidationError(
+                "RECONSTRUCTION_SPEC_INVALID", "cannot hash reconstruction spec"
+            ) from exc
+        if report.get("schema_sha256") != schema_digest:
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                "build_report.schema_sha256",
+                "report does not bind the current reconstruction spec",
+            )
+        if report.get("content_spec_sha256") != content_digest:
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                "build_report.content_spec_sha256",
+                "report does not bind the current content specification",
+            )
+        if report.get("input_spec_sha256") != input_digest:
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                "build_report.input_spec_sha256",
+                "report does not bind the exact supplied reconstruction spec",
+            )
+    try:
+        compiler_digest = _compiler_sha256()
+        manifest_digest = capability_manifest_sha256()
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValidationError(
+            "BUILD_REPORT_INVALID", "cannot recompute compiler identity"
+        ) from exc
+    if report.get("compiler_sha256") != compiler_digest:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.compiler_sha256",
+            "report compiler identity is stale",
+        )
+    if report.get("capability_manifest_sha256") != manifest_digest:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.capability_manifest_sha256",
+            "report capability manifest identity is stale",
+        )
+
+
+def _expected_report_media_hashes(report: dict[str, Any]) -> set[str]:
+    elements = report.get("elements")
+    if not isinstance(elements, dict):
+        return set()
+    hashes: set[str] = set()
+    for element in elements.values():
+        objects = element.get("objects") if isinstance(element, dict) else None
+        if not isinstance(objects, list):
+            continue
+        for item in objects:
+            digest = item.get("media_sha256") if isinstance(item, dict) else None
+            if isinstance(digest, str) and re.fullmatch(r"[0-9a-f]{64}", digest):
+                hashes.add(digest)
+    return hashes
+
+
+def _validate_report_media_inventory(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    result: dict[str, Any],
+    report: dict[str, Any],
+) -> None:
+    expected = _expected_report_media_hashes(report)
+    if not expected:
+        return
+    actual = {
+        _archive_sha256(archive, name)
+        for name in names
+        if name.startswith("ppt/media/")
+        and not name.endswith("/")
+        and archive.getinfo(name).file_size <= MAX_MEDIA_BYTES
+    }
+    if not expected.issubset(actual):
+        _report_error(
+            result,
+            "ASSET_HASH_MISMATCH",
+            "build_report.elements",
+            "embedded media does not match the registered asset hash",
+        )
 
 
 def _bound_element_id(name: Any, element_ids: set[str]) -> str | None:
@@ -859,10 +1369,22 @@ def _validate_element_bindings(
         if allowed_types and not any(item.get("object_type") in allowed_types for item in candidates):
             result["errors"].append("ELEMENT_OBJECT_TYPE_MISMATCH")
             result["warnings"].append(f"{element_id}: bound object type does not match {kind}")
-        if not any(
-            _bbox_matches_element(item, element.get("slide_bbox"), width, height)
-            for item in candidates
-        ):
+        if kind in {"matrix", "status"}:
+            actual_boxes = [
+                [item.get("x"), item.get("y"), item.get("cx"), item.get("cy")]
+                for item in candidates
+            ]
+            bbox_matches = (
+                bool(actual_boxes)
+                and all(all(type(value) is int for value in box) for box in actual_boxes)
+                and bbox_union(actual_boxes) == element.get("slide_bbox")
+            )
+        else:
+            bbox_matches = any(
+                _bbox_matches_element(item, element.get("slide_bbox"), width, height)
+                for item in candidates
+            )
+        if not bbox_matches:
             result["errors"].append("ELEMENT_BBOX_MISMATCH")
             result["warnings"].append(f"{element_id}: bound object bbox does not match the spec")
         if kind in {"text", "special_text"}:
@@ -887,13 +1409,602 @@ def _validate_element_bindings(
             ]
             if not bound_pictures:
                 result["errors"].append("ELEMENT_OBJECT_TYPE_MISMATCH")
-            expected_hash = _expected_media_sha256(spec.get("modules"), element_id)
+            asset = element.get("content", {}).get("asset")
+            expected_hash = (
+                asset.get("asset_sha256") if isinstance(asset, dict) else None
+            ) or _expected_media_sha256(spec.get("modules"), element_id)
             if expected_hash and not any(
                 item.get("media_sha256") == expected_hash for item in bound_pictures
             ):
                 result["errors"].append("ELEMENT_MEDIA_HASH_MISMATCH")
                 result["warnings"].append(f"{element_id}: embedded media does not match the declared asset")
         result["element_bindings_checked"] = result.get("element_bindings_checked", 0) + 1
+
+
+def _validate_report_object_bindings(
+    result: dict[str, Any], report: dict[str, Any]
+) -> None:
+    elements = report.get("elements")
+    if not isinstance(elements, dict):
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.elements",
+            "elements must be an object",
+        )
+        return
+    actual_by_name: dict[str, list[dict[str, Any]]] = {}
+    for record in result.get("structure_objects", []):
+        name = record.get("object_name")
+        if isinstance(name, str) and name.startswith("ia:"):
+            actual_by_name.setdefault(name, []).append(record)
+    report_names: set[str] = set()
+    for element_id in sorted(elements):
+        element = elements[element_id]
+        objects = element.get("objects") if isinstance(element, dict) else None
+        if not isinstance(objects, list) or not objects:
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                f"build_report.elements.{element_id}.objects",
+                "objects must be a non-empty array",
+            )
+            continue
+        for index, expected in enumerate(objects):
+            item_path = f"build_report.elements.{element_id}.objects[{index}]"
+            if not isinstance(expected, dict):
+                _report_error(
+                    result, "BUILD_REPORT_MISMATCH", item_path, "object must be a mapping"
+                )
+                continue
+            name = expected.get("ooxml_name")
+            if not isinstance(name, str) or not name.startswith("ia:"):
+                _report_error(
+                    result,
+                    "BUILD_REPORT_MISMATCH",
+                    f"{item_path}.ooxml_name",
+                    "registered object name is invalid",
+                )
+                continue
+            if name in report_names:
+                _report_error(
+                    result,
+                    "BUILD_REPORT_MISMATCH",
+                    f"{item_path}.ooxml_name",
+                    "registered object name is duplicated",
+                )
+            report_names.add(name)
+            candidates = actual_by_name.get(name, [])
+            if len(candidates) != 1:
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    item_path,
+                    f"expected exactly one PPTX object named {name}",
+                )
+                continue
+            actual = candidates[0]
+            if expected.get("object_type") != actual.get("object_type"):
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{item_path}.object_type",
+                    "PPTX object type differs from build report",
+                )
+            expected_bbox = expected.get("bbox")
+            actual_bbox = [actual.get(key) for key in ("x", "y", "cx", "cy")]
+            if expected_bbox != actual_bbox:
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{item_path}.bbox",
+                    "PPTX object bbox differs from build report",
+                )
+            if not _number_matches(expected.get("rotation"), actual.get("rotation")):
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{item_path}.rotation",
+                    "PPTX object rotation differs from build report",
+                )
+            if expected.get("text_summary") != actual.get("text_summary"):
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{item_path}.text_summary",
+                    "PPTX object text differs from build report",
+                )
+            if expected.get("media_sha256") != actual.get("media_sha256"):
+                _report_error(
+                    result,
+                    "ASSET_HASH_MISMATCH",
+                    f"{item_path}.media_sha256",
+                    "PPTX object media differs from build report",
+                )
+            expected_fonts = expected.get("font_declarations")
+            if (
+                isinstance(expected_fonts, list)
+                and sorted(set(expected_fonts))
+                != sorted(set(actual.get("font_declarations", [])))
+            ):
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{item_path}.font_declarations",
+                    "PPTX object fonts differ from build report",
+                )
+    if set(actual_by_name) != report_names:
+        _report_error(
+            result,
+            "BUILD_OUTPUT_INCOMPLETE",
+            "build_report.elements",
+            "registered report names and PPTX ia:* names differ",
+        )
+
+
+def _schema_elements(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    elements = spec.get("elements")
+    if not isinstance(elements, list):
+        return {}
+    return {
+        item["element_id"]: item
+        for item in elements
+        if isinstance(item, dict)
+        and isinstance(item.get("element_id"), str)
+        and item["element_id"]
+    }
+
+
+def _expected_objects_for_element(
+    element: dict[str, Any], spec: dict[str, Any]
+) -> list[dict[str, Any]]:
+    element_id = element["element_id"]
+    if element.get("kind") in {"matrix", "status"}:
+        parts = expand_multipart_parts(element)
+        return [
+            {
+                "ooxml_name": f"ia:{element_id}:{part.get('part_id')}",
+                "part_id": part.get("part_id"),
+                "bbox": part.get("slide_bbox"),
+                "rotation": part.get("style", {}).get("rotation", 0),
+                "text_summary": part.get("content", {}).get("text"),
+                "font_declarations": (
+                    [part["style"]["text_style"]["font_name"]]
+                    if isinstance(part.get("content", {}).get("text"), str)
+                    and isinstance(part.get("style"), dict)
+                    and isinstance(part["style"].get("text_style"), dict)
+                    and isinstance(part["style"]["text_style"].get("font_name"), str)
+                    else []
+                ),
+            }
+            for part in parts
+        ]
+    content = element.get("content")
+    text_summary = None
+    media_sha256 = None
+    font_declarations: list[str] = []
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            text_summary = content["text"]
+        if element.get("kind") == "table" and isinstance(content.get("cells"), list):
+            text_summary = "\n".join(
+                cell.get("text", "")
+                for cell in content["cells"]
+                if isinstance(cell, dict) and isinstance(cell.get("text"), str)
+            )
+            font_declarations = sorted(
+                {
+                    cell["font"]["name"]
+                    for cell in content["cells"]
+                    if isinstance(cell, dict)
+                    and isinstance(cell.get("font"), dict)
+                    and isinstance(cell["font"].get("name"), str)
+                }
+            )
+        asset = content.get("asset")
+        if isinstance(asset, dict) and isinstance(asset.get("asset_sha256"), str):
+            media_sha256 = asset["asset_sha256"]
+    if element.get("kind") in {"text", "special_text"}:
+        typography = spec.get("modules", {}).get("typography", {})
+        typography_items = typography.get("items", []) if isinstance(typography, dict) else []
+        contract = next(
+            (
+                item
+                for item in typography_items
+                if isinstance(item, dict) and item.get("element_id") == element_id
+            ),
+            {},
+        )
+        font_name = contract.get("selected_font") if isinstance(contract, dict) else None
+        if isinstance(font_name, str):
+            font_declarations = [font_name]
+    return [
+        {
+            "ooxml_name": f"ia:{element_id}",
+            "part_id": None,
+            "bbox": element.get("slide_bbox"),
+            "rotation": element.get("style", {}).get("rotation", 0),
+            "text_summary": text_summary,
+            "media_sha256": media_sha256,
+            "font_declarations": font_declarations,
+        }
+    ]
+
+
+def _number_matches(left: Any, right: Any) -> bool:
+    return (
+        type(left) in {int, float}
+        and type(right) in {int, float}
+        and abs(float(left) - float(right)) <= 0.01
+    )
+
+
+def _validate_schema_report_contract(
+    result: dict[str, Any], spec: dict[str, Any], report: dict[str, Any]
+) -> None:
+    schema_elements = _schema_elements(spec)
+    report_elements = report.get("elements")
+    if not isinstance(report_elements, dict):
+        return
+    if set(report_elements) != set(schema_elements):
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.elements",
+            "report element ids differ from the reconstruction spec",
+        )
+    modes = resolved_element_mode_map(spec)
+    actual_by_name: dict[str, list[dict[str, Any]]] = {}
+    for record in result.get("structure_objects", []):
+        name = record.get("object_name")
+        if isinstance(name, str) and name.startswith("ia:"):
+            actual_by_name.setdefault(name, []).append(record)
+    verified_elements: dict[str, bool] = {}
+
+    for element_id, element in schema_elements.items():
+        report_element = report_elements.get(element_id)
+        element_path = f"build_report.elements.{element_id}"
+        if not isinstance(report_element, dict):
+            _report_error(
+                result, "BUILD_REPORT_MISMATCH", element_path, "element report is missing"
+            )
+            verified_elements[element_id] = False
+            continue
+        element_root_ok = True
+        if report_element.get("semantic_kind") != element.get("kind"):
+            element_root_ok = False
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                f"{element_path}.semantic_kind",
+                "semantic kind differs from schema",
+            )
+        if report_element.get("selected_mode") != modes.get(element_id):
+            element_root_ok = False
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                f"{element_path}.selected_mode",
+                "representation mode differs from schema",
+            )
+        objects = report_element.get("objects")
+        if not isinstance(objects, list):
+            verified_elements[element_id] = False
+            continue
+        declared_types = {
+            item.get("object_type")
+            for item in objects
+            if isinstance(item, dict) and isinstance(item.get("object_type"), str)
+        }
+        summarized_type = (
+            next(iter(declared_types)) if len(declared_types) == 1 else "mixed"
+        )
+        if report_element.get("object_type") != summarized_type:
+            element_root_ok = False
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                f"{element_path}.object_type",
+                "aggregate object type does not summarize registered objects",
+            )
+        report_by_name = {
+            item.get("ooxml_name"): item
+            for item in objects
+            if isinstance(item, dict) and isinstance(item.get("ooxml_name"), str)
+        }
+        try:
+            expected_objects = _expected_objects_for_element(element, spec)
+        except ToolError as exc:
+            _report_error(result, "BUILD_REPORT_MISMATCH", exc.path, exc.detail)
+            verified_elements[element_id] = False
+            continue
+        expected_names = {item["ooxml_name"] for item in expected_objects}
+        names_match = (
+            set(report_by_name) == expected_names
+            and len(objects) == len(expected_objects)
+        )
+        if not names_match:
+            element_root_ok = False
+            _report_error(
+                result,
+                "BUILD_REPORT_MISMATCH",
+                f"{element_path}.objects",
+                "registered parts differ from schema expansion",
+            )
+        allowed_types = expected_object_types(element.get("kind"))
+        actual_boxes: list[list[int]] = []
+        verified_names: set[str] = set()
+        for expected in expected_objects:
+            name = expected["ooxml_name"]
+            item = report_by_name.get(name)
+            item_path = f"{element_path}.objects[{name}]"
+            if not isinstance(item, dict):
+                continue
+            object_ok = element_root_ok
+            if item.get("part_id") != expected.get("part_id"):
+                object_ok = False
+                _report_error(
+                    result, "BUILD_REPORT_MISMATCH", f"{item_path}.part_id", "part id differs from schema"
+                )
+            if item.get("bbox") != expected.get("bbox"):
+                object_ok = False
+                _report_error(
+                    result, "BUILD_REPORT_MISMATCH", f"{item_path}.bbox", "bbox differs from schema"
+                )
+            if item.get("object_type") not in allowed_types:
+                object_ok = False
+                _report_error(
+                    result,
+                    "BUILD_REPORT_MISMATCH",
+                    f"{item_path}.object_type",
+                    "object type is incompatible with schema kind",
+                )
+            if not _number_matches(item.get("rotation"), expected.get("rotation")):
+                object_ok = False
+                _report_error(
+                    result,
+                    "BUILD_REPORT_MISMATCH",
+                    f"{item_path}.rotation",
+                    "rotation differs from schema",
+                )
+            for field in ("text_summary", "media_sha256"):
+                expected_value = expected.get(field)
+                if item.get(field) != expected_value:
+                    object_ok = False
+                    _report_error(
+                        result,
+                        "BUILD_REPORT_MISMATCH",
+                        f"{item_path}.{field}",
+                        f"{field} differs from schema",
+                    )
+            if sorted(set(item.get("font_declarations", []))) != sorted(
+                set(expected.get("font_declarations", []))
+            ):
+                object_ok = False
+                _report_error(
+                    result,
+                    "BUILD_REPORT_MISMATCH",
+                    f"{item_path}.font_declarations",
+                    "font declarations differ from schema",
+                )
+            candidates = actual_by_name.get(name, [])
+            if len(candidates) == 1:
+                actual = candidates[0]
+                box = [actual.get(key) for key in ("x", "y", "cx", "cy")]
+                if all(type(value) is int for value in box):
+                    actual_boxes.append(box)
+                else:
+                    object_ok = False
+                actual_bbox = [actual.get(key) for key in ("x", "y", "cx", "cy")]
+                if (
+                    actual.get("object_type") != item.get("object_type")
+                    or actual_bbox != item.get("bbox")
+                    or not _number_matches(actual.get("rotation"), item.get("rotation"))
+                    or actual.get("text_summary") != item.get("text_summary")
+                    or actual.get("media_sha256") != item.get("media_sha256")
+                    or sorted(set(actual.get("font_declarations", [])))
+                    != sorted(set(item.get("font_declarations", [])))
+                ):
+                    object_ok = False
+            else:
+                object_ok = False
+            if object_ok:
+                result["build_report_objects_checked"] += 1
+                verified_names.add(name)
+        element_verified = (
+            element_root_ok
+            and verified_names == expected_names
+            and len(expected_objects) == len(objects)
+        )
+        multipart_union_ok = not (
+            len(actual_boxes) != len(expected_objects)
+            or bbox_union(actual_boxes) != element.get("slide_bbox")
+        )
+        if element.get("kind") in {"matrix", "status"} and not multipart_union_ok:
+            _report_error(
+                result,
+                "BUILD_OUTPUT_INCOMPLETE",
+                element_path,
+                "multipart PPTX objects do not union to the parent bbox",
+            )
+        if element.get("kind") in {"matrix", "status"}:
+            if element_verified and multipart_union_ok:
+                result["multipart_contracts_checked"] += 1
+            else:
+                element_verified = False
+        verified_elements[element_id] = element_verified
+
+    expected_summary = representation_summary(spec)
+    if report.get("representation_summary") != expected_summary:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.representation_summary",
+            "representation summary differs from schema",
+        )
+    background_module = spec.get("modules", {}).get("background", {})
+    background_items = (
+        background_module.get("items", [])
+        if isinstance(background_module, dict)
+        else []
+    )
+    expected_background_summary = {"native": 0, "background_picture": 0}
+    expected_background_pictures: list[dict[str, Any]] = []
+    for item in background_items if isinstance(background_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        mode = item.get("selected_mode")
+        if mode in expected_background_summary:
+            expected_background_summary[mode] += 1
+        if mode != "background_picture":
+            continue
+        element_id = item.get("bound_element_id")
+        element = schema_elements.get(element_id)
+        asset = (
+            element.get("content", {}).get("asset")
+            if isinstance(element, dict)
+            else None
+        )
+        asset_sha256 = asset.get("asset_sha256") if isinstance(asset, dict) else None
+        if isinstance(asset_sha256, str):
+            expected_background_pictures.append(
+                {**item, "media_sha256": asset_sha256}
+            )
+    expected_background_pictures.sort(
+        key=lambda value: value.get("background_id", "")
+    )
+    if report.get("background_summary") != expected_background_summary:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.background_summary",
+            "background summary differs from schema",
+        )
+    if report.get("background_pictures") != expected_background_pictures:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.background_pictures",
+            "background picture facts or media hashes differ from schema",
+        )
+    modules = spec.get("modules")
+    plan = modules.get("representation_plan") if isinstance(modules, dict) else None
+    facts = plan.get("items") if isinstance(plan, dict) else None
+    if not isinstance(facts, list):
+        facts = []
+    for index, fact in enumerate(facts):
+        if not isinstance(fact, dict) or fact.get("coverage_status") != "covered":
+            continue
+        fact_path = f"modules.representation_plan.items[{index}]"
+        bindings = fact.get("bound_element_ids")
+        fact_ok = True
+        if not isinstance(bindings, list) or not bindings:
+            fact_ok = False
+            _report_error(
+                result, "BUILD_OUTPUT_INCOMPLETE", f"{fact_path}.bound_element_ids", "covered fact has no bindings"
+            )
+            continue
+        for element_id in bindings:
+            prefix = f"ia:{element_id}"
+            if not verified_elements.get(element_id, False):
+                fact_ok = False
+            if not any(
+                name == prefix or name.startswith(f"{prefix}:")
+                for name in actual_by_name
+            ):
+                fact_ok = False
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"{fact_path}.bound_element_ids",
+                    f"bound PPTX object is missing: {element_id}",
+                )
+        if fact_ok:
+            result["representation_facts_checked"] += 1
+
+    expected_fallbacks = [
+        dict(item)
+        for item in sorted(facts, key=lambda value: value.get("source_fact_id", ""))
+        if isinstance(item, dict) and item.get("selected_mode") == "asset"
+    ]
+    actual_fallbacks = report.get("asset_fallbacks")
+    if actual_fallbacks != expected_fallbacks:
+        _report_error(
+            result,
+            "BUILD_REPORT_MISMATCH",
+            "build_report.asset_fallbacks",
+            "asset fallback facts differ from schema",
+        )
+    if isinstance(actual_fallbacks, list):
+        actual_fallback_by_fact = {
+            item.get("source_fact_id"): item
+            for item in actual_fallbacks
+            if isinstance(item, dict)
+            and isinstance(item.get("source_fact_id"), str)
+        }
+        for index, fallback in enumerate(expected_fallbacks):
+            fallback_ok = (
+                len(actual_fallbacks) == len(expected_fallbacks)
+                and actual_fallback_by_fact.get(fallback.get("source_fact_id"))
+                == fallback
+            )
+            bindings = fallback.get("bound_element_ids", [])
+            bound_elements = [schema_elements.get(value) for value in bindings]
+            if not all(
+                verified_elements.get(element_id, False)
+                for element_id in bindings
+            ):
+                fallback_ok = False
+            picture_elements = [
+                item for item in bound_elements
+                if isinstance(item, dict) and item.get("kind") in {"picture", "icon"}
+            ]
+            if not picture_elements:
+                fallback_ok = False
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"build_report.asset_fallbacks[{index}]",
+                    "asset fallback lacks a picture/icon binding",
+                )
+                continue
+            for element in picture_elements:
+                element_id = element["element_id"]
+                if not verified_elements.get(element_id, False):
+                    fallback_ok = False
+                if fallback.get("source_bbox") != element.get("source_bbox"):
+                    fallback_ok = False
+                    _report_error(
+                        result,
+                        "BUILD_REPORT_MISMATCH",
+                        f"build_report.asset_fallbacks[{index}].source_bbox",
+                        "asset fallback local bbox differs from its bound element",
+                    )
+                records = actual_by_name.get(f"ia:{element_id}", [])
+                if len(records) != 1 or records[0].get("object_type") != "pic":
+                    fallback_ok = False
+                    _report_error(
+                        result,
+                        "BUILD_OUTPUT_INCOMPLETE",
+                        f"build_report.asset_fallbacks[{index}].bound_element_ids",
+                        "asset fallback is not bound to one PPTX picture",
+                    )
+            if fallback.get("required_editability") in {
+                "labels_only",
+                "labels_and_geometry",
+            } and not any(
+                isinstance(item, dict) and item.get("kind") in {"text", "special_text"}
+                for item in bound_elements
+            ):
+                fallback_ok = False
+                _report_error(
+                    result,
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    f"build_report.asset_fallbacks[{index}].bound_element_ids",
+                    "editable fallback labels are not bound",
+                )
+            if fallback_ok:
+                result["asset_fallbacks_checked"] += 1
 
 
 def _expected_native_list_items(spec: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1279,25 +2390,6 @@ def _inherited_paragraph_properties(
     return properties
 
 
-def _picture_covers_slide(picture: ET.Element, width: int, height: int) -> bool:
-    transform = picture.find("p:spPr/a:xfrm", NS)
-    if transform is None:
-        return False
-    offset = transform.find("a:off", NS)
-    extent = transform.find("a:ext", NS)
-    x = _int_attr(offset, "x")
-    y = _int_attr(offset, "y")
-    cx = _int_attr(extent, "cx")
-    cy = _int_attr(extent, "cy")
-    if None in {x, y, cx, cy} or width <= 0 or height <= 0:
-        return False
-    assert x is not None and y is not None and cx is not None and cy is not None
-    area_ratio = (cx * cy) / (width * height)
-    near_origin = x <= width * 0.01 and y <= height * 0.01
-    reaches_edges = x + cx >= width * 0.99 and y + cy >= height * 0.99
-    return area_ratio >= 0.98 and near_origin and reaches_edges
-
-
 def _check_relationship_targets(archive: zipfile.ZipFile, names: set[str]) -> list[str]:
     missing: list[str] = []
     for rels_part in sorted(name for name in names if name.endswith(".rels")):
@@ -1368,26 +2460,6 @@ def _validate_archive_inventory(archive: zipfile.ZipFile) -> None:
             raise ValidationError("PPTX_RESOURCE_LIMIT", f"Invalid compression size: {name}")
         if info.compress_size and info.file_size / info.compress_size > MAX_COMPRESSION_RATIO:
             raise ValidationError("PPTX_RESOURCE_LIMIT", f"Compression ratio exceeds limit: {name}")
-        if name.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif", ".tiff")):
-            try:
-                payload = archive.read(info)
-                with warnings.catch_warnings():
-                    warnings.simplefilter("error", Image.DecompressionBombWarning)
-                    with Image.open(io.BytesIO(payload)) as image:
-                        width, height = image.size
-                pixels = width * height
-                if (
-                    width <= 0 or height <= 0
-                    or width > MAX_MEDIA_DIMENSION or height > MAX_MEDIA_DIMENSION
-                    or pixels > MAX_MEDIA_PIXELS or pixels * 4 > MAX_MEDIA_RGBA_BYTES
-                ):
-                    raise ValidationError("PPTX_RESOURCE_LIMIT", f"Media pixel budget exceeded: {name}")
-            except ValidationError:
-                raise
-            except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
-                raise ValidationError("PPTX_RESOURCE_LIMIT", f"Media decompression bomb: {name}") from exc
-            except Exception as exc:
-                raise ValidationError("MEDIA_IMAGE_INVALID", f"Invalid image media: {name}") from exc
 
 
 def _content_type_maps(archive: zipfile.ZipFile):
@@ -1580,6 +2652,7 @@ def validate_pptx(
     path: Path,
     expected_slides: int | None = None,
     reconstruction_spec: dict[str, Any] | Path | str | None = None,
+    build_report: dict[str, Any] | Path | str | None = None,
 ) -> dict[str, Any]:
     path = Path(path).expanduser().resolve()
     result = _result(path)
@@ -1599,21 +2672,33 @@ def validate_pptx(
             result["errors"].append(exc.code)
             result["warnings"].append(exc.detail)
             return result
+    report = None
+    if build_report is not None:
+        try:
+            report = _load_build_report(build_report)
+            _validate_build_report_shape(report)
+            _validate_report_identities(result, spec, report)
+        except ValidationError as exc:
+            result["errors"].append(exc.code)
+            result["warnings"].append(exc.detail)
+            return result
 
     try:
         with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
             try:
                 _validate_archive_inventory(archive)
             except ValidationError as exc:
                 result["errors"].append(exc.code)
                 result["warnings"].append(exc.detail)
                 return result
+            if report is not None:
+                _validate_report_media_inventory(archive, names, result, report)
             bad_member = archive.testzip()
             if bad_member:
                 result["errors"].append("PPTX_ZIP_CORRUPT")
                 result["warnings"].append(f"Corrupt member: {bad_member}")
                 return result
-            names = set(archive.namelist())
             missing_parts = sorted(REQUIRED_PARTS - names)
             if missing_parts:
                 result["errors"].append("PPTX_REQUIRED_PART_MISSING")
@@ -1730,9 +2815,6 @@ def validate_pptx(
                 shapes = [item for item in object_records if item["object_type"] == "sp"]
                 pictures = [item for item in object_records if item["object_type"] == "pic"]
                 graphic_frames = [item for item in object_records if item["object_type"] == "graphicFrame"]
-                result["structure_objects"].extend({
-                    key: value for key, value in item.items() if key != "_element"
-                } for item in object_records)
                 text_shapes = sum(
                     1 for item in shapes if item["has_text"] and item["visible"] is True
                 )
@@ -1760,9 +2842,15 @@ def validate_pptx(
                 full_pictures = sum(
                     1 for picture in pictures
                     if picture["geometry_known"] and picture["visible"] is True
-                    and picture["x"] <= 0 and picture["y"] <= 0
-                    and picture["x"] + picture["cx"] >= width
-                    and picture["y"] + picture["cy"] >= height
+                    and is_near_full_page_bbox(
+                        [
+                            picture["x"],
+                            picture["y"],
+                            picture["cx"],
+                            picture["cy"],
+                        ],
+                        [0, 0, width, height],
+                    )
                 )
                 slide_picture_objects: list[dict[str, Any]] = []
                 slide_text_objects: list[dict[str, Any]] = []
@@ -1823,12 +2911,14 @@ def validate_pptx(
                         media_part = relationship[0]
                         if media_part in names:
                             media_hash = _archive_sha256(archive, media_part)
+                    picture_record["media_sha256"] = media_hash
                     record = {
                         "object_key": f"{slide_part}#picture-{picture_index}",
                         "slide_position": position,
                         "slide_part": slide_part,
                         "object_id": picture_record["object_id"],
                         "object_name": picture_record["object_name"],
+                        "object_type": picture_record["object_type"],
                         "layer": picture_record["layer"],
                         "hidden": picture_record["hidden"],
                         "relationship_id": picture_rid,
@@ -1837,15 +2927,31 @@ def validate_pptx(
                         "media_sha256": media_hash,
                         "x": picture_record["x"], "y": picture_record["y"],
                         "cx": picture_record["cx"], "cy": picture_record["cy"],
+                        "bbox": [
+                            picture_record["x"],
+                            picture_record["y"],
+                            picture_record["cx"],
+                            picture_record["cy"],
+                        ],
                         "geometry_known": picture_record["geometry_known"],
                         "full_slide": picture_record["geometry_known"]
-                        and picture_record["x"] <= 0 and picture_record["y"] <= 0
-                        and picture_record["x"] + picture_record["cx"] >= width
-                        and picture_record["y"] + picture_record["cy"] >= height,
+                        and picture_record["visible"] is True
+                        and is_near_full_page_bbox(
+                            [
+                                picture_record["x"],
+                                picture_record["y"],
+                                picture_record["cx"],
+                                picture_record["cy"],
+                            ],
+                            [0, 0, width, height],
+                        ),
                     }
                     record["visible"] = picture_record["visible"]
                     slide_picture_objects.append(record)
                     result["picture_objects"].append(record)
+                result["structure_objects"].extend({
+                    key: value for key, value in item.items() if key != "_element"
+                } for item in object_records)
                 missing_xml_relationships = sorted(
                     _xml_relationship_ids(slide) - set(slide_relationships)
                 )
@@ -1896,6 +3002,10 @@ def validate_pptx(
                 _validate_native_list_contracts(result, spec, width, height)
                 _validate_text_run_contracts(result, spec, width, height)
                 _validate_element_bindings(result, spec, width, height)
+            if report is not None:
+                _validate_report_object_bindings(result, report)
+                if spec is not None:
+                    _validate_schema_report_contract(result, spec, report)
             if result["slide_count"] == 0:
                 result["errors"].append("NO_SLIDES")
 
@@ -1910,6 +3020,19 @@ def validate_pptx(
     result["errors"] = list(dict.fromkeys(result["errors"]))
     result["valid"] = not result["errors"]
     return result
+
+
+def trusted_object_snapshot(path: Path) -> dict[str, Any]:
+    """Rebuild the object evidence used by postbuild checks from PPTX bytes only."""
+    result = validate_pptx(path, expected_slides=1)
+    return {
+        "valid": result["valid"],
+        "errors": list(result["errors"]),
+        "pptx_sha256": result["pptx_sha256"],
+        "structure_objects": list(result["structure_objects"]),
+        "picture_objects": list(result["picture_objects"]),
+        "full_slide_picture_risk": result["full_slide_picture_risk"],
+    }
 
 
 def summary_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -1963,6 +3086,11 @@ def main(argv: list[str] | None = None) -> int:
         help="validate native list/TextBox structure against page-reconstruction.json",
     )
     parser.add_argument(
+        "--build-report",
+        type=Path,
+        help="cross-check schema, build report, and PPTX object bindings",
+    )
+    parser.add_argument(
         "--summary",
         action="store_true",
         help="omit per-object arrays from CLI JSON output",
@@ -1973,7 +3101,9 @@ def main(argv: list[str] | None = None) -> int:
         help="atomically save the same JSON emitted to stdout",
     )
     args = parser.parse_args(argv)
-    result = validate_pptx(args.pptx, args.expected_slides, args.spec)
+    result = validate_pptx(
+        args.pptx, args.expected_slides, args.spec, args.build_report
+    )
     _emit_json(summary_result(result) if args.summary else result, args.output)
     return 0 if result["valid"] else 2
 

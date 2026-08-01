@@ -23,6 +23,24 @@ PRERELEASE_RENDERER_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PREVIEW_SIZE = [1920, 1080]
+REQUIRED_EXECUTABLES = ("soffice", "pdftoppm", "pdffonts", "pdftotext")
+_MACHO_MAGICS = frozenset(
+    {
+        bytes.fromhex(value)
+        for value in (
+            "feedface",
+            "cefaedfe",
+            "feedfacf",
+            "cffaedfe",
+            "cafebabe",
+            "bebafeca",
+            "cafebabf",
+            "bfbafeca",
+        )
+    }
+)
+_SYSTEM_LIBRARY_PREFIXES = ("/System/", "/usr/lib/")
+_MAX_DYNAMIC_LIBRARIES = 256
 
 
 def _sha256(path: Path) -> str:
@@ -31,6 +49,167 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = {
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": os.defpath,
+    }
+    if os.name == "nt" and isinstance(os.environ.get("SYSTEMROOT"), str):
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    return env
+
+
+def _is_macho(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            return stream.read(4) in _MACHO_MAGICS
+    except OSError:
+        return False
+
+
+def _otool(path: Path, flag: str) -> list[str]:
+    completed = subprocess.run(
+        ["/usr/bin/otool", flag, str(path)],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env=_subprocess_env(),
+        timeout=10,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError(f"otool {flag} failed for {path}")
+    return completed.stdout.splitlines()
+
+
+def _macho_dependencies(path: Path) -> list[str]:
+    return [
+        line.strip().split(" (", 1)[0]
+        for line in _otool(path, "-L")[1:]
+        if line[:1].isspace() and " (" in line
+    ]
+
+
+def _macho_rpaths(path: Path) -> list[str]:
+    lines = _otool(path, "-l")
+    values: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() != "cmd LC_RPATH":
+            continue
+        for candidate in lines[index + 1 : index + 6]:
+            stripped = candidate.strip()
+            if stripped.startswith("path ") and " (offset " in stripped:
+                values.append(stripped[5:].split(" (offset ", 1)[0])
+                break
+    return values
+
+
+def _expand_macho_token(value: str, *, loader: Path, executable: Path) -> Path:
+    if value == "@loader_path":
+        return loader.parent
+    if value.startswith("@loader_path/"):
+        return loader.parent / value[len("@loader_path/") :]
+    if value == "@executable_path":
+        return executable.parent
+    if value.startswith("@executable_path/"):
+        return executable.parent / value[len("@executable_path/") :]
+    return Path(value)
+
+
+def _resolve_macho_dependency(
+    install_name: str,
+    *,
+    loader: Path,
+    executable: Path,
+    rpaths: list[str],
+) -> Path | None:
+    if install_name.startswith(_SYSTEM_LIBRARY_PREFIXES):
+        return None
+    candidates: list[Path]
+    if install_name.startswith("@rpath/"):
+        suffix = install_name[len("@rpath/") :]
+        candidates = [
+            _expand_macho_token(
+                rpath,
+                loader=loader,
+                executable=executable,
+            )
+            / suffix
+            for rpath in rpaths
+        ]
+    elif install_name.startswith(("@loader_path", "@executable_path")):
+        candidates = [
+            _expand_macho_token(
+                install_name,
+                loader=loader,
+                executable=executable,
+            )
+        ]
+    elif install_name.startswith("/"):
+        candidates = [Path(install_name)]
+    else:
+        candidates = []
+    for candidate in candidates:
+        try:
+            return candidate.resolve(strict=True)
+        except OSError:
+            continue
+    raise RuntimeError(
+        f"cannot resolve dynamic dependency {install_name!r} for {loader}"
+    )
+
+
+def _dynamic_libraries(executable: Path) -> list[dict[str, Any]]:
+    if sys.platform != "darwin" or not _is_macho(executable):
+        return []
+    aliases_by_path: dict[Path, set[str]] = {}
+    alias_owner: dict[str, Path] = {}
+    seen: set[Path] = set()
+    pending = [executable.resolve(strict=True)]
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        if len(seen) > _MAX_DYNAMIC_LIBRARIES + 1:
+            raise RuntimeError("dynamic dependency closure exceeds its limit")
+        rpaths = _macho_rpaths(current)
+        for install_name in _macho_dependencies(current):
+            resolved = _resolve_macho_dependency(
+                install_name,
+                loader=current,
+                executable=executable,
+                rpaths=rpaths,
+            )
+            if resolved is None:
+                continue
+            aliases = {
+                Path(install_name).name,
+                resolved.name,
+            }
+            for alias in aliases:
+                owner = alias_owner.setdefault(alias, resolved)
+                if owner != resolved:
+                    raise RuntimeError(
+                        f"dynamic library alias collision for {alias!r}"
+                    )
+            aliases_by_path.setdefault(resolved, set()).update(aliases)
+            if resolved != current and resolved not in seen:
+                pending.append(resolved)
+    return [
+        {
+            "path": str(path),
+            "sha256": _sha256(path),
+            "load_names": sorted(aliases),
+        }
+        for path, aliases in sorted(
+            aliases_by_path.items(), key=lambda item: str(item[0])
+        )
+    ]
 
 
 def is_stable_libreoffice_version(version: str) -> bool:
@@ -46,8 +225,7 @@ def _resolve_executable(requested: str) -> Path | None:
     return Path(found).resolve() if found else None
 
 
-def _version(path: Path) -> str:
-    last_result = "unavailable"
+def _version(path: Path) -> str | None:
     for flag in ("--version", "-v"):
         try:
             completed = subprocess.run(
@@ -55,16 +233,15 @@ def _version(path: Path) -> str:
                 check=False,
                 capture_output=True,
                 text=True,
+                env=_subprocess_env(),
                 timeout=10,
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            last_result = f"unavailable: {exc}"
+        except (OSError, subprocess.TimeoutExpired):
             continue
         output = (completed.stdout or completed.stderr).strip()
         if completed.returncode == 0 and output:
             return output.splitlines()[0]
-        last_result = output.splitlines()[0] if output else f"exit={completed.returncode}"
-    return last_result
+    return None
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -92,21 +269,45 @@ def _atomic_write(path: Path, text: str) -> None:
 def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
     executables: dict[str, dict[str, Any]] = {}
-    for name in ("soffice", "pdftoppm", "pdffonts"):
+    for name in REQUIRED_EXECUTABLES:
         requested = getattr(args, name)
         resolved = _resolve_executable(requested)
+        dynamic_libraries: list[dict[str, Any]] = []
+        if name == "pdffonts" and resolved is not None:
+            try:
+                dynamic_libraries = _dynamic_libraries(resolved)
+            except (
+                OSError,
+                RuntimeError,
+                UnicodeError,
+                subprocess.SubprocessError,
+            ) as exc:
+                errors.append(
+                    {
+                        "code": "RUNTIME_DYNAMIC_LIBRARY_INSPECTION_FAILED:pdffonts",
+                        "detail": str(exc),
+                    }
+                )
         executables[name] = {
             "requested": requested,
             "available": resolved is not None,
             "path": str(resolved) if resolved else None,
             "version": _version(resolved) if resolved else None,
             "sha256": _sha256(resolved) if resolved else None,
+            "dynamic_libraries": dynamic_libraries,
         }
         if resolved is None:
             errors.append(
                 {
                     "code": f"RUNTIME_EXECUTABLE_MISSING:{name}",
                     "detail": requested,
+                }
+            )
+        elif executables[name]["version"] is None:
+            errors.append(
+                {
+                    "code": f"RUNTIME_EXECUTABLE_VERSION_UNAVAILABLE:{name}",
+                    "detail": str(resolved),
                 }
             )
 
@@ -182,27 +383,60 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         else:
-            keys = (
-                ("renderer_backend", result.get("renderer_backend"), expected.get("renderer_backend")),
-                ("preview_size", result.get("preview_size"), expected.get("preview_size")),
-                ("fontconfig.sha256", result["fontconfig"].get("sha256"), expected.get("fontconfig", {}).get("sha256")),
-            )
-            mismatches = [
-                key for key, actual, wanted in keys if actual != wanted
-            ]
-            for name in ("soffice", "pdftoppm", "pdffonts"):
-                actual_tool = result["executables"].get(name, {})
-                expected_tool = expected.get("executables", {}).get(name, {})
-                for field in ("version", "sha256"):
-                    if actual_tool.get(field) != expected_tool.get(field):
-                        mismatches.append(f"executables.{name}.{field}")
-            if mismatches:
+            invalid_containers: list[str] = []
+            expected_executables: dict[str, Any] = {}
+            expected_fontconfig: dict[str, Any] = {}
+            if not isinstance(expected, dict):
+                invalid_containers.append("expected-runtime")
+            else:
+                candidate_executables = expected.get("executables")
+                candidate_fontconfig = expected.get("fontconfig")
+                if not isinstance(candidate_executables, dict):
+                    invalid_containers.append("executables")
+                else:
+                    expected_executables = candidate_executables
+                    for name in REQUIRED_EXECUTABLES:
+                        if not isinstance(expected_executables.get(name), dict):
+                            invalid_containers.append(f"executables.{name}")
+                if not isinstance(candidate_fontconfig, dict):
+                    invalid_containers.append("fontconfig")
+                else:
+                    expected_fontconfig = candidate_fontconfig
+            if invalid_containers:
                 errors.append(
                     {
                         "code": "RUNTIME_RENDERER_IDENTITY_MISMATCH",
-                        "detail": ", ".join(sorted(mismatches)),
+                        "detail": "invalid containers: "
+                        + ", ".join(sorted(invalid_containers)),
                     }
                 )
+            else:
+                keys = (
+                    ("renderer_backend", result.get("renderer_backend"), expected.get("renderer_backend")),
+                    ("preview_size", result.get("preview_size"), expected.get("preview_size")),
+                    ("fontconfig.sha256", result["fontconfig"].get("sha256"), expected_fontconfig.get("sha256")),
+                )
+                mismatches = [
+                    key for key, actual, wanted in keys if actual != wanted
+                ]
+                for name in REQUIRED_EXECUTABLES:
+                    actual_tool = result["executables"].get(name, {})
+                    expected_tool = expected_executables[name]
+                    for field in (
+                        "path",
+                        "version",
+                        "sha256",
+                        "dynamic_libraries",
+                    ):
+                        if actual_tool.get(field) != expected_tool.get(field):
+                            mismatches.append(f"executables.{name}.{field}")
+                if mismatches:
+                    errors.append(
+                        {
+                            "code": "RUNTIME_RENDERER_IDENTITY_MISMATCH",
+                            "detail": ", ".join(sorted(mismatches)),
+                        }
+                    )
     result["valid"] = not errors
     return result
 
@@ -212,6 +446,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--soffice", required=True)
     parser.add_argument("--pdftoppm", required=True)
     parser.add_argument("--pdffonts", required=True)
+    parser.add_argument("--pdftotext", required=True)
     parser.add_argument("--fontconfig", type=Path, required=True)
     parser.add_argument("--expected-runtime", type=Path)
     parser.add_argument("--python-module", action="append", default=[])

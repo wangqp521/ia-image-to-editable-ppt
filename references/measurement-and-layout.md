@@ -2,17 +2,19 @@
 
 ## 事实源与 preflight
 
-无法确认污染时使用 `direct_to_reconstruction`；只有可见拍摄透视/弯曲、反光/摩尔纹/环境背景、浏览器或聊天外壳、浮层/通知/遮挡、拼接或非内容边界时才用 `clean_with_imagegen`。分类理由写可观察事实，不按扩展名或上传渠道判断。清洗只允许一次，提示词固定为“请根据附件生成图片，要求高度还原，16:9，复刻源图片风格。”不得追加美化、改字或风格要求。
+污染无法确认用 `direct_to_reconstruction`；仅见拍摄透视/弯曲、反光/摩尔纹/环境背景、浏览器/聊天外壳、浮层/通知/遮挡、拼接或非内容边界时用 `clean_with_imagegen`。理由只写可见事实，不按扩展名/渠道。清洗仅一次，提示词固定“请根据附件生成图片，要求高度还原，16:9，复刻源图片风格。”，不得美化、改字或改风格。
 
-`content_reference` 唯一裁决文字、数字、单位、数量、分组和语义；`clean_visual_reference` 唯一裁决坐标、比例、颜色、字体观感、图标、纹理和层级。直通页两者均指向原图；清洗页内容仍服从原图，清洗图改变的内容不得进入 PPTX。每页不得借用其他页事实。
+`content_reference` 唯一裁决文字/数字/单位/数量/分组/语义；`clean_visual_reference` 唯一裁决坐标/比例/颜色/字体观感/图标/纹理/层级。直通页均指原图；清洗页内容仍服从原图，清洗改动禁入 PPTX；页间不借事实。
 
-preflight绑定输入路径/hash、尺寸和边界。运行 `create_coordinate_overlay.py`；按需运行 `inspect_image_region.py`。写规格前通过 commentary 以 `[第 N/总页数] 坐标定位图` 展示 PNG；同一来源 SHA-256 下每页只展示一次。把 overlay path/hash、source hash、grid、manifest 和 `inspection=passed` 写入 `modules.page_layout.coordinate_overlay_evidence`。来源或 grid 改变时旧坐标定位图立即失效并重建展示；各 profile 不得跳过。工具证据不是新事实源。
+preflight 绑定输入路径/hash、尺寸、边界。运行 `create_coordinate_overlay.py`，按需运行 `inspect_image_region.py`。写规格前通过 commentary 以 `[第 N/总页数] 坐标定位图` 展示 PNG；同一来源 SHA-256 每页一次。将 overlay path/hash、source hash、grid、manifest、`inspection=passed` 写入 `modules.page_layout.coordinate_overlay_evidence`。来源或 grid 改变即重建展示；各 profile 不得跳过。工具证据不是新事实源。
 
 ## 唯一 schema v2 规格
 
-生成前只维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`source_bbox` 使用视觉参考图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id`，已激活 module 必须非空；`reading_order` 必须覆盖全部 elements，每个 element 至少归属一个 region。不得预填最终 OOXML ID、另建平行对象清单或让构建脚本维护第二套内容/坐标。
+生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`page_id` 须精确为 `page-NNN`；从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
 
-每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。运行 prebuild 校验通过后才能生成。
+`modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；编写期反复跑等价 `authoring`（非门禁）；冻结后正式 prebuild 覆盖全部 element。计划非第二 IR，禁构建后补写。
+
+每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。冻结后只运行一次正式 prebuild，通过才生成。
 
 ## 画布、区域与关系
 
@@ -24,6 +26,6 @@ preflight绑定输入路径/hash、尺寸和边界。运行 `create_coordinate_o
 
 ## 生成与修正
 
-生成顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。全局缩放或区域比例错误时先修全局；局部差异只修目标及相邻受影响对象。不得用缩小字号、硬换行或移动个别对象掩盖区域错误，也不得用整页图片兜底。
+顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。全局缩放/区域比例错先修全局；局部仅修目标及相邻受影响对象。禁用缩小字号/硬换行/移动单项掩盖区域错，禁整页图片兜底。
 
-图片保持宽高比；`cover` 必须有焦点/偏移证据，不能裁掉主体。圆形保持正圆。原图无线、无渐变、无效果时不得补造。`editable_object_count` 只作结构证据，不能证明质量。
+图片保宽高比；`cover` 须有焦点/偏移证据，禁裁主体。圆形须正圆。原图无线/渐变/效果时禁补造。`editable_object_count` 仅作结构证据，不证明质量。

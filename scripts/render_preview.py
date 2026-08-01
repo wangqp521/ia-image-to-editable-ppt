@@ -25,8 +25,10 @@ PRERELEASE_PATTERN = re.compile(
     r"(?:libreofficedev|\b(?:alpha|beta|rc)\d*\b)",
     re.IGNORECASE,
 )
+INVALID_VERSION_PATTERN = re.compile(r"^(?:unavailable\b|exit\s*=)", re.IGNORECASE)
 PAGE_SIZE = (960.0, 540.0)
 PREVIEW_SIZE = (1920, 1080)
+REQUIRED_EXECUTABLES = ("soffice", "pdftoppm", "pdffonts", "pdftotext")
 
 
 class RenderError(RuntimeError):
@@ -45,6 +47,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_valid_executable_version(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value.strip())
+        and INVALID_VERSION_PATTERN.search(value.strip()) is None
+    )
+
+
 def _load_runtime(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
@@ -57,17 +67,24 @@ def _load_runtime(path: Path) -> dict[str, Any]:
         or payload.get("preview_size") != list(PREVIEW_SIZE)
     ):
         raise RenderError("RENDER_RUNTIME_INVALID", str(path))
-    version = payload.get("executables", {}).get("soffice", {}).get("version")
-    if not isinstance(version, str) or PRERELEASE_PATTERN.search(version):
+    executables = payload.get("executables")
+    if not isinstance(executables, dict):
+        raise RenderError("RENDER_RUNTIME_INVALID", "invalid executables")
+    soffice_entry = executables.get("soffice")
+    if not isinstance(soffice_entry, dict):
+        raise RenderError("RENDER_RUNTIME_INVALID", "missing soffice")
+    version = soffice_entry.get("version")
+    if not _is_valid_executable_version(version) or PRERELEASE_PATTERN.search(version):
         raise RenderError("RENDER_RUNTIME_INVALID", f"unstable LibreOffice: {version}")
-    for name in ("soffice", "pdftoppm", "pdffonts"):
-        entry = payload.get("executables", {}).get(name)
+    for name in REQUIRED_EXECUTABLES:
+        entry = executables.get(name)
         if not isinstance(entry, dict):
             raise RenderError("RENDER_RUNTIME_INVALID", f"missing {name}")
         executable = Path(str(entry.get("path", ""))).expanduser().resolve()
         if (
             not executable.is_file()
             or not os.access(executable, os.X_OK)
+            or not _is_valid_executable_version(entry.get("version"))
             or not isinstance(entry.get("sha256"), str)
             or _sha256(executable) != entry["sha256"]
         ):
@@ -191,6 +208,7 @@ def render_preview(
     soffice = Path(runtime["executables"]["soffice"]["path"]).resolve()
     pdftoppm = Path(runtime["executables"]["pdftoppm"]["path"]).resolve()
     pdffonts = Path(runtime["executables"]["pdffonts"]["path"]).resolve()
+    pdftotext = Path(runtime["executables"]["pdftotext"]["path"]).resolve()
     fontconfig = Path(runtime["fontconfig"]["path"]).resolve()
     env = os.environ.copy()
     env["FONTCONFIG_FILE"] = str(fontconfig)
@@ -346,6 +364,11 @@ def render_preview(
                 "raw_path": str(final_fonts_text),
                 "raw_sha256": _sha256(fonts_text_path),
                 "resolved_fonts": resolved_fonts,
+            },
+            "text_extractor": {
+                "path": str(pdftotext),
+                "version": runtime["executables"]["pdftotext"]["version"],
+                "executable_sha256": runtime["executables"]["pdftotext"]["sha256"],
             },
             "rasterizer": {
                 "path": str(pdftoppm),

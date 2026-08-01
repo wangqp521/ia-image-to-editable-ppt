@@ -2,6 +2,14 @@
 
 素材只来自当前页 `clean_visual_reference` 或用户原始素材；不得联网、调用 imagegen 生成替代素材、借用其他页资产，或把外部标题/标签并入图片。照片、Logo、插画、纹理和复杂装饰可用独立局部 picture；主要文字、数字和数据仍保持可编辑。满页照片/纹理可作背景，但主要内容不能整页图片化。
 
+只有 representation plan 显式选择 `asset`、`fallback_policy=allow_minimal_asset` 且所需可编辑性为 `labels_only|none` 时，compiler 才接受最小局部 asset fallback；`labels_only` 还须绑定原生可编辑标签。资产必须为绝对、非 symlink 的本地 PNG/JPEG/WEBP，并绑定当前 SHA-256 与像素尺寸；来源 bbox 必须与 picture 完全一致，近整页 asset 永远拒绝。compiler 不自动生成、扩大或替换资产，也不把失败改成 asset 模式。
+
+## 背景选择与后置门禁
+
+可用原生 shape/fill 精确表达、且绑定对象可在 OOXML 中唯一证明时选 `native`。只有已单独制作、不含任何前景语义的 `clean_background_asset` 才可选 `background_picture`；它必须绑定普通 picture，覆盖全页，`mode=none`、四边 crop 全零、opacity=1、rotation=0，不得直接使用含前景的原始整页参考图。`background_picture` 是背景合同专用模式，不加入普通 representation fallback 模式集。
+
+图标对上述选择的影响必须为零：图标数量、bbox、alpha、颜色或层级都不得改变 `native|background_picture` 决策；图标不得绑定为 background，图标裁块也不得充当 `clean_background_asset`。structure 通过后用 `validate_background_contract.py` 重算 build/OOXML 闭包，任何未声明的满页 picture、背景与前景污染或身份不一致都失败；不得手写 `valid=true`。
+
 ## 图标
 
 图标必须从当前页视觉参考裁切为各自独立 picture，放回原 bbox；简单或复杂图标都不得用 Shape、字符、重绘 SVG 或图标库替代。编号圆点、标签、文字、bullet 和分隔线不是图标，不得混入 `icon_only`。`extract_icon_asset.py` 是唯一图标资产生成入口，每次只处理一个已测量图标；不得编写页面专用裁切脚本，也不增加对象检测、批处理状态机或第二套资产规格。

@@ -12,7 +12,10 @@ from pathlib import Path
 
 from PIL import Image
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Pt
+
+from tests.fixture_specs import make_asset_fallback_spec, make_minimal_spec
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "validate_reconstruction_spec.py"
@@ -112,7 +115,12 @@ def valid_spec() -> dict:
             "mapping_mode": "direct_16_9",
             "background": "#FFFFFF",
         },
-        "activated_modules": ["page_layout", "typography"],
+        "activated_modules": [
+            "page_layout",
+            "typography",
+            "representation_plan",
+            "background",
+        ],
         "modules": {
             "page_layout": {
                 "anchors": [],
@@ -138,8 +146,11 @@ def valid_spec() -> dict:
                                 "font_size": 24,
                                 "font_weight": 700,
                                 "color": "#000000",
-                                "decoration": "none",
                                 "letter_spacing": 0,
+                                "italic": False,
+                                "underline": False,
+                                "strike": False,
+                                "baseline": 0,
                             }
                         ],
                         "paragraphs": [
@@ -172,6 +183,42 @@ def valid_spec() -> dict:
                     }
                 ],
             },
+            "representation_plan": {
+                "items": [
+                    {
+                        "source_fact_id": "fact-title-001",
+                        "semantic_role": "title",
+                        "source_bbox": [30, 30, 800, 60],
+                        "required": True,
+                        "selected_mode": "native",
+                        "required_editability": "full",
+                        "fallback_policy": "forbid",
+                        "bound_element_ids": ["title"],
+                        "reason": "title is represented as editable native text",
+                        "coverage_status": "covered",
+                        "evidence": ["representation-plan.json"],
+                    }
+                ]
+            },
+            "background": {
+                "items": [
+                    {
+                        "background_id": "background-001",
+                        "role": "base",
+                        "source_bbox": [0, 0, 1600, 900],
+                        "selected_mode": "native",
+                        "bound_element_id": "background-base",
+                        "source_provenance": {
+                            "kind": "native_measurement",
+                            "source_path": reference["path"],
+                            "source_sha256": reference["sha256"],
+                        },
+                        "reason": "measured solid page background",
+                        "evidence": [reference["path"]],
+                        "contains_foreground_semantics": False,
+                    }
+                ]
+            },
         },
         "regions": [
             {
@@ -180,7 +227,7 @@ def valid_spec() -> dict:
                 "slide_bbox": [0, 0, 12192000, 914400],
                 "layer": 1,
                 "padding": {"left": 0, "right": 0, "top": 0, "bottom": 0},
-                "element_ids": ["title"],
+                "element_ids": ["title", "background-base"],
             }
         ],
         "elements": [
@@ -189,14 +236,30 @@ def valid_spec() -> dict:
                 "kind": "text",
                 "source_bbox": [30, 30, 800, 60],
                 "slide_bbox": [228600, 228600, 6096000, 457200],
-                "layer": 2,
+                "layer": 10,
                 "editable": True,
                 "confidence": "high",
                 "style": {"fill": "noFill"},
                 "content": {"text": text},
-            }
+            },
+            {
+                "element_id": "background-base",
+                "kind": "shape",
+                "source_bbox": [0, 0, 1600, 900],
+                "slide_bbox": [0, 0, 12192000, 6858000],
+                "layer": 0,
+                "editable": True,
+                "confidence": "high",
+                "style": {
+                    "shape_type": "rectangle",
+                    "fill": {"type": "solid", "color": "#FFFFFF", "opacity": 1},
+                    "effects": "none",
+                    "rotation": 0,
+                },
+                "content": {},
+            },
         ],
-        "reading_order": ["title"],
+        "reading_order": ["background-base", "title"],
         "visual_gate": {"status": "pending", "evidence": [], "tripwire": None},
         "editability_gate": {"status": "pending", "evidence": []},
     }
@@ -255,10 +318,151 @@ def valid_list_spec() -> dict:
     return candidate
 
 
+def append_native_element(
+    candidate: dict,
+    *,
+    element_id: str,
+    kind: str,
+    style: dict,
+) -> None:
+    source_bbox = [30, 120, 200, 100]
+    slide_bbox = [228600, 914400, 1524000, 762000]
+    candidate["elements"].append(
+        {
+            "element_id": element_id,
+            "kind": kind,
+            "source_bbox": source_bbox,
+            "slide_bbox": slide_bbox,
+            "layer": 2,
+            "editable": True,
+            "confidence": "high",
+            "style": style,
+            "content": {},
+        }
+    )
+    candidate["regions"][0]["element_ids"].append(element_id)
+    candidate["reading_order"].append(element_id)
+    candidate["modules"]["representation_plan"]["items"].append(
+        {
+            "source_fact_id": f"fact-{element_id}",
+            "semantic_role": kind,
+            "source_bbox": source_bbox,
+            "required": True,
+            "selected_mode": "native",
+            "required_editability": "full",
+            "fallback_policy": "forbid",
+            "bound_element_ids": [element_id],
+            "reason": "renderer contract regression fixture",
+            "coverage_status": "covered",
+            "evidence": ["representation-plan.json"],
+        }
+    )
+
+
 class ValidateReconstructionSpecTests(unittest.TestCase):
     def _artifact(self, path: Path, payload: bytes) -> dict:
         path.write_bytes(payload)
         return {"path": str(path.resolve()), "sha256": hashlib.sha256(payload).hexdigest()}
+
+    def assertAuthoringMatchesPrebuild(self, candidate: dict) -> tuple[dict, dict]:
+        authoring = MODULE.validate_spec(candidate, stage="authoring")
+        prebuild = MODULE.validate_spec(candidate, stage="prebuild")
+        self.assertEqual("authoring", authoring["stage"])
+        self.assertEqual("prebuild", prebuild["stage"])
+        self.assertEqual(
+            {key: value for key, value in authoring.items() if key != "stage"},
+            {key: value for key, value in prebuild.items() if key != "stage"},
+        )
+        return authoring, prebuild
+
+    def test_authoring_and_prebuild_are_equivalent_for_valid_spec(self):
+        authoring, prebuild = self.assertAuthoringMatchesPrebuild(valid_spec())
+
+        self.assertTrue(authoring["valid"], authoring)
+        self.assertTrue(prebuild["valid"], prebuild)
+
+    def test_authoring_and_prebuild_are_equivalent_for_vertical_alignment_mismatch(self):
+        candidate = valid_spec()
+        candidate["elements"][0]["style"]["vertical_alignment"] = "middle"
+
+        authoring, prebuild = self.assertAuthoringMatchesPrebuild(candidate)
+
+        expected = {
+            "code": "UNSUPPORTED_CAPABILITY",
+            "path": "elements.title.style.vertical_alignment",
+            "detail": "text style vertical_alignment must match typography text_box",
+        }
+        self.assertFalse(authoring["valid"])
+        self.assertIn(expected, authoring["errors"])
+        self.assertIn(expected, prebuild["errors"])
+
+    def test_authoring_and_prebuild_are_equivalent_for_legacy_text_run(self):
+        candidate = valid_spec()
+        run = candidate["modules"]["typography"]["items"][0]["runs"][0]
+        for field in ("italic", "underline", "strike", "baseline"):
+            del run[field]
+        run["decoration"] = "none"
+
+        authoring, prebuild = self.assertAuthoringMatchesPrebuild(candidate)
+
+        self.assertFalse(authoring["valid"])
+        codes = {issue["code"] for issue in prebuild["errors"]}
+        self.assertIn("SPEC_TEXT_RUN_STYLE_INVALID", codes)
+        self.assertIn("SPEC_TYPOGRAPHY_FIELD_UNKNOWN", codes)
+
+    def test_authoring_and_prebuild_are_equivalent_for_representation_gap(self):
+        candidate = valid_spec()
+        candidate["modules"]["representation_plan"]["items"] = []
+
+        authoring, prebuild = self.assertAuthoringMatchesPrebuild(candidate)
+
+        self.assertFalse(authoring["valid"])
+        self.assertIn(
+            "REPRESENTATION_INCOMPLETE",
+            {issue["code"] for issue in prebuild["errors"]},
+        )
+
+    def test_validate_spec_rejects_unknown_stage_with_complete_choices(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "stage must be authoring, prebuild, or final",
+        ):
+            MODULE.validate_spec(valid_spec(), stage="draft")
+
+    def test_cli_accepts_authoring_and_writes_authoring_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            spec_path = root / "page-reconstruction.json"
+            report_path = root / "authoring-validation.json"
+            spec_path.write_text(json.dumps(valid_spec()), encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()):
+                exit_code = MODULE.main(
+                    [
+                        str(spec_path),
+                        "--stage",
+                        "authoring",
+                        "--output",
+                        str(report_path),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertTrue(report_path.is_file())
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertTrue(report["valid"], report)
+            self.assertEqual("authoring", report["stage"])
+
+    def test_cli_rejects_unknown_stage_with_choice_diagnostic(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            with self.assertRaises(SystemExit) as raised:
+                MODULE.main(["page-reconstruction.json", "--stage", "draft"])
+
+        self.assertEqual(2, raised.exception.code)
+        diagnostic = stderr.getvalue()
+        self.assertIn("argument --stage: invalid choice: 'draft'", diagnostic)
+        for choice in ("authoring", "prebuild", "final"):
+            self.assertIn(choice, diagnostic)
 
     def test_prebuild_accepts_all_explicit_verification_profiles(self):
         for profile in ("rapid", "reviewed", "strict"):
@@ -280,9 +484,15 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
 
                 result = MODULE.validate_spec(candidate, stage="prebuild")
 
-                self.assertIn(
-                    "SPEC_COORDINATE_OVERLAY_EVIDENCE_MISSING",
-                    {item["code"] for item in result["errors"]},
+                self.assertEqual(
+                    result["errors"],
+                    [
+                        {
+                            "code": "UNSUPPORTED_CAPABILITY",
+                            "path": "modules.page_layout",
+                            "detail": "missing fields: coordinate_overlay_evidence",
+                        }
+                    ],
                 )
 
     def test_prebuild_rejects_stale_or_uninspected_coordinate_overlay(self):
@@ -360,7 +570,7 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         self,
         candidate: dict,
         root: Path,
-        validator_payload: dict,
+        validator_payload: dict | None,
         *,
         profile: str = "strict",
         page_size_pt: list[float] | None = None,
@@ -376,6 +586,10 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         presentation.slide_width = 12_192_000
         presentation.slide_height = 6_858_000
         slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+        background = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE, 0, 0, presentation.slide_width, presentation.slide_height
+        )
+        background.name = "ia:background-base"
         item = candidate["modules"]["typography"]["items"][0]
         box = item["text_box"]
         text_box = slide.shapes.add_textbox(box["x"], box["y"], box["w"], box["h"])
@@ -482,8 +696,8 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             expected_slides=1,
             reconstruction_spec=candidate,
         )
-        validator_payload = dict(validator_payload)
-        actual_validator.update(validator_payload)
+        if validator_payload is not None:
+            actual_validator.update(dict(validator_payload))
         validator_payload = actual_validator
         validator_payload.setdefault("pptx_sha256", pptx["sha256"])
         validator = self._artifact(
@@ -565,29 +779,434 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
             candidate["visual_gate"].pop("reviewer")
             candidate["visual_gate"].pop("review")
 
-    def test_final_accepts_rapid_without_reviewer(self):
+    def _valid_final_spec(
+        self,
+        profile: str,
+        *,
+        page_size_pt: list[float] | None = None,
+        visual_regions: list[dict] | None = None,
+        review_round: int = 1,
+    ) -> dict:
+        """Build a final fixture from production reports, never claimed booleans."""
+        from tests.test_review_admission import (
+            AdmissionFixture,
+            _load_script,
+            _write_json,
+        )
+        from lib import review_contracts
+
         candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                candidate,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                profile="rapid",
+        rendered_text = "测试标题"
+        candidate["elements"][0]["content"]["text"] = rendered_text
+        typography_item = candidate["modules"]["typography"]["items"][0]
+        typography_item["text"] = rendered_text
+        typography_item["runs"][0]["end"] = len(rendered_text)
+        typography_item["paragraphs"][0]["end"] = len(rendered_text)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        (root / "legacy-final").mkdir()
+        self._attach_final_gates(
+            candidate,
+            root / "legacy-final",
+            None,
+            profile=profile,
+        )
+        source_spec = copy.deepcopy(candidate)
+
+        class FinalEvidenceFixture(AdmissionFixture):
+            SPEC_FACTORY = staticmethod(lambda _root: copy.deepcopy(source_spec))
+
+            def setUp(inner_self) -> None:
+                inner_self._temporary = tempfile.TemporaryDirectory()
+                inner_self.root = Path(inner_self._temporary.name)
+                inner_self.output = inner_self.root / "admission"
+                inner_self.invocations = inner_self.root / "invocations"
+                inner_self._generation = 0
+                inner_self._rejection_attempt = 0
+                inner_self._response_attempt = 0
+                inner_self._round_two_attempt = 0
+                inner_self._make_fixture(profile=profile)
+
+        fixture = FinalEvidenceFixture()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+
+        if page_size_pt is not None:
+            fixture.render_report["pdf"]["page_size_pt"] = list(page_size_pt)
+            _write_json(fixture.render_path, fixture.render_report)
+            geometry = _load_script(
+                "create_rendered_text_geometry.py",
+                f"task9_final_text_geometry_{id(fixture)}",
             )
-            result = MODULE.validate_spec(candidate, stage="final")
+            fixture.text_path = fixture.fixture / "task9-rendered-text-geometry.json"
+            fixture.text_report = geometry.create_rendered_text_geometry(
+                fixture.spec_path,
+                fixture.pptx,
+                fixture.build_path,
+                fixture.render_path,
+                fixture.runtime_path,
+                fixture.text_path,
+            )
+            self.assertTrue(fixture.text_report["valid"], fixture.text_report)
+
+        if visual_regions is not None or page_size_pt is not None:
+            visual = _load_script(
+                "create_visual_diff.py",
+                f"task9_final_visual_diff_{id(fixture)}",
+            )
+            fixture.visual_dir = fixture.fixture / "task9-visual"
+            fixture.visual_report = visual.build_visual_diff_from_render_report(
+                fixture.source,
+                fixture.render_path,
+                fixture.visual_dir,
+                regions=(
+                    visual_regions
+                    if visual_regions is not None
+                    else fixture.spec["regions"]
+                ),
+                profile=profile,
+            )
+            fixture.visual_path = fixture.visual_dir / "visual-diff.json"
+            fixture.overlay = Path(
+                fixture.visual_report["evidence"]["overlay"]["path"]
+            )
+
+        prior = None
+        if profile != "rapid" and review_round == 2:
+            self.assertEqual("strict", profile)
+            prior = fixture.validated_changes_required_response()
+            fixture.add_high_risk_mapping(prior)
+            # Task 7's round-two test helper carries one compatibility-only
+            # nested identity that the production geometry producer never
+            # emits.  Final evidence must equal a fresh production report.
+            fixture.text_report["inputs"].pop("input_spec_sha256", None)
+            _write_json(fixture.text_path, fixture.text_report)
+            candidate["activated_modules"].append("high_risk")
+            candidate["modules"]["high_risk"] = copy.deepcopy(
+                fixture.spec["modules"]["high_risk"]
+            )
+
+        visual_gate = candidate["visual_gate"]
+        editability_gate = candidate["editability_gate"]
+        visual_gate.update(
+            {
+                "pptx": image_identity(fixture.pptx),
+                "preview": image_identity(fixture.preview),
+                "report": image_identity(fixture.visual_path),
+                "render_report": image_identity(fixture.render_path),
+                "background_contract": image_identity(fixture.background_path),
+                "rendered_text_geometry": image_identity(fixture.text_path),
+                "evidence": [str(fixture.overlay.resolve())],
+            }
+        )
+        candidate["runtime_preflight"] = image_identity(fixture.runtime_path)
+        editability_gate.update(
+            {
+                "pptx": image_identity(fixture.pptx),
+                "validator": image_identity(fixture.structure_path),
+                "evidence": [str(fixture.structure_path.resolve())],
+            }
+        )
+
+        if profile == "rapid":
+            return candidate
+
+        freezer = _load_script(
+            "freeze_reconstruction_spec.py",
+            f"task9_freeze_pre_review_{id(fixture)}",
+        )
+        working_spec_path = root / "page-reconstruction.json"
+        _write_json(working_spec_path, candidate)
+        pre_review_spec_path = root / "pre-review-spec-snapshot.json"
+        snapshot_report = freezer.freeze_spec(
+            working_spec_path,
+            pre_review_spec_path,
+            "pre-review",
+        )
+        self.assertEqual(
+            str(pre_review_spec_path.resolve()),
+            snapshot_report["snapshot"]["path"],
+        )
+        admission_inputs = review_contracts.AdmissionInputs(
+            spec=pre_review_spec_path,
+            pptx=fixture.pptx,
+            build_report=fixture.build_path,
+            structure_report=fixture.structure_path,
+            render_report=fixture.render_path,
+            text_geometry=fixture.text_path,
+            background_report=fixture.background_path,
+            visual_diff=fixture.visual_path,
+            review_round=review_round,
+            prior_admission=(prior["admission_path"] if prior is not None else None),
+            prior_invocation=(prior["invocation_path"] if prior is not None else None),
+            prior_response_validation=(
+                prior["validation_path"] if prior is not None else None
+            ),
+        )
+        admission = review_contracts.issue_admission(
+            admission_inputs,
+            fixture.output,
+        )
+
+        assert isinstance(admission, dict)
+        invocation = review_contracts.record_invocation(
+            fixture.admission_path,
+            fixture.invocations,
+        )
+        invocation_path = fixture.invocations / (
+            f"{admission['page_id']}-round-{admission['review_round']}-invocation.json"
+        )
+        response = fixture.valid_response(admission)
+        response["coverage"] = copy.deepcopy(
+            visual_gate["reviewer"]["coverage"]
+        )
+        if review_round == 2:
+            response["coverage"]["high_risk_regions"] = "checked"
+        response_path = fixture.root / "review-response.json"
+        response_path.write_text(
+            json.dumps(response, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        response_validation_path = fixture.root / "review-response-validation.json"
+        response_validation = review_contracts.validate_response(
+            fixture.admission_path,
+            invocation_path,
+            response_path,
+            response_validation_path,
+        )
+        self.assertTrue(response_validation["valid"], response_validation)
+        self.assertEqual(invocation["admission_id"], admission["admission_id"])
+        # issue() canonically rewrites every bound JSON payload.  Refresh all
+        # identities after admission so the legacy final checks and the new
+        # immutable review chain point at the same production bytes.
+        visual_gate.update(
+            {
+                "report": image_identity(fixture.visual_path),
+                "render_report": image_identity(fixture.render_path),
+                "background_contract": image_identity(fixture.background_path),
+                "rendered_text_geometry": image_identity(fixture.text_path),
+                "review_round": admission["review_round"],
+                "review_admission": image_identity(fixture.admission_path),
+                "review_invocation": image_identity(invocation_path),
+                "review_response_validation": image_identity(
+                    response_validation_path
+                ),
+            }
+        )
+        candidate["runtime_preflight"] = image_identity(fixture.runtime_path)
+        editability_gate["validator"] = image_identity(fixture.structure_path)
+        visual_gate["reviewer"] = {
+            "mode": "independent_read_only_subagent",
+            **response,
+        }
+        return candidate
+
+    def test_final_accepts_production_pre_review_evidence_for_each_profile(self) -> None:
+        for profile in ("rapid", "reviewed", "strict"):
+            with self.subTest(profile=profile):
+                spec = self._valid_final_spec(profile)
+                temporary = tempfile.TemporaryDirectory()
+                self.addCleanup(temporary.cleanup)
+                spec_path = Path(temporary.name) / "page-reconstruction.json"
+                report_path = Path(temporary.name) / "final-validation.json"
+                spec_path.write_text(
+                    json.dumps(spec, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = MODULE.main(
+                        [
+                            str(spec_path),
+                            "--stage",
+                            "final",
+                            "--output",
+                            str(report_path),
+                        ]
+                    )
+                result = json.loads(report_path.read_text(encoding="utf-8"))
+                self.assertEqual(0, exit_code, result)
+                self.assertTrue(result["valid"], result)
+
+    def test_final_rejects_pre_review_state_drift_for_each_gate_family(self) -> None:
+        def add_high_risk(spec: dict) -> None:
+            spec["activated_modules"].append("high_risk")
+            spec["modules"]["high_risk"] = {
+                "items": [
+                    {
+                        "risk_id": "post-review-drift",
+                        "source": "manual:post-review-drift",
+                        "scope": "whole_page",
+                        "category": "objects_and_geometry",
+                        "expected": "unchanged",
+                        "strategy": "verify",
+                        "result": "passed",
+                        "evidence": [spec["visual_gate"]["evidence"][0]],
+                        "confidence": "high",
+                        "severity": "P1",
+                        "verification": {},
+                    }
+                ]
+            }
+
+        mutations = {
+            "tripwire": lambda spec: spec["visual_gate"].__setitem__(
+                "tripwire",
+                {"available": True, "triggered": False},
+            ),
+            "editability": lambda spec: spec["editability_gate"]["review"].__setitem__(
+                "basic_structure", "changes_required"
+            ),
+            "high_risk": add_high_risk,
+            "visual_evidence": lambda spec: spec["visual_gate"]["evidence"].append(
+                spec["visual_gate"]["evidence"][0]
+            ),
+        }
+        for label, mutate in mutations.items():
+            with self.subTest(label=label):
+                spec = self._valid_final_spec("reviewed")
+                mutate(spec)
+                result = MODULE.validate_spec(spec, stage="final")
+                self.assertIn(
+                    "REVIEW_ADMISSION_STALE",
+                    {item["code"] for item in result["errors"]},
+                    result,
+                )
+
+    def test_final_rejects_replaced_build_snapshot(self) -> None:
+        spec = self._valid_final_spec("rapid")
+        text_path = Path(spec["visual_gate"]["rendered_text_geometry"]["path"])
+        text_report = json.loads(text_path.read_text(encoding="utf-8"))
+        build_snapshot = Path(text_report["input_paths"]["spec"])
+        build_snapshot.write_text(
+            build_snapshot.read_text(encoding="utf-8") + " ",
+            encoding="utf-8",
+        )
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertTrue(
+            {"TEXT_GEOMETRY_IDENTITY_MISMATCH", "BACKGROUND_ASSET_INVALID"}
+            & {item["code"] for item in result["errors"]},
+            result,
+        )
+
+    def test_final_rejects_pre_review_snapshot_path_identity_mismatch(self) -> None:
+        spec = self._valid_final_spec("reviewed")
+        admission_path = Path(spec["visual_gate"]["review_admission"]["path"])
+        admission = json.loads(admission_path.read_text(encoding="utf-8"))
+        original = Path(admission["artifacts"]["spec"]["path"])
+        copied = original.with_name("copied-pre-review-spec.json")
+        copied.write_bytes(original.read_bytes())
+        admission["artifacts"]["spec"]["path"] = str(copied.resolve())
+        admission_path.write_text(
+            json.dumps(admission, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        spec["visual_gate"]["review_admission"] = image_identity(admission_path)
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertIn(
+            "REVIEW_ADMISSION_STALE",
+            {item["code"] for item in result["errors"]},
+            result,
+        )
+
+    def test_final_rejects_missing_rendered_text_geometry(self) -> None:
+        spec = self._valid_final_spec(profile="reviewed")
+        del spec["visual_gate"]["rendered_text_geometry"]
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertIn(
+            "TEXT_GEOMETRY_MISSING", {item["code"] for item in result["errors"]}
+        )
+
+    def test_final_rejects_reviewer_not_bound_to_validated_admission(self) -> None:
+        spec = self._valid_final_spec(profile="reviewed")
+        spec["visual_gate"]["reviewer"]["admission_id"] = "f" * 64
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertIn(
+            "REVIEW_RESPONSE_INVALID", {item["code"] for item in result["errors"]}
+        )
+
+    def test_final_rejects_visual_gate_round_not_bound_to_admission(self) -> None:
+        spec = self._valid_final_spec(profile="reviewed")
+        spec["visual_gate"]["review_round"] = 2
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertIn(
+            "REVIEW_RESPONSE_INVALID", {item["code"] for item in result["errors"]}
+        )
+
+    def test_final_allows_delivery_fields_but_not_renderable_changes(self) -> None:
+        spec = self._valid_final_spec(profile="reviewed")
+        self.assertTrue(MODULE.validate_spec(spec, stage="final")["valid"])
+        spec["elements"][0]["slide_bbox"][2] += 12700
+
+        result = MODULE.validate_spec(spec, stage="final")
+
+        self.assertIn(
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_rapid_requires_pre_review_gates_and_forbids_reviewer_artifacts(self) -> None:
+        for missing, code in (
+            ("background_contract", "BACKGROUND_DECLARATION_MISSING"),
+            ("rendered_text_geometry", "TEXT_GEOMETRY_MISSING"),
+        ):
+            with self.subTest(missing=missing):
+                spec = self._valid_final_spec(profile="rapid")
+                del spec["visual_gate"][missing]
+                result = MODULE.validate_spec(spec, stage="final")
+                self.assertIn(code, {item["code"] for item in result["errors"]})
+
+        reviewed = self._valid_final_spec(profile="reviewed")
+        for field in (
+            "review_admission",
+            "review_invocation",
+            "review_response_validation",
+        ):
+            with self.subTest(forbidden=field):
+                spec = self._valid_final_spec(profile="rapid")
+                spec["visual_gate"][field] = copy.deepcopy(
+                    reviewed["visual_gate"][field]
+                )
+                result = MODULE.validate_spec(spec, stage="final")
+                self.assertIn(
+                    "SPEC_RAPID_REVIEWER_FORBIDDEN",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_final_reviewed_and_strict_require_complete_review_artifact_chain(self) -> None:
+        for profile in ("reviewed", "strict"):
+            for missing, code in (
+                ("review_admission", "REVIEW_ADMISSION_NOT_ISSUED"),
+                ("review_invocation", "REVIEW_RESPONSE_INVALID"),
+                ("review_response_validation", "REVIEW_RESPONSE_INVALID"),
+            ):
+                with self.subTest(profile=profile, missing=missing):
+                    spec = self._valid_final_spec(profile=profile)
+                    del spec["visual_gate"][missing]
+                    result = MODULE.validate_spec(spec, stage="final")
+                    self.assertIn(code, {item["code"] for item in result["errors"]})
+
+    def test_final_accepts_rapid_without_reviewer(self):
+        candidate = self._valid_final_spec(profile="rapid")
+        result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
 
     def test_final_accepts_libreoffice_hundredth_mm_page_size(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                candidate,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                profile="rapid",
-                page_size_pt=[960.009448818898, 540.0],
-            )
-            result = MODULE.validate_spec(candidate, stage="final")
+        candidate = self._valid_final_spec(
+            profile="rapid",
+            page_size_pt=[960.009448818898, 540.0],
+        )
+        result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
 
     def test_final_rejects_page_size_outside_render_tolerance(self):
@@ -807,38 +1426,16 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         )
 
     def test_final_accepts_reviewed_with_current_reviewer(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            self._attach_final_gates(
-                candidate,
-                Path(directory),
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                profile="reviewed",
-            )
-            result = MODULE.validate_spec(candidate, stage="final")
+        candidate = self._valid_final_spec(profile="reviewed")
+        result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
 
     def test_final_reviewed_accepts_partial_region_evidence(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._attach_final_gates(
-                candidate,
-                root,
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                profile="reviewed",
-            )
-            preview_path = Path(candidate["visual_gate"]["preview"]["path"])
-            report = VISUAL_DIFF.build_visual_diff_from_render_report(
-                Path(candidate["clean_visual_reference"]["path"]),
-                Path(candidate["visual_gate"]["render_report"]["path"]),
-                root / "visual-diff-light",
-                regions=[],
-                profile="reviewed",
-            )
-            candidate["visual_gate"]["report"] = image_identity(Path(report["report"]))
-            candidate["visual_gate"]["evidence"] = [report["evidence"]["overlay"]["path"]]
-            result = MODULE.validate_spec(candidate, stage="final")
+        candidate = self._valid_final_spec(
+            profile="reviewed",
+            visual_regions=[],
+        )
+        result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
 
     def test_final_rejects_visual_diff_from_another_profile(self):
@@ -893,12 +1490,35 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
                 "layer": 3,
                 "editable": False,
                 "confidence": "high",
-                "style": {},
-                "content": {},
+                "style": {"rotation": 0, "opacity": 1},
+                "content": {
+                    "asset": {
+                        "path": asset["path"],
+                        "asset_sha256": asset["sha256"],
+                        "pixel_size": [32, 32],
+                    },
+                    "mode": "none",
+                    "crop": {"left": 0, "top": 0, "right": 0, "bottom": 0},
+                },
             }
         )
         candidate["regions"][0]["element_ids"].append("status-icon")
         candidate["reading_order"].append("status-icon")
+        candidate["modules"]["representation_plan"]["items"].append(
+            {
+                "source_fact_id": "fact-status-icon",
+                "semantic_role": "icon",
+                "source_bbox": [100, 100, 32, 32],
+                "required": True,
+                "selected_mode": "asset",
+                "required_editability": "none",
+                "fallback_policy": "allow_minimal_asset",
+                "bound_element_ids": ["status-icon"],
+                "reason": "icon is represented by its alpha-isolated local asset",
+                "coverage_status": "covered",
+                "evidence": [str(asset_path.resolve())],
+            }
+        )
         candidate["modules"]["icons"] = {
             "schema_version": 2,
             "page_id": "page-001",
@@ -964,9 +1584,298 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         )
 
     def test_valid_prebuild_spec_passes(self):
-        result = MODULE.validate_spec(valid_spec(), stage="prebuild")
+        with tempfile.TemporaryDirectory() as directory:
+            result = MODULE.validate_spec(
+                make_minimal_spec(Path(directory)), stage="prebuild"
+            )
         self.assertTrue(result["valid"], result)
         self.assertEqual([], result["errors"])
+
+    def test_prebuild_rejects_native_shape_fill_string_at_renderer_gate(self):
+        candidate = valid_spec()
+        append_native_element(
+            candidate,
+            element_id="native-shape",
+            kind="shape",
+            style={
+                "shape_type": "roundRect",
+                "adjustments": [0.2],
+                "fill": "#112233",
+            },
+        )
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            {
+                "code": "UNSUPPORTED_CAPABILITY",
+                "path": "elements.native-shape.style.fill",
+                "detail": "contract must be an object",
+            },
+            result["errors"],
+        )
+
+    def test_prebuild_rejects_line_stroke_string_at_renderer_gate(self):
+        candidate = valid_spec()
+        append_native_element(
+            candidate,
+            element_id="native-line",
+            kind="line",
+            style={"line": "#112233"},
+        )
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            {
+                "code": "UNSUPPORTED_CAPABILITY",
+                "path": "elements.native-line.style.line",
+                "detail": "contract must be an object",
+            },
+            result["errors"],
+        )
+
+    def test_prebuild_rejects_text_renderer_only_fill_payload(self):
+        candidate = valid_spec()
+        candidate["elements"][0]["style"]["fill"] = "#112233"
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            {
+                "code": "UNSUPPORTED_CAPABILITY",
+                "path": "elements.title.style.fill",
+                "detail": "only noFill is supported",
+            },
+            result["errors"],
+        )
+
+    def test_prebuild_rejects_picture_renderer_only_crop_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = make_asset_fallback_spec(Path(directory))
+            candidate["elements"][-1]["content"]["crop"] = "full"
+
+            result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertFalse(result["valid"])
+        self.assertIn(
+            {
+                "code": "UNSUPPORTED_CAPABILITY",
+                "path": "elements.artwork-picture.content.crop",
+                "detail": "crop must be an object",
+            },
+            result["errors"],
+        )
+
+    def test_prebuild_requires_explicit_modern_text_run_fields(self):
+        required = {
+            "italic": False,
+            "underline": False,
+            "strike": False,
+            "baseline": 0,
+        }
+        for missing in required:
+            with self.subTest(missing=missing):
+                candidate = valid_spec()
+                run = candidate["modules"]["typography"]["items"][0]["runs"][0]
+                run.update(required)
+                del run[missing]
+
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+
+                self.assertIn(
+                    "SPEC_TEXT_RUN_STYLE_INVALID",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_prebuild_rejects_invalid_text_run_flag_and_baseline_values(self):
+        cases = (
+            ("italic", 1),
+            ("underline", "yes"),
+            ("strike", None),
+            ("baseline", 1.5),
+            ("baseline", -100001),
+            ("baseline", 100001),
+        )
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                candidate = valid_spec()
+                run = candidate["modules"]["typography"]["items"][0]["runs"][0]
+                run.update(
+                    {
+                        "italic": False,
+                        "underline": False,
+                        "strike": False,
+                        "baseline": 0,
+                    }
+                )
+                run[field] = value
+
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+
+                self.assertIn(
+                    "SPEC_TEXT_RUN_STYLE_INVALID",
+                    {item["code"] for item in result["errors"]},
+                )
+
+    def test_prebuild_rejects_unknown_fields_at_every_typography_contract_level(self):
+        cases = (
+            ("item", "modules.typography.items[0].future_effect", lambda item: item),
+            (
+                "text_box",
+                "modules.typography.items[0].text_box.future_effect",
+                lambda item: item["text_box"],
+            ),
+            (
+                "paragraph",
+                "modules.typography.items[0].paragraphs[0].future_effect",
+                lambda item: item["paragraphs"][0],
+            ),
+            (
+                "run",
+                "modules.typography.items[0].runs[0].future_effect",
+                lambda item: item["runs"][0],
+            ),
+            (
+                "list",
+                "modules.typography.items[0].paragraphs[0].list.future_effect",
+                lambda item: item["paragraphs"][0]["list"],
+            ),
+        )
+        for case, expected_path, select_contract in cases:
+            with self.subTest(case=case):
+                candidate = valid_spec()
+                typography_item = candidate["modules"]["typography"]["items"][0]
+                select_contract(typography_item)["future_effect"] = "glow"
+
+                result = MODULE.validate_spec(candidate, stage="prebuild")
+
+                self.assertIn(
+                    {
+                        "code": "SPEC_TYPOGRAPHY_FIELD_UNKNOWN",
+                        "path": expected_path,
+                        "detail": "unknown field: future_effect",
+                    },
+                    result["errors"],
+                )
+
+    def test_prebuild_rejects_legacy_decoration_on_modern_run(self):
+        candidate = valid_spec()
+        candidate["modules"]["typography"]["items"][0]["runs"][0][
+            "decoration"
+        ] = "none"
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            {
+                "code": "SPEC_TYPOGRAPHY_FIELD_UNKNOWN",
+                "path": "modules.typography.items[0].runs[0].decoration",
+                "detail": "unknown field: decoration",
+            },
+            result["errors"],
+        )
+
+    def test_final_keeps_legacy_decoration_only_runs_compatible(self):
+        candidate = valid_spec()
+        run = candidate["modules"]["typography"]["items"][0]["runs"][0]
+        for field in ("italic", "underline", "strike", "baseline"):
+            del run[field]
+        run["decoration"] = "none"
+
+        result = MODULE.validate_spec(candidate, stage="final")
+
+        self.assertNotIn(
+            "SPEC_TEXT_RUN_STYLE_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_prebuild_requires_representation_plan_activation(self):
+        candidate = valid_spec()
+        candidate["activated_modules"].remove("representation_plan")
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ACTIVATED_MODULES_INVALID",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_current_schema_requires_background_module_activation(self):
+        missing_activation = valid_spec()
+        missing_activation["activated_modules"].remove("background")
+        missing_module = valid_spec()
+        missing_module["modules"].pop("background")
+
+        activation_result = MODULE.validate_spec(
+            missing_activation, stage="authoring"
+        )
+        module_result = MODULE.validate_spec(missing_module, stage="prebuild")
+
+        self.assertIn(
+            "SPEC_ACTIVATED_MODULES_INVALID",
+            {item["code"] for item in activation_result["errors"]},
+        )
+        self.assertIn(
+            "UNSUPPORTED_CAPABILITY",
+            {item["code"] for item in module_result["errors"]},
+        )
+
+    def test_icon_renderer_still_rejects_background_picture_mode(self) -> None:
+        from tests.test_build_pptx_from_spec import make_icon_spec
+
+        with tempfile.TemporaryDirectory() as directory:
+            spec = make_icon_spec(Path(directory))
+            spec["modules"]["background"]["items"][0][
+                "bound_element_id"
+            ] = spec["modules"]["icons"]["icons"][0]["element_id"]
+            spec["modules"]["background"]["items"][0][
+                "selected_mode"
+            ] = "background_picture"
+
+            result = MODULE.validate_spec(spec, stage="prebuild")
+
+        self.assertIn(
+            "BACKGROUND_ICON_BINDING_FORBIDDEN",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_final_keeps_legacy_spec_compatible_without_representation_plan(self):
+        candidate = valid_spec()
+        candidate["activated_modules"].remove("representation_plan")
+        candidate["modules"].pop("representation_plan")
+
+        result = MODULE.validate_spec(candidate, stage="final")
+
+        codes = {item["code"] for item in result["errors"]}
+        self.assertNotIn("SPEC_ACTIVATED_MODULES_INVALID", codes)
+        self.assertNotIn("REPRESENTATION_INCOMPLETE", codes)
+
+    def test_prebuild_rejects_empty_representation_plan(self):
+        candidate = valid_spec()
+        candidate["modules"]["representation_plan"] = {"items": []}
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            "REPRESENTATION_INCOMPLETE",
+            {item["code"] for item in result["errors"]},
+        )
+
+    def test_prebuild_report_hash_changes_with_representation_field(self):
+        with tempfile.TemporaryDirectory() as directory:
+            candidate = make_minimal_spec(Path(directory))
+            changed = copy.deepcopy(candidate)
+            changed["modules"]["representation_plan"]["items"][0]["reason"] = "changed evidence rationale"
+
+            first = MODULE.validate_spec(candidate, stage="prebuild")
+            second = MODULE.validate_spec(changed, stage="prebuild")
+
+        self.assertTrue(first["valid"], first)
+        self.assertTrue(second["valid"], second)
+        self.assertNotEqual(first["spec_sha256"], second["spec_sha256"])
 
     def test_prebuild_rejects_missing_or_changed_reference(self):
         missing = valid_spec()
@@ -1372,15 +2281,8 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         self.assertIn("SPEC_EDITABILITY_REVIEW_INVALID", codes)
 
     def test_final_stage_accepts_matching_current_artifacts(self):
-        candidate = valid_spec()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            self._attach_final_gates(
-                candidate,
-                root,
-                {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-            )
-            result = MODULE.validate_spec(candidate, stage="final")
+        candidate = self._valid_final_spec(profile="strict")
+        result = MODULE.validate_spec(candidate, stage="final")
         self.assertTrue(result["valid"], result)
 
     def test_final_rejects_non_pptx_payload(self):
@@ -1562,15 +2464,11 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
     def test_final_accepts_visual_review_rounds_one_to_two(self):
         for review_round in (1, 2):
             with self.subTest(review_round=review_round):
-                candidate = valid_spec()
-                with tempfile.TemporaryDirectory() as directory:
-                    self._attach_final_gates(
-                        candidate,
-                        Path(directory),
-                        {"valid": True, "errors": [], "native_list_contracts_checked": 0},
-                    )
-                    candidate["visual_gate"]["review_round"] = review_round
-                    result = MODULE.validate_spec(candidate, stage="final")
+                candidate = self._valid_final_spec(
+                    profile="strict",
+                    review_round=review_round,
+                )
+                result = MODULE.validate_spec(candidate, stage="final")
 
                 self.assertTrue(result["valid"], result)
 

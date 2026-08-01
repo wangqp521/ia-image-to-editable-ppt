@@ -120,6 +120,10 @@ class RenderPreviewTest(unittest.TestCase):
             "prefix = Path(sys.argv[-1])\n"
             "shutil.copy2(fixture, prefix.with_suffix('.png'))\n",
         )
+        self.pdftotext = self.write_executable(
+            "pdftotext",
+            "raise SystemExit('pdftotext must not be invoked by render_preview')\n",
+        )
 
     def write_flaky_soffice(self, returncodes: list[int]) -> tuple[Path, Path]:
         attempts_path = self.root / "soffice-attempts.txt"
@@ -150,8 +154,8 @@ class RenderPreviewTest(unittest.TestCase):
         self.write_runtime()
         return attempts_path, invocations_path
 
-    def write_runtime(self) -> None:
-        payload = {
+    def valid_runtime(self) -> dict[str, object]:
+        return {
             "valid": True,
             "errors": [],
             "renderer_backend": "libreoffice",
@@ -172,13 +176,24 @@ class RenderPreviewTest(unittest.TestCase):
                     "version": "pdffonts 26.07.0",
                     "sha256": sha256(self.pdffonts),
                 },
+                "pdftotext": {
+                    "path": str(self.pdftotext),
+                    "version": "pdftotext 26.07.0",
+                    "sha256": sha256(self.pdftotext),
+                },
             },
             "fontconfig": {
                 "path": str(self.fontconfig),
                 "sha256": sha256(self.fontconfig),
             },
         }
+
+    def runtime_path(self, payload: object) -> Path:
         self.runtime.write_text(json.dumps(payload), encoding="utf-8")
+        return self.runtime
+
+    def write_runtime(self) -> None:
+        self.runtime_path(self.valid_runtime())
 
     def test_script_exists(self) -> None:
         self.assertTrue(SCRIPT.is_file())
@@ -195,9 +210,98 @@ class RenderPreviewTest(unittest.TestCase):
             ["NotoSansCJKsc-Regular"],
             report["font_report"]["resolved_fonts"],
         )
+        self.assertEqual(
+            str(self.pdftotext.resolve()), report["text_extractor"]["path"]
+        )
+        self.assertEqual(
+            sha256(self.pdftotext),
+            report["text_extractor"]["executable_sha256"],
+        )
         self.assertTrue((self.output / "render-report.json").is_file())
         self.assertTrue((self.output / "current-preview.png").is_file())
         self.assertTrue((self.output / "page.pdf").is_file())
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_runtime_requires_pdftotext_without_invoking_it(self) -> None:
+        module = load_module()
+        runtime = self.valid_runtime()
+        runtime["executables"].pop("pdftotext")
+
+        with self.assertRaises(module.RenderError) as raised:
+            module.render_preview(self.pptx, self.output, self.runtime_path(runtime))
+
+        self.assertEqual("RENDER_RUNTIME_INVALID", raised.exception.code)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_runtime_rejects_changed_pdftotext_hash(self) -> None:
+        module = load_module()
+        runtime = self.valid_runtime()
+        runtime["executables"]["pdftotext"]["sha256"] = "f" * 64
+
+        with self.assertRaises(module.RenderError) as raised:
+            module.render_preview(self.pptx, self.output, self.runtime_path(runtime))
+
+        self.assertEqual("RENDER_RUNTIME_INVALID", raised.exception.code)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_runtime_rejects_pdftotext_without_version(self) -> None:
+        module = load_module()
+        runtime = self.valid_runtime()
+        runtime["executables"]["pdftotext"].pop("version")
+
+        with self.assertRaises(module.RenderError) as raised:
+            module.render_preview(self.pptx, self.output, self.runtime_path(runtime))
+
+        self.assertEqual("RENDER_RUNTIME_INVALID", raised.exception.code)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_runtime_rejects_failed_pdftotext_version_placeholders(self) -> None:
+        module = load_module()
+        for index, version in enumerate(
+            ("", "   ", "unavailable", "unavailable: timed out", "exit=1")
+        ):
+            with self.subTest(version=version):
+                runtime = self.valid_runtime()
+                runtime["executables"]["pdftotext"]["version"] = version
+
+                with self.assertRaises(module.RenderError) as raised:
+                    module.render_preview(
+                        self.pptx,
+                        self.root / f"invalid-version-output-{index}",
+                        self.runtime_path(runtime),
+                    )
+
+                self.assertEqual("RENDER_RUNTIME_INVALID", raised.exception.code)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
+    def test_render_runtime_malformed_containers_return_structured_error(self) -> None:
+        module = load_module()
+        invalid_payload = []
+        null_payload = None
+        invalid_executables = self.valid_runtime()
+        invalid_executables["executables"] = []
+        invalid_entry = self.valid_runtime()
+        invalid_entry["executables"]["pdftotext"] = []
+
+        for name, runtime in (
+            ("payload-array", invalid_payload),
+            ("payload-null", null_payload),
+            ("executables", invalid_executables),
+            ("tool-entry", invalid_entry),
+        ):
+            with self.subTest(name=name):
+                try:
+                    module.render_preview(
+                        self.pptx,
+                        self.root / f"malformed-{name}-output",
+                        self.runtime_path(runtime),
+                    )
+                except module.RenderError as exc:
+                    self.assertEqual("RENDER_RUNTIME_INVALID", exc.code)
+                except Exception as exc:
+                    self.fail(f"leaked {type(exc).__name__}: {exc}")
+                else:
+                    self.fail("malformed runtime was accepted")
 
     @unittest.skipUnless(SCRIPT.is_file(), "render_preview.py not implemented")
     def test_render_preview_rejects_nonempty_output(self) -> None:

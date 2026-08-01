@@ -10,11 +10,49 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+
+from lib.hashing import canonical_json_sha256
+from lib.background_contracts import (
+    resolved_element_mode_map,
+    validate_background_postbuild,
+    validate_background_prebuild,
+)
+from lib.capabilities import (
+    TEXT_CONTRACT_ALLOWED_FIELDS,
+    TEXT_RUN_BASELINE_MAX,
+    TEXT_RUN_BASELINE_MIN,
+    TEXT_RUN_MODERN_FIELDS,
+    text_run_allowed_fields,
+)
+from lib.element_contracts import validate_element_contract
+from lib.error_codes import ToolError
+from lib.representation_contracts import validate_representation_plan
+from lib import review_contracts
+from lib.reviewer_contracts import (
+    VISUAL_REVIEW_COVERAGE_FIELDS,
+    VISUAL_REVIEW_COVERAGE_RESULTS,
+    valid_visual_review_finding,
+)
+from lib.schema_io import (
+    NonStandardJsonNumberError,
+    non_finite_number_paths,
+    reject_nonstandard_json_number,
+)
+from lib.schema_contracts import (
+    ELEMENT_FIELDS,
+    ICON_ITEM_FIELDS,
+    ICON_MODULE_FIELDS,
+    schema_envelope_issues,
+    unknown_field_detail,
+)
+from lib.spec_identity import content_spec_sha256, review_state_sha256
+from pptx_builder import validate_renderer_contracts
 
 
 ALLOWED_KINDS = {
@@ -31,18 +69,8 @@ ALLOWED_KINDS = {
     "special_text",
 }
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
-ALLOWED_MODULES = {"page_layout", "typography", "icons", "special_text", "picture_framing", "graphics", "diagram", "chart", "high_risk"}
+ALLOWED_MODULES = {"page_layout", "typography", "icons", "special_text", "picture_framing", "graphics", "diagram", "chart", "high_risk", "representation_plan", "background"}
 GATE_RESULTS = {"passed", "changes_required", "not_verifiable"}
-VISUAL_REVIEW_COVERAGE_FIELDS = {
-    "canvas_and_regions",
-    "objects_and_geometry",
-    "text_and_typography",
-    "tables_and_matrices",
-    "graphics_connectors_charts",
-    "pictures_crop_layers",
-    "high_risk_regions",
-}
-VISUAL_REVIEW_COVERAGE_RESULTS = {"checked", "not_applicable", "not_reviewable"}
 VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
 PROFILE_DELIVERY_STATUSES = {
     "rapid": {"pending", "rapid_validated", "rapid_validation_failed"},
@@ -64,6 +92,21 @@ def _error(errors: list[dict[str, str]], code: str, path: str, detail: str) -> N
 
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _validate_typography_allowed_fields(
+    value: dict[str, Any],
+    allowed: frozenset[str],
+    path: str,
+    errors: list[dict[str, str]],
+) -> None:
+    for field in sorted(set(value) - allowed):
+        _error(
+            errors,
+            "SPEC_TYPOGRAPHY_FIELD_UNKNOWN",
+            f"{path}.{field}",
+            f"unknown field: {field}",
+        )
 
 
 def _pdf_page_size_matches(value: Any) -> bool:
@@ -241,7 +284,12 @@ def _load_local_script(filename: str) -> Any:
     if module_spec is None or module_spec.loader is None:
         raise RuntimeError(f"cannot load {script_path}")
     module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
+    sys.modules[module_spec.name] = module
+    try:
+        module_spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_spec.name, None)
+        raise
     _LOCAL_MODULE_CACHE[filename] = module
     return module
 
@@ -411,6 +459,409 @@ def _load_json_artifact(
         _error(errors, code, path, "artifact root must be an object")
         return None
     return payload
+
+
+def _require_attempt8_artifact(
+    value: Any,
+    *,
+    path: str,
+    missing_code: str,
+    errors: list[dict[str, str]],
+) -> tuple[str, str] | None:
+    """Validate an immutable final artifact while preserving its domain error."""
+    if not isinstance(value, dict):
+        _error(errors, missing_code, path, "required production artifact identity is missing")
+        return None
+    artifact = _validate_gate_artifact(value, path, errors)
+    if artifact is None:
+        _error(errors, missing_code, path, "production artifact identity is not current")
+    return artifact
+
+
+def _artifact_matches_record(
+    artifact: tuple[str, str] | None,
+    record: Any,
+) -> bool:
+    if artifact is None or not isinstance(record, dict):
+        return False
+    raw_path = record.get("path")
+    digest = record.get("sha256")
+    if not isinstance(raw_path, str) or not isinstance(digest, str):
+        return False
+    try:
+        resolved = str(Path(raw_path).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved == artifact[0] and digest.lower() == artifact[1]
+
+
+def _path_identity(path: Any, digest: Any) -> dict[str, str] | None:
+    if not isinstance(path, str) or not isinstance(digest, str):
+        return None
+    try:
+        return {"path": str(Path(path).expanduser().resolve()), "sha256": digest.lower()}
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _validate_rendered_text_geometry_final(
+    spec: dict[str, Any],
+    artifact: tuple[str, str] | None,
+    *,
+    visual_pptx: tuple[str, str] | None,
+    render_report: tuple[str, str] | None,
+    runtime_preflight: tuple[str, str] | None,
+    errors: list[dict[str, str]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    report = _load_json_artifact(
+        artifact,
+        code="TEXT_GEOMETRY_IDENTITY_MISMATCH",
+        path="visual_gate.rendered_text_geometry",
+        errors=errors,
+    )
+    if report is None:
+        return None, None
+    input_paths = report.get("input_paths")
+    inputs = report.get("inputs")
+    if not isinstance(input_paths, dict) or not isinstance(inputs, dict):
+        _error(
+            errors,
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            "visual_gate.rendered_text_geometry",
+            "rendered-text geometry input identities are incomplete",
+        )
+        return report, None
+
+    current_content_hash = content_spec_sha256(spec)
+    if report.get("spec_sha256") != current_content_hash:
+        _error(
+            errors,
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            "visual_gate.rendered_text_geometry.spec_sha256",
+            "rendered-text geometry does not bind the current renderable content",
+        )
+    for label, current_artifact, digest_field in (
+        ("pptx", visual_pptx, "pptx_sha256"),
+        ("render_report", render_report, "render_report_sha256"),
+        ("runtime", runtime_preflight, "runtime_sha256"),
+    ):
+        record = _path_identity(input_paths.get(label), inputs.get(digest_field))
+        if not _artifact_matches_record(current_artifact, record):
+            _error(
+                errors,
+                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+                f"visual_gate.rendered_text_geometry.input_paths.{label}",
+                f"rendered-text geometry does not bind the current {label}",
+            )
+
+    build_report: dict[str, Any] | None = None
+    build_path = input_paths.get("build_report")
+    if isinstance(build_path, str):
+        build_record = _path_identity(build_path, inputs.get("build_report_sha256"))
+        build_artifact = (
+            (build_record["path"], build_record["sha256"])
+            if isinstance(build_record, dict)
+            else None
+        )
+        build_report = _load_json_artifact(
+            build_artifact,
+            code="TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            path="visual_gate.rendered_text_geometry.input_paths.build_report",
+            errors=errors,
+        )
+    else:
+        _error(
+            errors,
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            "visual_gate.rendered_text_geometry.input_paths.build_report",
+            "build-report path is missing",
+        )
+    if (
+        isinstance(build_report, dict)
+        and build_report.get("content_spec_sha256") != current_content_hash
+    ):
+        _error(
+            errors,
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            "build_report.content_spec_sha256",
+            "build report does not bind the current renderable content",
+        )
+
+    required_paths = ("spec", "pptx", "build_report", "render_report", "runtime")
+    if all(isinstance(input_paths.get(name), str) for name in required_paths):
+        try:
+            geometry = _load_local_script("create_rendered_text_geometry.py")
+            with tempfile.TemporaryDirectory() as directory:
+                rebuilt = geometry.create_rendered_text_geometry(
+                    input_paths["spec"],
+                    input_paths["pptx"],
+                    input_paths["build_report"],
+                    input_paths["render_report"],
+                    input_paths["runtime"],
+                    Path(directory) / "rendered-text-geometry.json",
+                )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            _error(
+                errors,
+                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+                "visual_gate.rendered_text_geometry",
+                f"cannot recompute rendered-text geometry: {exc}",
+            )
+        else:
+            if rebuilt != report:
+                _error(
+                    errors,
+                    "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+                    "visual_gate.rendered_text_geometry",
+                    "stored rendered-text geometry differs from production recomputation",
+                )
+    else:
+        _error(
+            errors,
+            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+            "visual_gate.rendered_text_geometry.input_paths",
+            "rendered-text geometry input paths are incomplete",
+        )
+    if report.get("valid") is not True:
+        report_errors = report.get("errors")
+        if isinstance(report_errors, list) and report_errors:
+            errors.extend(item for item in report_errors if isinstance(item, dict))
+        else:
+            _error(
+                errors,
+                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
+                "visual_gate.rendered_text_geometry.valid",
+                "rendered-text geometry did not pass",
+            )
+    return report, build_report
+
+
+def _validate_background_contract_final(
+    spec: dict[str, Any],
+    artifact: tuple[str, str] | None,
+    *,
+    text_report: dict[str, Any] | None,
+    structure_report: tuple[str, str] | None,
+    build_report: dict[str, Any] | None,
+    errors: list[dict[str, str]],
+) -> dict[str, Any] | None:
+    report = _load_json_artifact(
+        artifact,
+        code="BACKGROUND_ASSET_INVALID",
+        path="visual_gate.background_contract",
+        errors=errors,
+    )
+    if report is None:
+        return None
+    current_content_hash = content_spec_sha256(spec)
+    if report.get("spec_sha256") != current_content_hash or (
+        isinstance(build_report, dict)
+        and build_report.get("content_spec_sha256") != current_content_hash
+    ):
+        _error(
+            errors,
+            "BACKGROUND_ASSET_INVALID",
+            "visual_gate.background_contract.spec_sha256",
+            "background contract does not bind the current renderable content",
+        )
+    input_paths = text_report.get("input_paths") if isinstance(text_report, dict) else None
+    if (
+        isinstance(input_paths, dict)
+        and all(isinstance(input_paths.get(name), str) for name in ("spec", "pptx", "build_report"))
+        and structure_report is not None
+    ):
+        try:
+            rebuilt = validate_background_postbuild(
+                input_paths["spec"],
+                input_paths["pptx"],
+                input_paths["build_report"],
+                structure_report[0],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            _error(
+                errors,
+                "BACKGROUND_ASSET_INVALID",
+                "visual_gate.background_contract",
+                f"cannot recompute background contract: {exc}",
+            )
+        else:
+            if rebuilt != report:
+                _error(
+                    errors,
+                    "BACKGROUND_ASSET_INVALID",
+                    "visual_gate.background_contract",
+                    "stored background contract differs from production recomputation",
+                )
+    else:
+        _error(
+            errors,
+            "BACKGROUND_ASSET_INVALID",
+            "visual_gate.background_contract",
+            "background recomputation inputs are incomplete",
+        )
+    if report.get("valid") is not True:
+        report_errors = report.get("errors")
+        if isinstance(report_errors, list) and report_errors:
+            errors.extend(item for item in report_errors if isinstance(item, dict))
+        else:
+            _error(
+                errors,
+                "BACKGROUND_ASSET_INVALID",
+                "visual_gate.background_contract.valid",
+                "background contract did not pass",
+            )
+    return report
+
+
+def _validate_review_chain_final(
+    spec: dict[str, Any],
+    visual_gate: dict[str, Any],
+    *,
+    profile: str,
+    admission_artifact: tuple[str, str] | None,
+    invocation_artifact: tuple[str, str] | None,
+    response_validation_artifact: tuple[str, str] | None,
+    current_artifacts: dict[str, tuple[str, str] | None],
+    build_report: dict[str, Any] | None,
+    text_report: dict[str, Any] | None,
+    errors: list[dict[str, str]],
+) -> None:
+    if admission_artifact is None or invocation_artifact is None or response_validation_artifact is None:
+        return
+    try:
+        validated_admission = review_contracts._load_admission_for_invocation(
+            Path(admission_artifact[0])
+        )
+    except ToolError as exc:
+        errors.append(exc.as_dict())
+        return
+    admission = validated_admission.payload
+    current_content_hash = content_spec_sha256(spec)
+    if (
+        admission.get("spec_sha256") != current_content_hash
+        or admission.get("review_state_sha256") != review_state_sha256(spec)
+        or admission.get("verification_profile") != profile
+        or admission.get("page_id") != spec.get("page_id")
+    ):
+        _error(
+            errors,
+            "REVIEW_ADMISSION_STALE",
+            "visual_gate.review_admission",
+            "admission does not bind the current page, profile, and renderable content",
+        )
+    artifacts = admission.get("artifacts")
+    if not isinstance(artifacts, dict):
+        _error(
+            errors,
+            "REVIEW_ADMISSION_STALE",
+            "visual_gate.review_admission.artifacts",
+            "admission artifacts are missing",
+        )
+        return
+    for name, current in current_artifacts.items():
+        if not _artifact_matches_record(current, artifacts.get(name)):
+            _error(
+                errors,
+                "REVIEW_ADMISSION_STALE",
+                f"visual_gate.review_admission.artifacts.{name}",
+                f"admission does not bind the current {name}",
+            )
+    text_inputs = text_report.get("inputs") if isinstance(text_report, dict) else None
+    text_paths = text_report.get("input_paths") if isinstance(text_report, dict) else None
+    build_record = (
+        _path_identity(
+            text_paths.get("build_report"), text_inputs.get("build_report_sha256")
+        )
+        if isinstance(text_paths, dict) and isinstance(text_inputs, dict)
+        else None
+    )
+    if not _artifact_matches_record(
+        (
+            (build_record["path"], build_record["sha256"])
+            if isinstance(build_record, dict)
+            else None
+        ),
+        artifacts.get("build_report"),
+    ) or (
+        isinstance(build_report, dict)
+        and build_report.get("content_spec_sha256") != current_content_hash
+    ):
+        _error(
+            errors,
+            "REVIEW_ADMISSION_STALE",
+            "visual_gate.review_admission.artifacts.build_report",
+            "admission build report does not bind the current renderable content",
+        )
+
+    validation_report = _load_json_artifact(
+        response_validation_artifact,
+        code="REVIEW_RESPONSE_INVALID",
+        path="visual_gate.review_response_validation",
+        errors=errors,
+    )
+    if validation_report is None:
+        return
+    response_path = validation_report.get("response_path")
+    if not isinstance(response_path, str):
+        _error(
+            errors,
+            "REVIEW_RESPONSE_INVALID",
+            "visual_gate.review_response_validation.response_path",
+            "validated raw response path is missing",
+        )
+        return
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            rebuilt_validation = review_contracts.validate_response(
+                Path(admission_artifact[0]),
+                Path(invocation_artifact[0]),
+                Path(response_path),
+                Path(directory) / "review-response-validation.json",
+            )
+    except ToolError as exc:
+        errors.append(exc.as_dict())
+        return
+    if rebuilt_validation != validation_report or validation_report.get("valid") is not True or validation_report.get("errors") != []:
+        _error(
+            errors,
+            "REVIEW_RESPONSE_INVALID",
+            "visual_gate.review_response_validation",
+            "stored response validation differs from production recomputation or did not pass",
+        )
+    try:
+        raw_response = json.loads(Path(response_path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
+        _error(
+            errors,
+            "REVIEW_RESPONSE_INVALID",
+            "visual_gate.review_response_validation.response_path",
+            "validated raw response is unreadable",
+        )
+        return
+    reviewer = visual_gate.get("reviewer")
+    reviewer_response = (
+        {key: value for key, value in reviewer.items() if key != "mode"}
+        if isinstance(reviewer, dict)
+        else None
+    )
+    if (
+        reviewer_response != raw_response
+        or visual_gate.get("review_round") != admission.get("review_round")
+        or (
+            isinstance(raw_response, dict)
+            and (
+                raw_response.get("admission_id") != admission.get("admission_id")
+                or raw_response.get("review_round")
+                != admission.get("review_round")
+            )
+        )
+    ):
+        _error(
+            errors,
+            "REVIEW_RESPONSE_INVALID",
+            "visual_gate.reviewer",
+            "reviewer object is not the response bound to this admission and round",
+        )
 
 
 def _render_file_identity(
@@ -856,21 +1307,44 @@ def _validate_coverage(
 def _validate_text_run_styles(
     runs: Any,
     path: str,
+    stage: str,
     errors: list[dict[str, str]],
 ) -> None:
     if not isinstance(runs, list):
         return
-    required = {"font_size", "font_weight", "color", "decoration", "letter_spacing"}
+    required = {"font_size", "font_weight", "color", "letter_spacing"}
     for index, run in enumerate(runs):
         run_path = f"{path}[{index}]"
         if not isinstance(run, dict):
             continue
-        missing = sorted(required - set(run))
+        _validate_typography_allowed_fields(
+            run,
+            text_run_allowed_fields(stage, run),
+            run_path,
+            errors,
+        )
+        modern_present = TEXT_RUN_MODERN_FIELDS & set(run)
+        required_for_run = set(required)
+        if stage == "prebuild" or modern_present:
+            required_for_run.update(TEXT_RUN_MODERN_FIELDS)
+        elif "decoration" not in run:
+            required_for_run.add("decoration")
+        missing = sorted(required_for_run - set(run))
         font_size = run.get("font_size")
         font_weight = run.get("font_weight")
         color = run.get("color")
-        decoration = run.get("decoration")
         letter_spacing = run.get("letter_spacing")
+        baseline = run.get("baseline")
+        modern_invalid = (
+            any(type(run.get(field)) is not bool for field in ("italic", "underline", "strike"))
+            or type(baseline) is not int
+            or not TEXT_RUN_BASELINE_MIN <= baseline <= TEXT_RUN_BASELINE_MAX
+        ) if stage == "prebuild" or modern_present else False
+        legacy_invalid = (
+            stage != "prebuild"
+            and not modern_present
+            and (not isinstance(run.get("decoration"), str) or not run["decoration"])
+        )
         if (
             missing
             or not _is_number(font_size)
@@ -879,9 +1353,9 @@ def _validate_text_run_styles(
             or not 1 <= font_weight <= 1000
             or not isinstance(color, str)
             or not color
-            or not isinstance(decoration, str)
-            or not decoration
             or not _is_number(letter_spacing)
+            or modern_invalid
+            or legacy_invalid
         ):
             detail = f"missing fields: {', '.join(missing)}" if missing else "invalid run style values"
             _error(errors, "SPEC_TEXT_RUN_STYLE_INVALID", run_path, detail)
@@ -908,6 +1382,12 @@ def _validate_paragraphs(
         paragraph_path = f"{path}[{index}]"
         if not isinstance(paragraph, dict):
             continue
+        _validate_typography_allowed_fields(
+            paragraph,
+            TEXT_CONTRACT_ALLOWED_FIELDS["paragraph"],
+            paragraph_path,
+            errors,
+        )
         list_contract = paragraph.get("list")
         if not isinstance(list_contract, dict) or not isinstance(list_contract.get("is_list"), bool):
             _error(
@@ -917,6 +1397,12 @@ def _validate_paragraphs(
                 "list must be an object with boolean is_list",
             )
             continue
+        _validate_typography_allowed_fields(
+            list_contract,
+            TEXT_CONTRACT_ALLOWED_FIELDS["list"],
+            f"{paragraph_path}.list",
+            errors,
+        )
         level = list_contract.get("level")
         if not isinstance(level, int) or isinstance(level, bool) or level < 0:
             _error(
@@ -1041,6 +1527,12 @@ def _validate_typography(
         if not isinstance(item, dict):
             _error(errors, "SPEC_TYPOGRAPHY_ITEM_INVALID", path, "item must be an object")
             continue
+        _validate_typography_allowed_fields(
+            item,
+            TEXT_CONTRACT_ALLOWED_FIELDS["item"],
+            path,
+            errors,
+        )
         missing = sorted(required - set(item))
         if missing:
             _error(errors, "SPEC_TYPOGRAPHY_FIELD_MISSING", path, f"missing fields: {', '.join(missing)}")
@@ -1090,8 +1582,15 @@ def _validate_typography(
             )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)
-        _validate_text_run_styles(runs, f"{path}.runs", errors)
+        _validate_text_run_styles(runs, f"{path}.runs", stage, errors)
         text_box = item.get("text_box")
+        if isinstance(text_box, dict):
+            _validate_typography_allowed_fields(
+                text_box,
+                TEXT_CONTRACT_ALLOWED_FIELDS["text_box"],
+                f"{path}.text_box",
+                errors,
+            )
         _validate_paragraphs(
             item.get("paragraphs"),
             text,
@@ -1130,14 +1629,11 @@ def _validate_icons(
     if not isinstance(module, dict):
         _error(errors, "SPEC_MODULE_INVALID", "modules.icons", "module must be an object")
         return
-    required_module = {
-        "schema_version",
-        "page_id",
-        "slide_coordinate_unit",
-        "clean_visual_reference",
-        "clean_visual_sha256",
-        "icons",
-    }
+    required_module = ICON_MODULE_FIELDS
+    module_unknown = unknown_field_detail("IconsModule", module)
+    if module_unknown is not None:
+        _error(errors, "UNSUPPORTED_CAPABILITY", "modules.icons", module_unknown)
+        return
     missing_module = sorted(required_module - set(module))
     if missing_module:
         _error(errors, "SPEC_ICONS_FIELD_MISSING", "modules.icons", f"missing fields: {', '.join(missing_module)}")
@@ -1164,37 +1660,22 @@ def _validate_icons(
     icon_element_ids = {element_id for element_id, element in element_map.items() if element.get("kind") == "icon"}
     seen_icon_ids: set[str] = set()
     seen_element_ids: set[str] = set()
-    required_item = {
-        "icon_id",
-        "element_id",
-        "category",
-        "instance_count",
-        "repeat_group",
-        "semantic_scope",
-        "source_bbox",
-        "slide_bbox",
-        "layer",
-        "source_path",
-        "source_sha256",
-        "crop_mode",
-        "padding",
-        "background_handling",
-        "asset_path",
-        "asset_sha256",
-        "alpha_mask_sha256",
-        "final_width",
-        "final_height",
-        "sharpness",
-        "validation",
-        "native_redraw",
-        "selectable_picture_verified",
-        "object_type",
-    }
+    required_item = ICON_ITEM_FIELDS
     visual_size = canvas.get("visual_size") if isinstance(canvas, dict) else None
     for index, item in enumerate(icons):
         path = f"modules.icons.icons[{index}]"
         if not isinstance(item, dict):
             _error(errors, "SPEC_ICON_ITEM_INVALID", path, "icon must be an object")
+            continue
+        item_unknown = unknown_field_detail("IconItem", item)
+        if item_unknown is not None:
+            element_id = item.get("element_id")
+            contract_path = (
+                f"modules.icons.icons.{element_id}"
+                if isinstance(element_id, str) and element_id
+                else path
+            )
+            _error(errors, "UNSUPPORTED_CAPABILITY", contract_path, item_unknown)
             continue
         missing_item = sorted(required_item - set(item))
         if missing_item:
@@ -1392,8 +1873,36 @@ def _validate_icons(
 
 def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     """Return a stable validation report for a reconstruction specification."""
-    if stage not in {"prebuild", "final"}:
-        raise ValueError("stage must be prebuild or final")
+    if stage not in {"authoring", "prebuild", "final"}:
+        raise ValueError("stage must be authoring, prebuild, or final")
+    semantic_stage = "prebuild" if stage == "authoring" else stage
+    non_finite_paths = non_finite_number_paths(spec)
+    if non_finite_paths:
+        declared_profile = (
+            spec.get("verification_profile") if isinstance(spec, dict) else None
+        )
+        verification_profile = (
+            declared_profile
+            if isinstance(declared_profile, str)
+            and declared_profile in VERIFICATION_PROFILES
+            else "strict"
+        )
+        return {
+            "valid": False,
+            "stage": stage,
+            "verification_profile": verification_profile,
+            "spec_sha256": None,
+            "errors": [
+                {
+                    "code": "SPEC_NUMBER_NON_FINITE",
+                    "path": path,
+                    "detail": "number must be finite",
+                }
+                for path in non_finite_paths
+            ],
+            "warnings": [],
+        }
+    spec_sha256 = canonical_json_sha256(spec)
     errors: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
     if not isinstance(spec, dict):
@@ -1401,31 +1910,32 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             "valid": False,
             "stage": stage,
             "verification_profile": "strict",
+            "spec_sha256": spec_sha256,
             "errors": [{"code": "SPEC_ROOT_INVALID", "path": "$", "detail": "root must be an object"}],
             "warnings": [],
         }
 
     verification_profile = _verification_profile(spec)
+    envelope_issues = schema_envelope_issues(spec)
+    if any(detail.startswith("missing fields: ") for _, detail in envelope_issues):
+        return {
+            "valid": False,
+            "stage": stage,
+            "verification_profile": verification_profile,
+            "spec_sha256": spec_sha256,
+            "errors": [
+                {
+                    "code": "UNSUPPORTED_CAPABILITY",
+                    "path": path,
+                    "detail": detail,
+                }
+                for path, detail in envelope_issues
+            ],
+            "warnings": [],
+        }
+    for path, detail in envelope_issues:
+        _error(errors, "UNSUPPORTED_CAPABILITY", path, detail)
     _validate_verification_identity(spec, verification_profile, errors)
-
-    required_top = {
-        "schema_version",
-        "page_id",
-        "session_reuse",
-        "content_reference",
-        "clean_visual_reference",
-        "canvas",
-        "activated_modules",
-        "modules",
-        "regions",
-        "elements",
-        "reading_order",
-        "visual_gate",
-        "editability_gate",
-    }
-    missing_top = sorted(required_top - set(spec))
-    if missing_top:
-        _error(errors, "SPEC_TOP_LEVEL_FIELD_MISSING", "$", f"missing fields: {', '.join(missing_top)}")
 
     if spec.get("schema_version") != 2:
         _error(errors, "SPEC_SCHEMA_VERSION_UNSUPPORTED", "schema_version", "expected schema_version 2")
@@ -1481,23 +1991,12 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     if not isinstance(elements, list) or not elements:
         _error(errors, "SPEC_ELEMENTS_INVALID", "elements", "elements must be non-empty")
     else:
-        required_element = {
-            "element_id",
-            "kind",
-            "source_bbox",
-            "slide_bbox",
-            "layer",
-            "editable",
-            "confidence",
-            "style",
-            "content",
-        }
         for index, element in enumerate(elements):
             path = f"elements[{index}]"
             if not isinstance(element, dict):
                 _error(errors, "SPEC_ELEMENT_INVALID", path, "element must be an object")
                 continue
-            missing = sorted(required_element - set(element))
+            missing = sorted(ELEMENT_FIELDS - set(element))
             if missing:
                 _error(errors, "SPEC_ELEMENT_FIELD_MISSING", path, f"missing fields: {', '.join(missing)}")
                 continue
@@ -1538,6 +2037,10 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 _error(errors, "SPEC_ELEMENT_CONFIDENCE_INVALID", f"{path}.confidence", "invalid confidence")
             if not isinstance(element.get("style"), dict) or not isinstance(element.get("content"), dict):
                 _error(errors, "SPEC_ELEMENT_PAYLOAD_INVALID", path, "style and content must be objects")
+            else:
+                errors.extend(
+                    issue.as_dict() for issue in validate_element_contract(element)
+                )
 
     regions = spec.get("regions")
     region_element_ids: set[str] = set()
@@ -1549,11 +2052,6 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             path = f"regions[{index}]"
             if not isinstance(region, dict):
                 _error(errors, "SPEC_REGION_INVALID", path, "region must be an object")
-                continue
-            required = {"region_id", "source_bbox", "slide_bbox", "layer", "padding", "element_ids"}
-            missing = sorted(required - set(region))
-            if missing:
-                _error(errors, "SPEC_REGION_FIELD_MISSING", path, f"missing fields: {', '.join(missing)}")
                 continue
             region_id = region.get("region_id")
             if not isinstance(region_id, str) or not region_id or region_id in region_ids:
@@ -1613,6 +2111,8 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             continue
         module = modules.get(module_name)
         if not isinstance(module, dict) or not module:
+            if module_name == "representation_plan" and semantic_stage == "prebuild":
+                continue
             _error(errors, "SPEC_ACTIVATED_MODULE_EMPTY", f"modules.{module_name}", "activated module must be a non-empty object")
             continue
         unknown_references = sorted(_module_element_references(module) - element_ids)
@@ -1623,13 +2123,37 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 f"modules.{module_name}",
                 f"unknown element references: {', '.join(unknown_references)}",
             )
+    if semantic_stage == "prebuild":
+        if "representation_plan" not in activated:
+            _error(
+                errors,
+                "SPEC_ACTIVATED_MODULES_INVALID",
+                "activated_modules",
+                "prebuild requires representation_plan activation",
+            )
+        else:
+            errors.extend(issue.as_dict() for issue in validate_representation_plan(spec))
+        if "background" not in activated:
+            _error(
+                errors,
+                "SPEC_ACTIVATED_MODULES_INVALID",
+                "activated_modules",
+                "current schema requires background activation",
+            )
+        errors.extend(issue.as_dict() for issue in validate_background_prebuild(spec))
     _validate_coordinate_overlay_evidence(
         modules.get("page_layout"),
         spec.get("clean_visual_reference"),
         errors,
     )
     if "typography" in activated:
-        _validate_typography(modules.get("typography"), element_map, canvas, stage, errors)
+        _validate_typography(
+            modules.get("typography"),
+            element_map,
+            canvas,
+            semantic_stage,
+            errors,
+        )
     if "icons" in activated:
         _validate_icons(
             modules.get("icons"),
@@ -1637,11 +2161,33 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             canvas,
             spec.get("clean_visual_reference"),
             spec.get("page_id"),
-            stage,
+            semantic_stage,
             errors,
         )
 
-    if stage == "final":
+    if semantic_stage == "prebuild" and not errors:
+        typography_items = (
+            modules.get("typography", {}).get("items", [])
+            if isinstance(modules.get("typography"), dict)
+            else []
+        )
+        typography_index = {
+            item["element_id"]: item
+            for item in typography_items
+            if isinstance(item, dict) and isinstance(item.get("element_id"), str)
+        }
+        modes = resolved_element_mode_map(spec)
+        errors.extend(
+            issue.as_dict()
+            for issue in validate_renderer_contracts(
+                spec,
+                element_map,
+                modes,
+                typography_index,
+            )
+        )
+
+    if semantic_stage == "final":
         visual_gate = spec.get("visual_gate")
         editability_gate = spec.get("editability_gate")
         expected_delivery_status = {
@@ -1736,20 +2282,8 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 or decision not in {"passed", "changes_required", "not_reviewable"}
                 or not isinstance(findings, list)
                 or not all(
-                    isinstance(finding, dict)
-                    and isinstance(finding.get("severity"), str)
-                    and finding["severity"] in {"P0", "P1", "P2"}
-                    and isinstance(finding.get("category"), str)
-                    and finding["category"] in VISUAL_REVIEW_COVERAGE_FIELDS
-                    and all(
-                        isinstance(finding.get(field), str)
-                        and bool(finding[field].strip())
-                        for field in (
-                            "location",
-                            "source_fact",
-                            "observed_difference",
-                            "evidence",
-                        )
+                    valid_visual_review_finding(
+                        finding, evidence_mode="string"
                     )
                     for finding in findings
                 )
@@ -1928,6 +2462,103 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             "editability_gate.validator",
             errors,
         )
+        background_artifact = _require_attempt8_artifact(
+            visual_gate.get("background_contract") if isinstance(visual_gate, dict) else None,
+            path="visual_gate.background_contract",
+            missing_code="BACKGROUND_DECLARATION_MISSING",
+            errors=errors,
+        )
+        text_geometry_artifact = _require_attempt8_artifact(
+            visual_gate.get("rendered_text_geometry") if isinstance(visual_gate, dict) else None,
+            path="visual_gate.rendered_text_geometry",
+            missing_code="TEXT_GEOMETRY_MISSING",
+            errors=errors,
+        )
+        text_geometry_report, bound_build_report = (
+            _validate_rendered_text_geometry_final(
+                spec,
+                text_geometry_artifact,
+                visual_pptx=visual_pptx,
+                render_report=render_report_artifact,
+                runtime_preflight=preflight_artifact,
+                errors=errors,
+            )
+        )
+        _validate_background_contract_final(
+            spec,
+            background_artifact,
+            text_report=text_geometry_report,
+            structure_report=validator_artifact,
+            build_report=bound_build_report,
+            errors=errors,
+        )
+
+        review_fields = (
+            "review_admission",
+            "review_invocation",
+            "review_response_validation",
+        )
+        if verification_profile == "rapid":
+            for field in review_fields:
+                if isinstance(visual_gate, dict) and visual_gate.get(field) is not None:
+                    _error(
+                        errors,
+                        "SPEC_RAPID_REVIEWER_FORBIDDEN",
+                        f"visual_gate.{field}",
+                        "rapid verification must not carry independent-review artifacts",
+                    )
+        else:
+            admission_artifact = _require_attempt8_artifact(
+                visual_gate.get("review_admission") if isinstance(visual_gate, dict) else None,
+                path="visual_gate.review_admission",
+                missing_code="REVIEW_ADMISSION_NOT_ISSUED",
+                errors=errors,
+            )
+            invocation_artifact = _require_attempt8_artifact(
+                visual_gate.get("review_invocation") if isinstance(visual_gate, dict) else None,
+                path="visual_gate.review_invocation",
+                missing_code="REVIEW_RESPONSE_INVALID",
+                errors=errors,
+            )
+            response_validation_artifact = _require_attempt8_artifact(
+                visual_gate.get("review_response_validation") if isinstance(visual_gate, dict) else None,
+                path="visual_gate.review_response_validation",
+                missing_code="REVIEW_RESPONSE_INVALID",
+                errors=errors,
+            )
+            source_record = spec.get("clean_visual_reference")
+            source_artifact = (
+                (
+                    str(Path(source_record["path"]).expanduser().resolve()),
+                    source_record["sha256"].lower(),
+                )
+                if isinstance(source_record, dict)
+                and isinstance(source_record.get("path"), str)
+                and isinstance(source_record.get("sha256"), str)
+                else None
+            )
+            _validate_review_chain_final(
+                spec,
+                visual_gate if isinstance(visual_gate, dict) else {},
+                profile=verification_profile,
+                admission_artifact=admission_artifact,
+                invocation_artifact=invocation_artifact,
+                response_validation_artifact=response_validation_artifact,
+                current_artifacts={
+                    "pptx": visual_pptx,
+                    "source": source_artifact,
+                    "preview": preview_artifact,
+                    "structure_report": validator_artifact,
+                    "render_report": render_report_artifact,
+                    "runtime_preflight": preflight_artifact,
+                    "rendered_text_geometry": text_geometry_artifact,
+                    "background_contract": background_artifact,
+                    "visual_diff": report_artifact,
+                },
+                build_report=bound_build_report,
+                text_report=text_geometry_report,
+                errors=errors,
+            )
         expected_native_list_contracts = sum(
             1
             for item in (
@@ -2050,6 +2681,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         "valid": not errors,
         "stage": stage,
         "verification_profile": verification_profile,
+        "spec_sha256": spec_sha256,
         "errors": errors,
         "warnings": warnings,
     }
@@ -2058,7 +2690,11 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("spec", type=Path, help="Path to page-reconstruction.json")
-    parser.add_argument("--stage", choices=("prebuild", "final"), default="prebuild")
+    parser.add_argument(
+        "--stage",
+        choices=("authoring", "prebuild", "final"),
+        default="prebuild",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -2095,9 +2731,12 @@ def _emit_json(payload: dict[str, Any], output: Path | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        spec = json.loads(args.spec.read_text(encoding="utf-8"))
+        spec = json.loads(
+            args.spec.read_text(encoding="utf-8"),
+            parse_constant=reject_nonstandard_json_number,
+        )
         result = validate_spec(spec, stage=args.stage)
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, json.JSONDecodeError, NonStandardJsonNumberError) as exc:
         result = {
             "valid": False,
             "stage": args.stage,

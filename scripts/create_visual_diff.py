@@ -252,7 +252,7 @@ def _save_region_evidence(
         results.append(
             {
                 "region_id": region_id,
-                "source_bbox": list(bbox),
+                "source_bbox": list(raw),
                 "evidence": str(evidence_path.resolve()),
                 "evidence_sha256": _sha256(evidence_path),
                 "scale_percent": 200,

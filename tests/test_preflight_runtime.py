@@ -7,7 +7,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,68 @@ def load_module():
 
 
 class PreflightRuntimeTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self.tool = self.root / "fake-tool"
+        self.tool.write_text("#!/bin/sh\necho fake-tool 1.0\n", encoding="utf-8")
+        self.tool.chmod(0o755)
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    def valid_expected_runtime(self) -> dict[str, object]:
+        return {
+            "renderer_backend": "libreoffice",
+            "preview_size": [1920, 1080],
+            "executables": {
+                name: {
+                    "path": str(self.tool.resolve()),
+                    "version": "fake-tool 1.0",
+                    "sha256": sha256(self.tool.read_bytes()).hexdigest(),
+                    "dynamic_libraries": [],
+                }
+                for name in ("soffice", "pdftoppm", "pdffonts", "pdftotext")
+            },
+            "fontconfig": {
+                "sha256": sha256(FONTCONFIG.read_bytes()).hexdigest(),
+            },
+        }
+
+    def run_preflight(
+        self,
+        pdftotext: Path | None = None,
+        expected: object | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+        report = self.root / "preflight-runtime.json"
+        command = [
+            sys.executable,
+            str(SCRIPT),
+            "--soffice",
+            str(self.tool),
+            "--pdftoppm",
+            str(self.tool),
+            "--pdffonts",
+            str(self.tool),
+            "--pdftotext",
+            str(pdftotext or self.tool),
+            "--fontconfig",
+            str(FONTCONFIG),
+            "--output",
+            str(report),
+        ]
+        if expected is not None:
+            expected_path = self.root / "expected-runtime.json"
+            expected_path.write_text(json.dumps(expected), encoding="utf-8")
+            command.extend(["--expected-runtime", str(expected_path)])
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return completed, json.loads(completed.stdout) if completed.stdout else {}
+
     def test_script_exists(self) -> None:
         self.assertTrue(SCRIPT.is_file())
 
@@ -38,6 +102,193 @@ class PreflightRuntimeTest(unittest.TestCase):
             "LibreOffice 26.3.0 rc1",
         ):
             self.assertFalse(module.is_stable_libreoffice_version(value), value)
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_preflight_requires_and_hashes_pdftotext(self) -> None:
+        completed, payload = self.run_preflight(pdftotext=self.tool)
+
+        if completed.returncode != 0:
+            self.fail(completed.stderr)
+        self.assertEqual(
+            sha256(self.tool.read_bytes()).hexdigest(),
+            payload["executables"]["pdftotext"]["sha256"],
+        )
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_expected_runtime_rejects_changed_pdftotext_identity(self) -> None:
+        expected = self.valid_expected_runtime()
+        expected["executables"]["pdftotext"]["sha256"] = "f" * 64
+
+        completed, payload = self.run_preflight(expected=expected)
+
+        self.assertEqual(2, completed.returncode)
+        self.assertIn(
+            "RUNTIME_RENDERER_IDENTITY_MISMATCH",
+            {item["code"] for item in payload.get("errors", [])},
+        )
+        mismatch = next(
+            item
+            for item in payload["errors"]
+            if item["code"] == "RUNTIME_RENDERER_IDENTITY_MISMATCH"
+        )
+        self.assertEqual("executables.pdftotext.sha256", mismatch["detail"])
+
+    def test_expected_runtime_rejects_changed_pdffonts_dynamic_library_identity(
+        self,
+    ) -> None:
+        expected = self.valid_expected_runtime()
+        expected["executables"]["pdffonts"]["dynamic_libraries"] = [
+            {
+                "path": "/tmp/libfixture.dylib",
+                "sha256": "f" * 64,
+                "load_names": ["libfixture.dylib"],
+            }
+        ]
+
+        completed, payload = self.run_preflight(expected=expected)
+
+        self.assertEqual(2, completed.returncode)
+        mismatch = next(
+            item
+            for item in payload["errors"]
+            if item["code"] == "RUNTIME_RENDERER_IDENTITY_MISMATCH"
+        )
+        self.assertEqual(
+            "executables.pdffonts.dynamic_libraries",
+            mismatch["detail"],
+        )
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_expected_runtime_rejects_missing_pdftotext_path(self) -> None:
+        expected = self.valid_expected_runtime()
+        expected["executables"]["pdftotext"].pop("path")
+
+        completed, payload = self.run_preflight(expected=expected)
+
+        self.assertEqual(2, completed.returncode)
+        mismatch = next(
+            item
+            for item in payload["errors"]
+            if item["code"] == "RUNTIME_RENDERER_IDENTITY_MISMATCH"
+        )
+        self.assertEqual("executables.pdftotext.path", mismatch["detail"])
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_expected_runtime_rejects_changed_pdftotext_path(self) -> None:
+        alternate = self.root / "alternate-pdftotext"
+        alternate.write_bytes(self.tool.read_bytes())
+        alternate.chmod(0o755)
+        expected = self.valid_expected_runtime()
+        expected["executables"]["pdftotext"]["path"] = str(alternate.resolve())
+
+        completed, payload = self.run_preflight(expected=expected)
+
+        self.assertEqual(2, completed.returncode)
+        mismatch = next(
+            item
+            for item in payload["errors"]
+            if item["code"] == "RUNTIME_RENDERER_IDENTITY_MISMATCH"
+        )
+        self.assertEqual("executables.pdftotext.path", mismatch["detail"])
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_expected_runtime_malformed_containers_return_structured_mismatch(
+        self,
+    ) -> None:
+        malformed = []
+        invalid_executables = self.valid_expected_runtime()
+        invalid_executables["executables"] = []
+        invalid_fontconfig = self.valid_expected_runtime()
+        invalid_fontconfig["fontconfig"] = []
+        invalid_entry = self.valid_expected_runtime()
+        invalid_entry["executables"]["pdftotext"] = []
+
+        for name, expected in (
+            ("top-level", malformed),
+            ("executables", invalid_executables),
+            ("fontconfig", invalid_fontconfig),
+            ("tool-entry", invalid_entry),
+        ):
+            with self.subTest(name=name):
+                completed, payload = self.run_preflight(expected=expected)
+
+                if completed.returncode != 2:
+                    self.fail(
+                        f"expected structured exit 2, got {completed.returncode}: "
+                        f"{completed.stderr}"
+                    )
+                self.assertNotIn("Traceback", completed.stderr)
+                self.assertIn(
+                    "RUNTIME_RENDERER_IDENTITY_MISMATCH",
+                    {item["code"] for item in payload["errors"]},
+                )
+                report = self.root / "preflight-runtime.json"
+                self.assertEqual(
+                    payload,
+                    json.loads(report.read_text(encoding="utf-8")),
+                )
+
+    @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
+    def test_preflight_rejects_unavailable_pdftotext_version(self) -> None:
+        for name, source in (
+            ("failed-version", "#!/bin/sh\nexit 1\n"),
+            ("empty-version", "#!/bin/sh\nexit 0\n"),
+        ):
+            with self.subTest(name=name):
+                tool = self.root / name
+                tool.write_text(source, encoding="utf-8")
+                tool.chmod(0o755)
+
+                completed, payload = self.run_preflight(pdftotext=tool)
+
+                self.assertEqual(2, completed.returncode)
+                self.assertIsNone(payload["executables"]["pdftotext"]["version"])
+                self.assertIn(
+                    "RUNTIME_EXECUTABLE_VERSION_UNAVAILABLE:pdftotext",
+                    {item["code"] for item in payload["errors"]},
+                )
+
+    def test_preflight_timeout_version_is_explicitly_invalid(self) -> None:
+        module = load_module()
+        timeout_tool = self.root / "timeout-pdftotext"
+        timeout_tool.write_bytes(self.tool.read_bytes())
+        timeout_tool.chmod(0o755)
+        args = module._parse_args(
+            [
+                "--soffice",
+                str(self.tool),
+                "--pdftoppm",
+                str(self.tool),
+                "--pdffonts",
+                str(self.tool),
+                "--pdftotext",
+                str(timeout_tool),
+                "--fontconfig",
+                str(FONTCONFIG),
+                "--output",
+                str(self.root / "runtime.json"),
+            ]
+        )
+
+        def probe(command, **kwargs):
+            if Path(command[0]).resolve() == timeout_tool.resolve():
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="fake-tool 1.0\n",
+                stderr="",
+            )
+
+        with mock.patch.object(module.subprocess, "run", side_effect=probe):
+            payload = module.inspect_runtime(args)
+
+        self.assertFalse(payload["valid"])
+        self.assertIsNone(payload["executables"]["pdftotext"]["version"])
+        self.assertIn(
+            "RUNTIME_EXECUTABLE_VERSION_UNAVAILABLE:pdftotext",
+            {item["code"] for item in payload["errors"]},
+        )
 
     @unittest.skipUnless(SCRIPT.is_file(), "preflight_runtime.py not implemented")
     def test_valid_runtime_writes_traceable_report(self) -> None:
@@ -58,6 +309,8 @@ class PreflightRuntimeTest(unittest.TestCase):
                     str(executable),
                     "--pdffonts",
                     str(executable),
+                    "--pdftotext",
+                    str(executable),
                     "--fontconfig",
                     str(FONTCONFIG),
                     "--python-module",
@@ -75,6 +328,10 @@ class PreflightRuntimeTest(unittest.TestCase):
             self.assertEqual(payload, json.loads(report.read_text(encoding="utf-8")))
             self.assertTrue(payload["valid"])
             self.assertEqual([], payload["errors"])
+            self.assertEqual(
+                {"soffice", "pdftoppm", "pdffonts", "pdftotext"},
+                set(payload["executables"]),
+            )
             self.assertEqual(
                 str(executable.resolve()), payload["executables"]["soffice"]["path"]
             )
@@ -112,6 +369,8 @@ class PreflightRuntimeTest(unittest.TestCase):
                     str(tool),
                     "--pdffonts",
                     str(tool),
+                    "--pdftotext",
+                    str(tool),
                     "--fontconfig",
                     str(FONTCONFIG),
                     "--output",
@@ -146,6 +405,7 @@ class PreflightRuntimeTest(unittest.TestCase):
                             "soffice": {"version": "different", "sha256": "f" * 64},
                             "pdftoppm": {"version": "different", "sha256": "f" * 64},
                             "pdffonts": {"version": "different", "sha256": "f" * 64},
+                            "pdftotext": {"version": "different", "sha256": "f" * 64},
                         },
                         "fontconfig": {"sha256": "f" * 64},
                     }
@@ -163,6 +423,8 @@ class PreflightRuntimeTest(unittest.TestCase):
                     "--pdftoppm",
                     str(tool),
                     "--pdffonts",
+                    str(tool),
+                    "--pdftotext",
                     str(tool),
                     "--fontconfig",
                     str(FONTCONFIG),
@@ -208,6 +470,8 @@ class PreflightRuntimeTest(unittest.TestCase):
                     str(executable),
                     "--pdffonts",
                     str(executable),
+                    "--pdftotext",
+                    str(executable),
                     "--fontconfig",
                     str(FONTCONFIG),
                     "--output",
@@ -242,6 +506,8 @@ class PreflightRuntimeTest(unittest.TestCase):
                     str(missing),
                     "--pdffonts",
                     str(missing),
+                    "--pdftotext",
+                    str(missing),
                     "--fontconfig",
                     str(FONTCONFIG),
                     "--output",
@@ -262,6 +528,7 @@ class PreflightRuntimeTest(unittest.TestCase):
                     "RUNTIME_EXECUTABLE_MISSING:soffice",
                     "RUNTIME_EXECUTABLE_MISSING:pdftoppm",
                     "RUNTIME_EXECUTABLE_MISSING:pdffonts",
+                    "RUNTIME_EXECUTABLE_MISSING:pdftotext",
                 },
                 codes,
             )

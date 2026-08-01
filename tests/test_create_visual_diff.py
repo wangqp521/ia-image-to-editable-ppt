@@ -130,6 +130,31 @@ class CreateVisualDiffTests(unittest.TestCase):
             self.assertTrue((output / "regions" / "001-header.png").exists())
             self.assertEqual({"requested": 1, "generated": 1, "skipped": 0}, report["region_summary"])
 
+    def test_region_report_preserves_nonzero_origin_xywh_bbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = root / "reference.png"
+            preview = root / "preview.png"
+            self._save(reference, (255, 255, 255))
+            self._save(preview, (250, 250, 250))
+
+            report = MODULE.build_visual_diff(
+                reference,
+                preview,
+                root / "output",
+                regions=[
+                    {
+                        "region_id": "offset",
+                        "source_bbox": [10, 15, 80, 20],
+                    }
+                ],
+            )
+
+            self.assertEqual(
+                [10, 15, 80, 20],
+                report["regions"][0]["source_bbox"],
+            )
+
     def test_invalid_region_is_reported_not_silently_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

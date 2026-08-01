@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import json
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+from tests.fixture_specs import make_asset_fallback_spec, make_minimal_spec
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,95 +22,76 @@ AUTHORITATIVE_REFERENCES = {
     "pictures-and-icons.md",
     "visual-audit-and-delivery.md",
 }
+MARKDOWN_LINK = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 
 
 def chars(name: str) -> int:
     return len((REFERENCES / name).read_text(encoding="utf-8"))
 
 
+def documented_python_commands() -> list[list[str]]:
+    commands: list[list[str]] = []
+    for raw_line in SKILL.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if line.startswith("python3 scripts/"):
+            commands.append(shlex.split(line))
+    return commands
+
+
+def frontmatter(path: Path) -> dict[str, str]:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if not lines or lines[0] != "---":
+        raise AssertionError("missing YAML frontmatter")
+    try:
+        end = lines.index("---", 1)
+    except ValueError as exc:
+        raise AssertionError("unterminated YAML frontmatter") from exc
+    result: dict[str, str] = {}
+    for line in lines[1:end]:
+        key, separator, value = line.partition(":")
+        if separator:
+            result[key.strip()] = value.strip()
+    return result
+
+
+def run_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, *arguments],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 class SkillRuntimeContractTests(unittest.TestCase):
-    def test_three_fixed_verification_profiles_are_explicit(self):
+    def test_skill_metadata_and_agent_interface_are_compatible(self):
+        metadata = frontmatter(SKILL)
+        self.assertEqual(set(metadata), {"name", "description"})
+        self.assertRegex(metadata["name"], r"^[a-z0-9-]{1,64}$")
+        self.assertTrue(metadata["description"])
+        self.assertLessEqual(len(metadata["description"]), 1024)
+
+        agent_metadata = ROOT / "agents" / "openai.yaml"
+        self.assertTrue(agent_metadata.is_file())
+        agent_text = agent_metadata.read_text(encoding="utf-8")
+        for field in ("display_name:", "short_description:", "default_prompt:"):
+            self.assertEqual(agent_text.count(field), 1)
+
+    def test_reference_routes_resolve_to_exactly_the_runtime_reference_set(self):
         runtime = SKILL.read_text(encoding="utf-8")
-        for phrase in (
-            "`verification_profile`",
-            "`rapid`",
-            "`reviewed`",
-            "`strict`",
-            "默认使用 `rapid`",
-            "不得自动升级或降级",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime)
-
-    def test_rapid_contract_is_lightweight_and_not_independently_reviewed(self):
-        combined = SKILL.read_text(encoding="utf-8") + (
-            REFERENCES / "visual-audit-and-delivery.md"
-        ).read_text(encoding="utf-8")
-        for phrase in (
-            "`rapid_validated`",
-            "`not_independently_reviewed`",
-            "不启动独立 reviewer",
-            "不生成 regions 200% 证据",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_prebuild_input_quality_checks_apply_to_all_profiles(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        for phrase in (
-            "写规格前通过 commentary 展示当前坐标定位图并检查",
-            "通过 commentary 展示一次当前页最终图标绿幕汇总图",
-            "仅展示，不设审核门禁",
-            "profile 只控制终态证明成本，不得降低构建前输入质量",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-        self.assertNotRegex(runtime, r"`strict`[^。\n]*坐标定位图")
-        self.assertNotRegex(runtime, r"`strict`[^。\n]*图标裁切绿幕复核图")
-
-    def test_reviewed_contract_is_bounded_and_never_enters_strict(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "`reviewed_passed`",
-            "最多 2 轮",
-            "不得进入 `strict`",
-            "必要区域 200% 证据",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_strict_contract_retains_full_evidence_and_candidate_floor(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "`strict_gate_passed`",
-            "完整 regions 200% 证据",
-            "accepted 是质量下限",
-            "唯一 `candidate.pptx`",
-            "完整哈希绑定",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_multi_page_project_rejects_mixed_profiles(self):
-        combined = SKILL.read_text(encoding="utf-8") + (
-            REFERENCES / "visual-audit-and-delivery.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn("项目级固定模式", combined)
-        self.assertIn("拒绝混合模式", combined)
-
-    def test_exactly_five_authoritative_references_exist(self):
-        self.assertEqual(
-            AUTHORITATIVE_REFERENCES,
-            {path.name for path in REFERENCES.glob("*.md")},
-        )
+        linked = {
+            Path(target).name
+            for target in MARKDOWN_LINK.findall(runtime)
+            if target.startswith("references/")
+        }
+        existing = {path.name for path in REFERENCES.glob("*.md")}
+        self.assertEqual(existing, AUTHORITATIVE_REFERENCES)
+        self.assertEqual(linked, existing)
+        for target in MARKDOWN_LINK.findall(runtime):
+            if target.startswith("references/"):
+                self.assertTrue((ROOT / target).is_file(), target)
 
     def test_runtime_load_budgets(self):
         skill = len(SKILL.read_text(encoding="utf-8"))
@@ -116,461 +105,401 @@ class SkillRuntimeContractTests(unittest.TestCase):
                 "visual-audit-and-delivery.md",
             )
         )
-        self.assertLessEqual(skill + measurement + text + audit, 15000)
-        self.assertLessEqual(skill + measurement + graphics + audit, 15000)
-        self.assertLessEqual(
+        # Attempt 8 documents five immutable pre-review/review commands in the
+        # runtime Skill itself; keep bounded headroom without hiding that fixed
+        # executable contract in a conditionally loaded reference.
+        self.assertLess(skill + measurement + text + audit, 17500)
+        self.assertLess(skill + measurement + graphics + audit, 17500)
+        self.assertLess(
             skill + measurement + text + graphics + pictures + audit, 25000
         )
 
-    def test_skill_keeps_existing_schema_and_structure_tools(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn("schema v2", runtime)
-        self.assertIn("validate_pptx.py", runtime)
-        self.assertNotIn("schema v3", runtime)
-        self.assertIn("旧 schema v2 终态规格", runtime)
-        self.assertIn("重建 visual gate", runtime)
+    def test_documented_page_pipeline_matches_runnable_cli_interfaces(self):
+        commands = documented_python_commands()
+        command_names = [Path(command[1]).name for command in commands]
 
-    def test_native_list_normalization_precedes_structure_validation(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        typography = (REFERENCES / "text-and-editability.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("normalize_native_list_ooxml.py", runtime)
-        self.assertLess(
-            runtime.index("normalize_native_list_ooxml.py"),
-            runtime.index("validate_pptx.py --expected-slides 1"),
-        )
-        for phrase in ("`buFontTx`", "`buSzTx`", "`buClrTx`", "当前字体、字号或颜色快照"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, typography)
+        def only_command_index(script_name: str) -> int:
+            indices = [
+                index
+                for index, command_name in enumerate(command_names)
+                if command_name == script_name
+            ]
+            self.assertEqual(
+                1,
+                len(indices),
+                f"expected exactly one documented {script_name} command",
+            )
+            return indices[0]
 
-    def test_graphics_reference_neutralizes_theme_effects_without_deleting_style(self):
-        graphics = (REFERENCES / "graphics-and-diagrams.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "不得删除整个 `p:style`",
-            "`a:effectRef` 的 `idx` 设为 `0`",
-            "清除 `spPr` 下的显式 `effectLst/effectDag`",
-            "仅用于目标 Shape/Line",
-            "不得作用于表格、图片或 `graphicFrame`",
-            "阴影消失",
-            "裁切",
+        def option_value(command: list[str], option: str) -> str:
+            self.assertEqual(1, command.count(option), command)
+            option_index = next(
+                index for index, token in enumerate(command) if token == option
+            )
+            self.assertLess(option_index + 1, len(command), command)
+            return command[option_index + 1]
+
+        initializer_index = only_command_index("init_reconstruction_spec.py")
+        compiler_index = only_command_index("build_pptx_from_spec.py")
+        structure_index = only_command_index("validate_pptx.py")
+        reconstruction_validator_indices = [
+            index
+            for index, command_name in enumerate(command_names)
+            if command_name == "validate_reconstruction_spec.py"
+        ]
+        self.assertEqual(3, len(reconstruction_validator_indices))
+        authoring_indices = [
+            index
+            for index in reconstruction_validator_indices
+            if option_value(commands[index], "--stage") == "authoring"
+        ]
+        prebuild_indices = [
+            index
+            for index in reconstruction_validator_indices
+            if option_value(commands[index], "--stage") == "prebuild"
+        ]
+        final_indices = [
+            index
+            for index in reconstruction_validator_indices
+            if option_value(commands[index], "--stage") == "final"
+        ]
+        self.assertEqual(1, len(authoring_indices), "authoring command must be unique")
+        self.assertEqual(1, len(prebuild_indices), "prebuild command must be unique")
+        self.assertEqual(1, len(final_indices), "final command must be unique")
+        authoring_index = authoring_indices[0]
+        prebuild_index = prebuild_indices[0]
+        final_index = final_indices[0]
+        self.assertLess(initializer_index, authoring_index)
+        self.assertLess(authoring_index, prebuild_index)
+        self.assertLess(prebuild_index, compiler_index)
+        self.assertLess(compiler_index, structure_index)
+        self.assertLess(structure_index, final_index)
+
+        initializer = commands[initializer_index]
+        for option in ("--source", "--overlay", "--page-id", "--output"):
+            self.assertIn(option, initializer)
+        for validator_index, expected_output in (
+            (authoring_index, "work/authoring-validation.json"),
+            (prebuild_index, "work/prebuild-validation.json"),
+            (final_index, "work/final-validation.json"),
         ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, graphics)
+            validator = commands[validator_index]
+            self.assertIn("--stage", validator)
+            self.assertIn("--output", validator)
+            self.assertEqual(expected_output, option_value(validator, "--output"))
+        compiler = commands[compiler_index]
+        for option in ("--spec", "--prebuild-report", "--output", "--build-report"):
+            self.assertIn(option, compiler)
+        validator = commands[structure_index]
+        for option in ("--expected-slides", "--spec", "--build-report", "--output"):
+            self.assertIn(option, validator)
 
-    def test_single_font_fallback_replaces_candidate_trials(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        typography = (REFERENCES / "text-and-editability.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + typography
-        for phrase in (
-            "`Noto Sans CJK SC`",
-            "`NotoSansCJKsc-Regular`",
-            "项目级只验证一次",
-            "每个最终 PDF",
-            "`pdffonts`",
-            "特殊字符",
-            "意外 fallback",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-        for removed in (
-            "candidates",
-            "candidate_trials",
-            "render_metrics",
-            "font_trial_report",
-            "render_font_trials.py",
-            "2–5 个候选",
-        ):
-            with self.subTest(removed=removed):
-                self.assertNotIn(removed, combined)
-
-    def test_independent_reviewer_contract_is_explicit(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "只读",
-            "不得修改任何文件",
-            "不得读取构建脚本",
-            "P0",
-            "P1",
-            "P2",
-            "source_sha256",
-            "preview_sha256",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_visual_review_is_bounded_to_two_fresh_rounds(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in ("最多 2 轮", "第 2 轮", "不得开启第 3 轮"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime + audit)
-        for phrase in ("全新上下文", "`not_reviewable` 也计入一轮"):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_current_comparison_is_complete_before_each_reviewer(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "进入 reviewer 前",
-            "全页 preview、对照图、overlay、diff 和全部 regions",
-            "上一版本的 preview、全页证据和 reviewer 结论立即失效",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime + audit)
-
-    def test_structure_is_stable_before_each_visual_review(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "每轮视觉审查前",
+        for script_name in {
+            "init_reconstruction_spec.py",
+            "validate_reconstruction_spec.py",
+            "build_pptx_from_spec.py",
             "validate_pptx.py",
-            "终态 reviewer 通过后不得再写入 PPTX",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
+        }:
+            result = run_cli(str(ROOT / "scripts" / script_name), "--help")
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_reviewer_must_report_complete_blocking_inventory(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
+    def test_documented_pre_review_controls_follow_the_fixed_runtime_order(self):
+        commands = documented_python_commands()
+        command_names = [Path(command[1]).name for command in commands]
+
+        def unique(script_name: str, predicate=lambda _command: True) -> int:
+            indices = [
+                index
+                for index, command in enumerate(commands)
+                if Path(command[1]).name == script_name and predicate(command)
+            ]
+            self.assertEqual(1, len(indices), (script_name, indices))
+            return indices[0]
+
+        def option_value(command: list[str], option: str) -> str:
+            self.assertEqual(1, command.count(option), command)
+            index = command.index(option)
+            self.assertLess(index + 1, len(command), command)
+            return command[index + 1]
+
+        ordered = [
+            unique(
+                "validate_reconstruction_spec.py",
+                lambda command: option_value(command, "--stage") == "authoring",
+            ),
+            unique(
+                "validate_reconstruction_spec.py",
+                lambda command: option_value(command, "--stage") == "prebuild",
+            ),
+            unique("build_pptx_from_spec.py"),
+            unique("render_preview.py"),
+            unique("create_rendered_text_geometry.py"),
+            unique("validate_pptx.py"),
+            unique("validate_background_contract.py"),
+            unique("create_visual_diff.py"),
+            unique(
+                "review_admission.py",
+                lambda command: len(command) > 2 and command[2] == "issue",
+            ),
+            unique(
+                "review_admission.py",
+                lambda command: len(command) > 2 and command[2] == "invoke",
+            ),
+            unique(
+                "review_admission.py",
+                lambda command: len(command) > 2
+                and command[2] == "validate-response",
+            ),
+            unique(
+                "validate_reconstruction_spec.py",
+                lambda command: option_value(command, "--stage") == "final",
+            ),
+        ]
+
+        self.assertEqual(ordered, sorted(ordered), command_names)
+
+    def test_documented_pipeline_hands_off_two_immutable_spec_snapshots(self):
+        commands = documented_python_commands()
+
+        def option(command: list[str], name: str) -> str:
+            return command[command.index(name) + 1]
+
+        freezes = [
+            command
+            for command in commands
+            if Path(command[1]).name == "freeze_reconstruction_spec.py"
+        ]
+        self.assertEqual(2, len(freezes))
+        by_purpose = {option(command, "--purpose"): command for command in freezes}
+        self.assertEqual({"build", "pre-review"}, set(by_purpose))
+        self.assertEqual(
+            "work/build-spec-snapshot.json",
+            option(by_purpose["build"], "--output"),
         )
-        for phrase in (
-            "一次返回全部可见 P0/P1",
-            "不得只报告首个问题",
-            "P0/P1 不设数量上限",
-            "coverage",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_core_scope_stays_image_to_editable_ppt_only(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn("唯一核心职责", runtime)
-        self.assertIn("图片高保真地转换为可编辑 PPT", runtime)
-        for prohibited in ("独立平台", "通用系统"):
-            self.assertIn(prohibited, runtime)
-
-    def test_icon_reference_defines_lossless_alpha_only_contract(self):
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        for phrase in (
-            "图标裁切只允许 `alpha_isolation`",
-            "`alpha_isolation`",
-            "只允许改变 alpha",
-            "RGB 必须逐像素一致",
-            "前景不得触边",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, pictures)
-        for phrase in (
-            "background_preserved",
-            "crop_review_evidence",
-            "icon_manifest_sha256",
-            "source_400",
-            "asset_400",
-            "placement_400",
-            "fallback_reason",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertNotIn(phrase, pictures)
-
-    def test_icon_workflow_uses_one_lightweight_xywh_extractor_before_prebuild(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        for phrase in (
-            "extract_icon_asset.py",
-            "--bbox-xywh X,Y,W,H",
-            "展示后不等待确认，直接运行 `validate_reconstruction_spec.py --stage prebuild`",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime)
-        for phrase in (
-            "唯一图标资产生成入口",
-            "`source_bbox=[x,y,w,h]`",
-            "新任务固定 `padding=0`",
-            "开放线框",
-            "封闭区域",
-            "RGB 必须逐像素一致",
-            "背景固定为 `#00FF00`",
-            "不得编写页面专用裁切脚本",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, pictures)
-
-    def test_icon_workflow_has_one_fixed_alpha_path_without_fallback(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        combined = runtime + pictures
-        for phrase in (
-            "固定执行 `alpha_isolation`",
-            "带 bbox 的局部上下文",
-            "前景触边时扩大 bbox",
-            "不存在第二种裁切模式",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_green_preview_is_displayed_once_without_becoming_a_gate(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        measurement = (REFERENCES / "measurement-and-layout.md").read_text(
-            encoding="utf-8"
-        )
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        for phrase in (
-            "写规格前通过 commentary 展示当前坐标定位图",
-            "通过 commentary 展示一次当前页最终图标绿幕汇总图",
-            "展示后不等待确认",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime)
-        for phrase in (
-            "[第 N/总页数] 坐标定位图",
-            "同一来源 SHA-256 下每页只展示一次",
-            "旧坐标定位图立即失效",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, measurement)
-        for phrase in (
-            "[第 N/总页数] 图标透明效果展示（仅展示，不设审核门禁）",
-            "无图标时不生成、不展示",
-            "每页最终图标资产集合只展示一次",
-            "图标资产发生变化时，以新的最终资产集合重新展示一次",
-            "绿幕展示不写入 schema",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, pictures)
-
-    def test_green_preview_tool_replaces_crop_review_tool(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        self.assertIn("create_icon_green_preview.py", runtime)
-        self.assertNotIn("create_icon_crop_review.py", runtime)
-        self.assertTrue((ROOT / "scripts" / "create_icon_green_preview.py").is_file())
-        self.assertFalse((ROOT / "scripts" / "create_icon_crop_review.py").exists())
-
-    def test_local_repairs_use_one_candidate_and_preserve_quality_floor(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "唯一 `candidate.pptx`",
-            "accepted 是质量下限",
-            "未改善目标问题",
-            "不得覆盖 accepted",
-            "受影响区域及相邻边界",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_round_two_requires_every_round_one_p0_p1_to_be_closed(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "第二轮准入",
-            "`modules.high_risk.items`",
-            "全部 P0/P1",
-            "`result=passed`",
-            "不消耗第二轮 reviewer",
-            "不得伪造第二轮记录",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_repair_evidence_is_local_but_reviewer_evidence_is_complete(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        for phrase in (
-            "中间修复只重建受影响区域证据",
-            "进入 reviewer 前",
-            "全页 preview、对照图、overlay、diff 和全部 regions",
-            "终态只显式运行一次",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_round_two_failure_outputs_current_artifacts_with_clear_labels(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        for phrase in (
-            "继续输出当前可用产物",
-            "未通过视觉门禁，含 P0，当前 PPTX 可能不可用",
-            "未通过视觉门禁的可编辑草稿",
-            "当前 PPTX 未完成视觉审核，证据不可审查",
-            "不得称为完整完成或审核通过",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_failed_pages_continue_and_remain_in_merged_deck(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        for phrase in (
-            "失败页输出当前产物后继续处理后续页面",
-            "失败页仍按上传顺序参与合并",
-            "未通过视觉门禁版",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_failed_output_does_not_add_a_new_gate_or_schema(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        self.assertIn("失败分支不新增 schema、validator 或状态机", combined)
-        self.assertNotIn("--stage handoff", combined)
-        self.assertNotIn("schema v3", combined)
-
-    def test_integrity_gates_bind_current_source_objects_and_evidence(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        measurement = (REFERENCES / "measurement-and-layout.md").read_text(encoding="utf-8")
-        pictures = (REFERENCES / "pictures-and-icons.md").read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(encoding="utf-8")
-        combined = runtime + measurement + pictures + audit
-        for phrase in (
-            "`ia:<element_id>`",
-            "`ia:<element_id>:<part>`",
-            "媒体 SHA-256",
-            "final 内重新运行 `validate_pptx.py`",
-            "不得从 clean visual 父目录推导",
-            "--spec <page>/work/page-reconstruction.json",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_runtime_preflight_and_atomic_validator_reports_are_required(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        for phrase in (
-            "preflight_runtime.py",
-            "work/preflight-runtime.json",
-            "--output",
-            "首次运行",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, runtime)
-
-    def test_all_profiles_share_one_stable_libreoffice_renderer(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        for phrase in (
-            "三个模式统一使用稳定版 LibreOffice",
-            "`render_preview.py`",
-            "`PPTX → PDF → PNG`",
-            "`1920×1080`",
-            "`render-report.json`",
-            "不承诺 PowerPoint 原生像素一致",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-
-    def test_font_size_workflow_uses_point_units_and_bounded_preview_calibration(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        typography = (REFERENCES / "text-and-editability.md").read_text(
-            encoding="utf-8"
-        )
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + typography + audit
-        for phrase in (
-            "`runs[].font_size` 固定使用 point（pt）",
-            "不使用固定 96 DPI",
-            "统一预览渲染器",
-            "首次整页预览",
-            "代表性高风险 TextBox",
-            "标题、正文、数字/KPI、列表/表格",
-            "不逐框试排",
-            "不做自动字号搜索",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, combined)
-        self.assertNotIn("目标渲染器", combined)
-
-    def test_visual_diff_cli_consumes_render_report_not_free_preview(self):
-        runtime = SKILL.read_text(encoding="utf-8")
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        combined = runtime + audit
-        self.assertIn("--render-report", combined)
-        self.assertIn("SHA-256 只用于身份与溯源，不是视觉评分", combined)
-        self.assertNotIn(
-            'soffice "-env:UserInstallation=file://$(mktemp -d)"',
-            runtime,
+        self.assertEqual(
+            "work/pre-review-spec-snapshot.json",
+            option(by_purpose["pre-review"], "--output"),
         )
 
-    def test_abnormal_second_render_is_conditional_diagnostic_only(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("只在渲染异常时", audit)
-        self.assertIn("全新空目录复渲染", audit)
-        self.assertIn("正常路径不做双重渲染", audit)
-        self.assertIn("仅对 macOS `SIGABRT` 自动重试一次", audit)
-        self.assertIn("第二次仍失败", audit)
-        self.assertIn("不得切换渲染器或无限重试", audit)
-        self.assertIn("macOS 沙箱环境", audit)
-        self.assertIn("首次渲染即使用沙箱外执行", audit)
-        self.assertIn("自动重试不能替代权限升级", audit)
-
-    def test_same_run_reuse_requires_complete_composite_identity(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "仅限当前页目录内",
-            "PPTX SHA-256",
-            "source SHA-256",
-            "spec SHA-256",
-            "fontconfig SHA-256",
-            "渲染器身份",
-            "渲染尺寸与裁切参数",
-            "证据脚本 SHA-256",
-            "区域定义 SHA-256",
-            "字段齐全且完全一致",
-            "任一字段缺失或不一致",
-            "不得跨任务复用",
+        build_snapshot = "work/build-spec-snapshot.json"
+        for script_name in (
+            "build_pptx_from_spec.py",
+            "validate_pptx.py",
+            "create_visual_diff.py",
         ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
-
-    def test_typography_p1_closure_uses_three_representative_checks(self):
-        audit = (REFERENCES / "visual-audit-and-delivery.md").read_text(
-            encoding="utf-8"
-        )
-        for phrase in (
-            "密集正文",
-            "数字与单位",
-            "换行敏感区域",
-            "同根因差异",
-            "保持未关闭",
+            command = next(
+                command
+                for command in commands
+                if Path(command[1]).name == script_name
+            )
+            self.assertEqual(build_snapshot, option(command, "--spec"))
+        for script_name in (
+            "create_rendered_text_geometry.py",
+            "validate_background_contract.py",
         ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, audit)
+            command = next(
+                command
+                for command in commands
+                if Path(command[1]).name == script_name
+            )
+            self.assertEqual(build_snapshot, command[2])
+
+        issue = next(
+            command
+            for command in commands
+            if Path(command[1]).name == "review_admission.py"
+            and command[2] == "issue"
+        )
+        self.assertEqual(
+            "work/pre-review-spec-snapshot.json",
+            option(issue, "--spec"),
+        )
+
+    def test_documented_reviewer_prompt_is_admission_derived_without_manual_page_id(self):
+        commands = documented_python_commands()
+        review_commands = [
+            command
+            for command in commands
+            if Path(command[1]).name == "review_admission.py"
+        ]
+        self.assertEqual(3, len(review_commands))
+        self.assertTrue(all("--page-id" not in command for command in review_commands))
+        issue = next(command for command in review_commands if command[2] == "issue")
+        invoke = next(command for command in review_commands if command[2] == "invoke")
+        validation = next(
+            command for command in review_commands if command[2] == "validate-response"
+        )
+        for option in (
+            "--spec",
+            "--pptx",
+            "--build-report",
+            "--structure-report",
+            "--render-report",
+            "--text-geometry",
+            "--background-report",
+            "--visual-diff",
+            "--review-round",
+            "--output-dir",
+        ):
+            self.assertIn(option, issue)
+        for option in ("--admission", "--invocation-dir"):
+            self.assertIn(option, invoke)
+        for option in ("--admission", "--invocation", "--response", "--output"):
+            self.assertIn(option, validation)
+
+    def test_generated_schema_matches_public_describe_output(self):
+        schema_path = ROOT / "schemas" / "page-reconstruction-v2.schema.json"
+        self.assertTrue(schema_path.is_file())
+
+        completed = run_cli("scripts/init_reconstruction_spec.py", "--describe")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        described = json.loads(completed.stdout)
+        tracked = json.loads(schema_path.read_text(encoding="utf-8"))
+        self.assertEqual(described["json_schema"], tracked)
+        self.assertEqual(
+            described["contract"]["contract_sha256"],
+            tracked["x-schema-contract-sha256"],
+        )
+
+    def test_documented_initializer_command_executes_with_absolute_inputs(self):
+        initializer = next(
+            command
+            for command in documented_python_commands()
+            if Path(command[1]).name == "init_reconstruction_spec.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            make_minimal_spec(root)
+            source = (root / "source.png").resolve()
+            overlay = (root / "coordinate-overlay.png").resolve()
+            output = (root / "initialized.json").resolve()
+            replacements = {
+                "<absolute-source>": str(source),
+                "<absolute-clean-visual>": str(source),
+                "<absolute-overlay>": str(overlay),
+                "<absolute-output>": str(output),
+                "page-NNN": "page-001",
+                "<rapid|reviewed|strict>": "strict",
+            }
+            resolved = [replacements.get(token, token) for token in initializer]
+            for option in ("--source", "--visual", "--overlay", "--output"):
+                value = Path(resolved[resolved.index(option) + 1])
+                self.assertTrue(value.is_absolute(), f"{option} must document an absolute path")
+
+            completed = run_cli(*resolved[1:])
+
+            self.assertEqual(completed.returncode, 0, completed.stderr or completed.stdout)
+            self.assertTrue(output.is_file())
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["verification_profile"], "strict")
+            self.assertEqual(payload["content_reference"]["path"], str(source))
+            self.assertEqual(payload["clean_visual_reference"]["path"], str(source))
+
+    def test_documented_script_entrypoints_exist_and_offer_help(self):
+        paths = {ROOT / command[1] for command in documented_python_commands()}
+        self.assertTrue(paths)
+        for path in paths:
+            with self.subTest(path=path.name):
+                self.assertTrue(path.is_file())
+                result = run_cli(str(path), "--help")
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_documented_pipeline_completes_a_three_way_round_trip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec_path = root / "page-reconstruction.json"
+            authoring_path = root / "authoring-validation.json"
+            prebuild_path = root / "prebuild-validation.json"
+            pptx_path = root / "page.pptx"
+            build_report_path = root / "build-report.json"
+            structure_path = root / "structure-validation.json"
+            spec_path.write_text(
+                json.dumps(make_minimal_spec(root), ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            authoring = run_cli(
+                "scripts/validate_reconstruction_spec.py",
+                str(spec_path),
+                "--stage",
+                "authoring",
+                "--output",
+                str(authoring_path),
+            )
+            self.assertEqual(authoring.returncode, 0, authoring.stdout)
+            self.assertEqual(
+                "authoring",
+                json.loads(authoring_path.read_text(encoding="utf-8"))["stage"],
+            )
+            prebuild = run_cli(
+                "scripts/validate_reconstruction_spec.py",
+                str(spec_path),
+                "--stage",
+                "prebuild",
+                "--output",
+                str(prebuild_path),
+            )
+            self.assertEqual(prebuild.returncode, 0, prebuild.stdout)
+            build = run_cli(
+                "scripts/build_pptx_from_spec.py",
+                "--spec",
+                str(spec_path),
+                "--prebuild-report",
+                str(prebuild_path),
+                "--output",
+                str(pptx_path),
+                "--build-report",
+                str(build_report_path),
+            )
+            self.assertEqual(build.returncode, 0, build.stdout)
+            validate = run_cli(
+                "scripts/validate_pptx.py",
+                str(pptx_path),
+                "--expected-slides",
+                "1",
+                "--spec",
+                str(spec_path),
+                "--build-report",
+                str(build_report_path),
+                "--output",
+                str(structure_path),
+            )
+            self.assertEqual(validate.returncode, 0, validate.stdout)
+            report = json.loads(structure_path.read_text(encoding="utf-8"))
+            self.assertTrue(report["valid"], report["errors"])
+            self.assertGreater(report["build_report_objects_checked"], 0)
+            self.assertGreater(report["representation_facts_checked"], 0)
+
+    def test_full_editability_asset_fallback_fails_before_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            spec_path = root / "page-reconstruction.json"
+            report_path = root / "prebuild-validation.json"
+            spec_path.write_text(
+                json.dumps(
+                    make_asset_fallback_spec(root, required_editability="full"),
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            completed = run_cli(
+                "scripts/validate_reconstruction_spec.py",
+                str(spec_path),
+                "--stage",
+                "prebuild",
+                "--output",
+                str(report_path),
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            self.assertFalse(report["valid"])
+            self.assertIn(
+                "REPRESENTATION_FALLBACK_FORBIDDEN",
+                {issue["code"] for issue in report["errors"]},
+            )
+            self.assertFalse((root / "page.pptx").exists())
+            self.assertFalse((root / "build-report.json").exists())
 
 
 if __name__ == "__main__":

@@ -28,7 +28,15 @@ SPEC.loader.exec_module(VALIDATOR)
 
 
 class ValidatePptxPictureCoverageTest(unittest.TestCase):
-    def _presentation(self, directory: Path, name: str, *, full_picture: bool, text: bool) -> Path:
+    def _presentation(
+        self,
+        directory: Path,
+        name: str,
+        *,
+        full_picture: bool,
+        text: bool,
+        picture_bbox: tuple[int, int, int, int] | None = None,
+    ) -> Path:
         image_path = directory / "source.png"
         Image.new("RGB", (1600, 900), "#27506b").save(image_path)
 
@@ -36,7 +44,9 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         presentation.slide_width = 12_192_000
         presentation.slide_height = 6_858_000
         slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-        if full_picture:
+        if picture_bbox is not None:
+            slide.shapes.add_picture(str(image_path), *picture_bbox)
+        elif full_picture:
             slide.shapes.add_picture(
                 str(image_path), 0, 0, presentation.slide_width, presentation.slide_height
             )
@@ -153,6 +163,74 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
         self.assertNotIn("FULL_SLIDE_PICTURE_ONLY", result["errors"])
         self.assertIn("FULL_SLIDE_PICTURE_WITH_EDITABLE_OBJECTS", result["warnings"])
 
+    def test_near_full_slide_picture_uses_shared_threshold(self) -> None:
+        width = 12_192_000
+        height = 6_858_000
+        cases = (
+            ("one-emu-inset", (1, 1, width - 2, height - 2), True),
+            (
+                "one-percent-boundary",
+                (
+                    width // 100,
+                    height // 100,
+                    width - 2 * (width // 100),
+                    height - 2 * (height // 100),
+                ),
+                True,
+            ),
+            (
+                "outside-margin-threshold",
+                (
+                    width // 100 + 1,
+                    height // 100,
+                    width - 2 * (width // 100 + 1),
+                    height - 2 * (height // 100),
+                ),
+                False,
+            ),
+            ("local", (914_400, 914_400, 914_400, 514_350), False),
+        )
+        for name, bbox, expected_risk in cases:
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    output = self._presentation(
+                        Path(temp_dir),
+                        f"{name}.pptx",
+                        full_picture=False,
+                        text=True,
+                        picture_bbox=bbox,
+                    )
+                    result = VALIDATOR.validate_pptx(
+                        output, expected_slides=1
+                    )
+
+                self.assertEqual(
+                    result["full_slide_picture_risk"], expected_risk
+                )
+                self.assertEqual(
+                    "FULL_SLIDE_PICTURE_WITH_EDITABLE_OBJECTS"
+                    in result["warnings"],
+                    expected_risk,
+                )
+
+    def test_degenerate_picture_bbox_fails_closed_without_internal_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = self._presentation(
+                Path(temp_dir),
+                "zero-width-picture.pptx",
+                full_picture=False,
+                text=True,
+                picture_bbox=(0, 0, 12_192_000, 6_858_000),
+            )
+            presentation = Presentation(output)
+            presentation.slides[0].shapes[0].width = 0
+            presentation.save(output)
+            result = VALIDATOR.validate_pptx(output, expected_slides=1)
+
+        self.assertTrue(result["valid"])
+        self.assertFalse(result["full_slide_picture_risk"])
+        self.assertFalse(result["picture_objects"][0]["full_slide"])
+
     def test_validation_result_binds_current_pptx_sha256(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output = self._presentation(
@@ -162,6 +240,32 @@ class ValidatePptxPictureCoverageTest(unittest.TestCase):
             result = VALIDATOR.validate_pptx(output, expected_slides=1)
 
         self.assertEqual(expected, result["pptx_sha256"])
+
+    def test_visible_object_snapshot_has_stable_postbuild_facts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = self._presentation(
+                Path(temp_dir), "stable-facts.pptx", full_picture=True, text=True
+            )
+            result = VALIDATOR.validate_pptx(output, expected_slides=1)
+
+        visible = [
+            item for item in result["structure_objects"] if item["visible"] is True
+        ]
+        self.assertEqual(2, len(visible))
+        for item in visible:
+            self.assertIsInstance(item["object_name"], str)
+            self.assertIsInstance(item["layer"], int)
+            self.assertGreater(item["layer"], 0)
+            self.assertIn(item["object_type"], {"sp", "pic"})
+            self.assertIn("media_sha256", item)
+            if item["object_type"] != "pic":
+                self.assertIsNone(item["media_sha256"])
+            self.assertEqual(
+                [item["x"], item["y"], item["cx"], item["cy"]], item.get("bbox")
+            )
+        picture = next(item for item in result["picture_objects"])
+        self.assertRegex(picture["media_sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(picture["full_slide"])
 
     def test_unreadable_pptx_returns_structured_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1101,6 +1205,31 @@ class ValidatePptxCliOutputTest(unittest.TestCase):
             self.assertEqual(0, completed.returncode, completed.stderr)
             self.assertTrue(report.is_file())
             self.assertEqual(json.loads(completed.stdout), json.loads(report.read_text(encoding="utf-8")))
+
+
+class ValidatePptxBuildReportMigrationTest(unittest.TestCase):
+    def test_legacy_build_report_requires_rebuild_for_background_fields(self) -> None:
+        from tests.fixture_specs import make_minimal_spec
+        from tests.test_build_pptx_from_spec import compile_fixture
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            spec = make_minimal_spec(root)
+            pptx, report = compile_fixture(root / "compile", spec)
+            for field in (
+                "content_spec_sha256",
+                "input_spec_sha256",
+                "background_summary",
+                "background_pictures",
+            ):
+                report.pop(field)
+
+            result = VALIDATOR.validate_pptx(pptx, 1, spec, report)
+
+        self.assertIn("BUILD_REPORT_INVALID", result["errors"])
+        self.assertTrue(
+            any("legacy build report" in warning for warning in result["warnings"])
+        )
 
 
 if __name__ == "__main__":
