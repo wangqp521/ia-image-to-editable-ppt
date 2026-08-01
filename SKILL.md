@@ -1,5 +1,5 @@
 ---
-name: ia-image-to-editable-ppt
+name: image-to-editable-ppt
 description: Use when converting one or more uploaded images, screenshots, exported slides, or photographed presentation pages into high-fidelity editable 16:9 PPTX files.
 ---
 
