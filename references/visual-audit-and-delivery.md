@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `rapid` | 当前 preview、对照图、overlay、diff、`visual-diff.json`；不生成 regions 200% 证据 | 不启动独立 reviewer，visual status 为 `not_independently_reviewed` | `rapid_validated` |
 | `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `reviewed_passed` |
-| `strict` | 全页证据 + 完整 regions 200% 证据 + accepted/candidate 证据链 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
+| `strict` | 全页 + 完整 regions 200%；发生 candidate 时保留 initial/candidate 链 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
 
 三个模式共享复刻、prebuild、结构、tripwire、对象身份和失败诚实性。profile 只控制终态证明成本，不得降低构建前输入质量。
 
@@ -25,28 +25,32 @@ macOS 沙箱首次渲染即升级权限；仅 `SIGABRT` 自动重试一次。异
 ## 三个检查点
 
 1. **自动 authoring/prebuild：** 编写期反复跑等价只读 `authoring`（非门禁）；冻结后只跑一次正式 `prebuild`，失败不生成。
-2. **自动结构门禁：** 每轮视觉审查前把当前 PPTX、唯一 schema 与同次 compiler build report 一起传给 `validate_pptx.py --build-report`；结构写入修正后用新事务产物重验，直至通过。
-3. **独立视觉门禁：** 主代理生成证据，全新上下文视觉子代理只读判断；指标不能自动批准。终态 reviewer 通过后不得再写入 PPTX，最后运行 schema v2 final 校验。
+2. **初始诊断：** compiler 后仅 render → text geometry → structure；一次列全 P0/P1，不生成 background/visual/review/final。
+3. **最终门禁：** 只对 final current 补齐一次 structure/background/visual/profile 证据；`reviewed|strict` 再独立只读审查。指标不自动批准，审查后禁改 PPTX，最后 final。
 
 用户反馈、圈选和门禁差异写入唯一 `modules.high_risk.items`；未触发时不建空清单或第二套状态机。
 
-## 修复候选与当前视觉证据
+## 唯一综合候选与当前视觉证据
 
-最近通过门禁的 PPTX 是质量下限 accepted；每批只从它生成唯一 `candidate.pptx`。中间只重建 finding、受影响区及相邻边界；目标改善、无新 P0/P1 且结构通过才晋级，否则不覆盖 accepted。晋级后、进入 reviewer 前重建全页 preview/对照/overlay/diff 及当前 profile 要求的 regions；PPTX 再写入即废弃旧证据与结论。
+每页最多 `initial + 1 comprehensive candidate`（2 次 compiler/render）。初始 preview/text/structure 后按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1；同根因以代表对象验证后批量修正。
+
+无修正则 initial 成为 current 并同哈希补证，任何 profile 都不强制制造 candidate；有修正才新建唯一 candidate，启动即耗额。仅改善、无新 P0/P1 且结构通过才晋级；同 preview、无改善、结构/视觉失败、仍有 P0/P1 或 `not_reviewable` 均停止，交付较好版本和失败状态。
+
+candidate 中间只查 finding 与邻界；晋级后才生成全页/profile 证据。source/grid 未变复用 overlay；PPTX 写入即废弃旧绑定。
 
 ### 当前任务内证据复用
 
-复用仅限当前页目录内。PPTX SHA-256、source SHA-256、spec SHA-256、fontconfig SHA-256、渲染器身份、渲染尺寸与裁切参数、证据脚本 SHA-256、区域定义 SHA-256 必须字段齐全且完全一致；任一字段缺失或不一致即重建。不得跨任务复用。
+仅当前页复用；PPTX/source/spec、runtime/fontconfig/renderer、preview/crop、validator/证据脚本、regions 身份须齐全一致，否则重建。相同身份已通过的 render/text/structure report 直接补证，禁跨任务复用。
 
 完整证据用 `create_visual_diff.py --render-report ...` 生成；检查身份、左右顺序、区域存在性和 `region_summary.skipped==0`。缺证据、错页、旧 preview、拉伸/裁切或非法区域时为 `not_reviewable`。
 
 tripwire 只单向阻断：批准基线触发即失败，未触发不能自动通过。无基线固定 `available=false, triggered=null, reason=no_approved_baseline`。全页指标不能覆盖局部缺失、文字、换行、crop、merge 或 connector 错误。
 
-## 最多两轮与批量收敛
+## reviewer 最多两轮
 
-一轮是一次绑定当前 source/preview 的独立 reviewer 调用；准备证据不计轮次。每页最多 2 轮，第 1 轮通过即停止；`not_reviewable` 也计入一轮。每轮启动全新上下文。
+reviewer 调用每页最多 2 轮，第 1 轮通过即停；`not_reviewable` 也计轮，每轮全新上下文。两轮 reviewer 不等于两个 candidate，不能增加构建额度。
 
-reviewer 必须一次返回全部可见 P0/P1，不得只报告首个问题，P0/P1 不设数量上限。第 2 轮仍有 P0/P1 或 `not_reviewable` 时停止，不得开启第 3 轮或降级。
+reviewer 一次返回全部 P0/P1。额度未用时把第 1 轮 findings 合入唯一 candidate；已用则失败，禁另开。第 2 轮仍失败即停，禁第 3 轮或降级。
 
 ### 第二轮准入
 

@@ -38,6 +38,22 @@ def documented_python_commands() -> list[list[str]]:
     return commands
 
 
+def documented_section_commands(heading: str) -> list[list[str]]:
+    lines = SKILL.read_text(encoding="utf-8").splitlines()
+    try:
+        start = lines.index(heading) + 1
+    except ValueError:
+        return []
+    commands: list[list[str]] = []
+    for raw_line in lines[start:]:
+        if raw_line.startswith("### "):
+            break
+        line = raw_line.strip()
+        if line.startswith("python3 scripts/"):
+            commands.append(shlex.split(line))
+    return commands
+
+
 def frontmatter(path: Path) -> dict[str, str]:
     text = path.read_text(encoding="utf-8")
     lines = text.splitlines()
@@ -257,6 +273,57 @@ class SkillRuntimeContractTests(unittest.TestCase):
         ]
 
         self.assertEqual(ordered, sorted(ordered), command_names)
+
+    def test_initial_diagnostic_and_final_current_have_distinct_validation_costs(self):
+        initial = documented_section_commands("### 初始构建：诊断级验证")
+        final_current = documented_section_commands("### 最终 current：完整验证")
+        initial_names = [Path(command[1]).name for command in initial]
+        final_names = [Path(command[1]).name for command in final_current]
+
+        self.assertTrue(initial_names, "initial diagnostic command section is required")
+        self.assertTrue(final_names, "final-current command section is required")
+        self.assertEqual(
+            [
+                "validate_reconstruction_spec.py",
+                "freeze_reconstruction_spec.py",
+                "validate_reconstruction_spec.py",
+                "build_pptx_from_spec.py",
+                "render_preview.py",
+                "create_rendered_text_geometry.py",
+                "validate_pptx.py",
+            ],
+            initial_names,
+        )
+        for expensive_intermediate in (
+            "validate_background_contract.py",
+            "create_visual_diff.py",
+            "review_admission.py",
+        ):
+            self.assertNotIn(expensive_intermediate, initial_names)
+        self.assertFalse(
+            any(
+                Path(command[1]).name == "validate_reconstruction_spec.py"
+                and "--stage" in command
+                and command[command.index("--stage") + 1] == "final"
+                for command in initial
+            )
+        )
+
+        self.assertIn("validate_background_contract.py", final_names)
+        self.assertIn("create_visual_diff.py", final_names)
+        self.assertIn("validate_reconstruction_spec.py", final_names)
+        self.assertTrue(
+            any(
+                Path(command[1]).name == "validate_reconstruction_spec.py"
+                and "--stage" in command
+                and command[command.index("--stage") + 1] == "final"
+                for command in final_current
+            )
+        )
+        self.assertLess(
+            final_names.index("validate_background_contract.py"),
+            final_names.index("create_visual_diff.py"),
+        )
 
     def test_documented_pipeline_hands_off_two_immutable_spec_snapshots(self):
         commands = documented_python_commands()

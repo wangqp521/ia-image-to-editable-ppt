@@ -23,20 +23,28 @@ schema v2 是唯一 Layout IR，compiler 是唯一构建入口；保留结构/�
 |---|---|---|---|
 | `rapid` | 默认 | `rapid_validated` | 主代理结构/整页差异/终态绑定；无 reviewer/regions 200% 证据 |
 | `reviewed` | 明确“独立复核” | `reviewed_passed` | 独立 reviewer≤2 轮；仅必要 regions 200%；禁转 `strict` |
-| `strict` | 明确“严格审核” | `strict_gate_passed` | 完整 regions 200%、candidate 下限、≤2 轮独立审查、哈希绑定 |
+| `strict` | 明确“严格审核” | `strict_gate_passed` | 完整 regions 200%、发生 candidate 时的证据链、≤2 轮独立审查、哈希绑定 |
 
 显式规格状态：构建中 `pending`；失败为 `rapid_validation_failed`/`reviewed_failed`/`strict_gate_failed`。旧规格缺 profile 仅兼容为 `strict`；新任务必填。
 
 ## 单页流程
 
-1. 每页独立目录；非续作写 `session_reuse.mode=fresh_reconstruction`。PPTX、规格、脚本、资产仅主代理写入。
-2. 首页以稳定 LibreOffice/`pdftoppm`/`pdffonts`/fontconfig 跑 `preflight_runtime.py`，原子写 `work/preflight-runtime.json`；拒绝开发/alpha/beta/rc。后页用 `--expected-runtime` 锁定。测量后、写规格前用 commentary 展示/检查坐标图。
-3. 坐标图后运行 initializer（source=clean visual 可省 `--visual`）：只绑身份/尺寸/envelope，不声称内容/coverage。读取同源 schema/`--describe`，只补当页事实且不另造 schema。未知字体用 `Noto Sans CJK SC`。图标 bbox 后 `alpha_isolation`；触边扩框重跑；绿幕仅展示，非门禁/等待。
+每页独立目录；非续作写 `session_reuse.mode=fresh_reconstruction`，仅主代理写产物。candidate 使用新事务目录，禁覆盖 initial/current。
+
+1. 并行启动稳定 runtime preflight、coordinate overlay、source hash/尺寸；输出隔离，任一失败不消费部分结果。后页锁定 runtime；坐标图照常展示。
+2. 展示后一次盘点全页，把全部明确 `--point/--bbox` 合为一次测量；仅触边、污染、遮挡/低清或报告无效时二测。
+3. 全部图标 bbox 固定后并发运行独立单图标 extractor；只重跑失败/触边项，暂不生成绿幕。
+4. runtime/overlay/source identity 就绪后运行 initializer（source=visual 可省 `--visual`），完成 spec 并绑定最终图标，再生成一次绿幕。未知字体用 `Noto Sans CJK SC`。
 
 ```bash
 python3 scripts/init_reconstruction_spec.py --source <absolute-source> --visual <absolute-clean-visual> --overlay <absolute-overlay> --page-id page-NNN --profile <rapid|reviewed|strict> --output <absolute-output>
 ```
-4. 反复跑只读 authoring 修错。最后一次通过即 no-overwrite 冻结 `work/build-spec-snapshot.json`；prebuild 至 visual diff 只读它，工作 spec 仅作 gate/终态回写。固定顺序为 `authoring → prebuild → compiler → render → rendered text geometry → structure → background postbuild → visual diff → review admission → invocation → independent reviewer → response validation → final`。compiler 仅接 passing prebuild；禁平行 IR/静默降级；full unsupported fail closed。
+
+5. 只读 authoring 一次修全错误，通过后 no-overwrite 冻结 snapshot；compiler 仅接 passing prebuild，禁平行 IR/降级。
+
+### 初始构建：诊断级验证
+
+initial 只跑 `authoring → prebuild → compiler → render → text geometry → structure`；geometry 前禁建 candidate，不生成 background/visual diff/review/final。
 
 ```bash
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage authoring --output work/authoring-validation.json
@@ -46,6 +54,15 @@ python3 scripts/build_pptx_from_spec.py --spec work/build-spec-snapshot.json --p
 python3 scripts/render_preview.py work/page.pptx --runtime work/preflight-runtime.json --output-dir preview/<pptx-sha256>
 python3 scripts/create_rendered_text_geometry.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --render-report preview/<pptx-sha256>/render-report.json --runtime work/preflight-runtime.json --output work/rendered-text-geometry.json
 python3 scripts/validate_pptx.py work/page.pptx --expected-slides 1 --spec work/build-spec-snapshot.json --build-report work/build-report.json --output work/structure-validation.json
+```
+
+一次列全 P0/P1，同根因批量形成唯一修正集合。每页最多 `initial + 1 comprehensive candidate`（2 次 compiler/render）；启动即耗额，失败/回退/同 preview/仍有 P0/P1 时诚实失败。reviewer 轮次不增额度。细则见[视觉审计与交付](references/visual-audit-and-delivery.md)。
+
+### 最终 current：完整验证
+
+只对 final current 补齐一次完整证据；同哈希且全部身份一致时复用 initial reports，否则作废。candidate 存在时证据只绑定 candidate。
+
+```bash
 python3 scripts/validate_background_contract.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report work/structure-validation.json --output work/background-contract.json
 python3 scripts/create_visual_diff.py <source> --render-report preview/<pptx-sha256>/render-report.json --spec work/build-spec-snapshot.json --output-dir comparisons/visual-diff --profile <rapid|reviewed|strict>
 python3 scripts/freeze_reconstruction_spec.py work/page-reconstruction.json --purpose pre-review --output work/pre-review-spec-snapshot.json
@@ -55,8 +72,7 @@ python3 scripts/review_admission.py validate-response --admission work/review-ad
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage final --output work/final-validation.json
 ```
 
-5. visual diff 后回写 background/text/structure/render/visual、tripwire、editability、P0/P1 关闭事实，再冻结 pre-review snapshot；之后仅写 post-review 字段。`rapid` 跳过该快照和 review 四步；`reviewed|strict` 的 issue 只读快照，只把 admission prompt 交给全新只读 reviewer，保存原始 JSON 后 validate-response。禁手写 prompt/page ID。文字系统差异按[文字与可编辑性](references/text-and-editability.md)校准；门禁按[视觉审计与交付](references/visual-audit-and-delivery.md)。
-6. final 必须绑定 production background/text 证据；`reviewed|strict` 还必须绑定 admission/invocation/response-validation。终态只运行上述一次 final；失败不切换模式、不伪造通过状态。
+visual diff 后回写各 gate、tripwire 和 P0/P1 关闭事实，再冻结 pre-review snapshot。`rapid` 跳过 freeze/review；`reviewed|strict` 把 admission prompt 交给全新只读 reviewer并验证原始响应。final 绑定 current 证据；candidate 未收敛则失败交付，禁降级或伪造通过。
 
 ## 自动 preflight 和测量工具
 
@@ -64,7 +80,7 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 ```bash
 python3 scripts/create_coordinate_overlay.py <source> --output <page>/work/coordinate-overlay.png
-python3 scripts/inspect_image_region.py <source> --output-dir <page>/work/measurements --point X,Y --bbox LEFT,TOP,RIGHT,BOTTOM
+python3 scripts/inspect_image_region.py <source> --output-dir <page>/work/measurements --point X1,Y1 --point X2,Y2 --bbox L1,T1,R1,B1 --bbox L2,T2,R2,B2
 python3 scripts/extract_icon_asset.py <source> --icon-id <id> --bbox-xywh X,Y,W,H --output <page>/assets/icons/<id>.png
 python3 scripts/create_icon_green_preview.py <page>/work/page-reconstruction.json --output <page>/comparisons/icon-alpha-preview.png
 python3 scripts/preflight_runtime.py --soffice <stable-soffice> --pdftoppm <pdftoppm> --pdffonts <pdffonts> --fontconfig assets/fontconfig-macos.conf --output <page>/work/preflight-runtime.json

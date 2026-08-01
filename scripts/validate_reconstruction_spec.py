@@ -170,6 +170,38 @@ def _valid_bbox(value: Any) -> bool:
     )
 
 
+def _canonical_rotation_text(value: int | float) -> str:
+    canonical = value % 360
+    if float(canonical).is_integer():
+        return str(int(canonical))
+    return str(canonical)
+
+
+def _validate_canonical_element_rotation(
+    element: dict[str, Any],
+    index: int,
+    stage: str,
+    errors: list[dict[str, str]],
+) -> None:
+    if stage == "final":
+        return
+    style = element.get("style")
+    if not isinstance(style, dict):
+        return
+    rotation = style.get("rotation")
+    if not _is_number(rotation) or not math.isfinite(float(rotation)):
+        return
+    if 0 <= rotation < 360:
+        return
+    _error(
+        errors,
+        "SPEC_ROTATION_NOT_CANONICAL",
+        f"elements[{index}].style.rotation",
+        "rotation must use canonical [0, 360) form; "
+        f"use {_canonical_rotation_text(rotation)}",
+    )
+
+
 def _slide_bbox_unit_suspect(
     source_bbox: Any,
     slide_bbox: Any,
@@ -1485,6 +1517,29 @@ def _validate_paragraphs(
             f"{path.rsplit('.', 1)[0]}.text_box.paragraph_breaks",
             f"expected {expected_breaks!r}",
         )
+        return
+
+    newline_spans = [match.span() for match in re.finditer(r"[\r\n]+", text)]
+    for index, paragraph_break in enumerate(actual_breaks):
+        if not isinstance(paragraph_break, int) or isinstance(paragraph_break, bool):
+            continue
+        conflict = next(
+            (
+                (start, end)
+                for start, end in newline_spans
+                if start <= paragraph_break <= end
+            ),
+            None,
+        )
+        if conflict is None:
+            continue
+        start, end = conflict
+        _error(
+            errors,
+            "SPEC_PARAGRAPH_BREAK_ENCODING_CONFLICT",
+            f"{path.rsplit('.', 1)[0]}.text_box.paragraph_breaks[{index}]",
+            f"paragraph boundary {paragraph_break} duplicates text newline [{start}, {end})",
+        )
 
 
 def _validate_typography(
@@ -2038,6 +2093,12 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             if not isinstance(element.get("style"), dict) or not isinstance(element.get("content"), dict):
                 _error(errors, "SPEC_ELEMENT_PAYLOAD_INVALID", path, "style and content must be objects")
             else:
+                _validate_canonical_element_rotation(
+                    element,
+                    index,
+                    stage,
+                    errors,
+                )
                 errors.extend(
                     issue.as_dict() for issue in validate_element_contract(element)
                 )

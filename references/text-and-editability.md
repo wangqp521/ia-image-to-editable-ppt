@@ -2,7 +2,7 @@
 
 ## 来源文本容器
 
-内容逐字服从 `content_reference`。一个来源容器对应一个 `TextBox/TextFrame`；自然段、同源列表和混合样式不按视觉行或条目拆框，自动折行不写硬回车，只有来源本来独立时才拆框。
+内容逐字服从 `content_reference`。一个来源容器对应一个 `TextBox/TextFrame`；不按视觉行拆框，自动折行不写硬回车。`paragraphs[]`/`paragraph_breaks[]` 已表达边界时，`text` 禁用 CR/LF 重复表达；保留真实 Paragraph。
 
 `modules.typography.items[]` 用唯一 `element_id` 绑定文字，保存 text、runs、paragraphs、TextBox 与字体声明；每项只有一个 `selected_font`，runs/paragraphs 连续覆盖全文，坐标用 EMU。生成前不写最终 OOXML ID。
 
@@ -36,10 +36,10 @@ scale_pt_per_source_px =
 
 调整顺序：字体 → 字号 → box → margin → 字距 → 行/段距；不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。candidate 只检查目标框和相邻边界；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
 
-render 后、structure 前必须运行 `create_rendered_text_geometry.py`，用当前 spec/PPTX/build/render/runtime 从 PDF bbox 重算原生文字几何。溢出容差在所有 profile 固定为 **1.5 pt**：`<=1.5 pt` 才可通过，`>1.5 pt` 必须失败；不得按页面、字体或 profile 改写容差。`rendered-text-geometry.json` 必须与当前 `content_spec_sha256`、build report 及输入文件身份一致；不得手写 `valid=true`。
+每次 render 后、structure 前立即生成 rendered text geometry；初始 geometry 前禁消耗 candidate。用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出容差固定 **1.5 pt**，报告须绑定当前 spec/PPTX/build/render/runtime，禁手写通过。
 
 ## 特殊文本与最低可编辑性
 
-旋转、竖排、上下标、公式、化学式和 WordArt 写入 `modules.special_text`；优先原生 TextBox/Run。仅无法可靠识别且原生表示明显失真时图片化最小字形，周围文字仍可编辑；保持阅读顺序、rotation、方向、bbox、基线和公式结构。
+特殊文本写入 `modules.special_text`，优先原生。新任务 element rotation 在 authoring/prebuild 用 `[0,360)`，如 `-25→335`，不留到 candidate；legacy final 可兼容负角。确实无法原生还原时才图片化最小字形。
 
 文字、数字、表格数据和基础结构须可独立选择；照片与复杂装饰只覆盖最小范围。最终检查选择粒度、Text Run、Paragraph、bullet 和图片化风险。

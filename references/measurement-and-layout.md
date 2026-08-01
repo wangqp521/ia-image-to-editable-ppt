@@ -6,7 +6,9 @@
 
 `content_reference` 唯一裁决文字/数字/单位/数量/分组/语义；`clean_visual_reference` 唯一裁决坐标/比例/颜色/字体观感/图标/纹理/层级。直通页均指原图；清洗页内容仍服从原图，清洗改动禁入 PPTX；页间不借事实。
 
-preflight 绑定输入路径/hash、尺寸、边界。运行 `create_coordinate_overlay.py`，按需运行 `inspect_image_region.py`。写规格前通过 commentary 以 `[第 N/总页数] 坐标定位图` 展示 PNG；同一来源 SHA-256 每页一次。将 overlay path/hash、source hash、grid、manifest、`inspection=passed` 写入 `modules.page_layout.coordinate_overlay_evidence`。来源或 grid 改变即重建展示；各 profile 不得跳过。工具证据不是新事实源。
+并行启动 runtime preflight、coordinate overlay 和 source hash/尺寸；输出隔离，任一失败不得消费部分结果。写规格前以 `[第 N/总页数] 坐标定位图` 展示 PNG；同源每页一次。将 overlay path/hash、source hash、grid、manifest、`inspection=passed` 写入 `coordinate_overlay_evidence`。来源/grid 改变即重建；各 profile 不跳过。
+
+展示后按 frame/mapping → regions → 锚点/层级 → 高风险文字/数据 → 图片/图标 → 颜色完成一次盘点。把明确点位合为一次重复 `--point/--bbox` 调用；仅触边、邻近污染、遮挡/低清或报告无效时二测对应局部，禁多轮小测量。
 
 ## 唯一 schema v2 规格
 
@@ -26,6 +28,6 @@ preflight 绑定输入路径/hash、尺寸、边界。运行 `create_coordinate_
 
 ## 生成与修正
 
-顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。全局缩放/区域比例错先修全局；局部仅修目标及相邻受影响对象。禁用缩小字号/硬换行/移动单项掩盖区域错，禁整页图片兜底。
+顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。初始 preview 后一次检查全页；全局缩放/区域比例错先修全局，再把同根因影响的对象批量写入唯一综合修正集合。局部仅修目标及相邻受影响对象。禁用缩小字号/硬换行/移动单项掩盖区域错，禁整页图片兜底。
 
 图片保宽高比；`cover` 须有焦点/偏移证据，禁裁主体。圆形须正圆。原图无线/渐变/效果时禁补造。`editable_object_count` 仅作结构证据，不证明质量。

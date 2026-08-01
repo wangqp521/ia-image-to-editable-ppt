@@ -429,6 +429,54 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         ):
             MODULE.validate_spec(valid_spec(), stage="draft")
 
+    def test_authoring_rejects_all_noncanonical_element_rotations(self):
+        candidate = valid_spec()
+        candidate["elements"][0]["style"]["rotation"] = -25
+        candidate["elements"][1]["style"]["rotation"] = -15
+
+        result = MODULE.validate_spec(candidate, stage="authoring")
+
+        issues = [
+            issue
+            for issue in result["errors"]
+            if issue["code"] == "SPEC_ROTATION_NOT_CANONICAL"
+        ]
+        self.assertEqual(
+            [
+                "elements[0].style.rotation",
+                "elements[1].style.rotation",
+            ],
+            [issue["path"] for issue in issues],
+        )
+        self.assertIn("335", issues[0]["detail"])
+        self.assertIn("345", issues[1]["detail"])
+
+    def test_prebuild_rejects_noncanonical_element_rotation(self):
+        candidate = valid_spec()
+        candidate["elements"][0]["style"]["rotation"] = -25
+
+        result = MODULE.validate_spec(candidate, stage="prebuild")
+
+        self.assertIn(
+            {
+                "code": "SPEC_ROTATION_NOT_CANONICAL",
+                "path": "elements[0].style.rotation",
+                "detail": "rotation must use canonical [0, 360) form; use 335",
+            },
+            result["errors"],
+        )
+
+    def test_final_accepts_legacy_negative_element_rotation(self):
+        candidate = valid_spec()
+        candidate["elements"][0]["style"]["rotation"] = -25
+
+        result = MODULE.validate_spec(candidate, stage="final")
+
+        self.assertNotIn(
+            "SPEC_ROTATION_NOT_CANONICAL",
+            {issue["code"] for issue in result["errors"]},
+        )
+
     def test_cli_accepts_authoring_and_writes_authoring_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2248,6 +2296,38 @@ class ValidateReconstructionSpecTests(unittest.TestCase):
         candidate["modules"]["typography"]["items"][0]["text_box"]["paragraph_breaks"] = []
         result = MODULE.validate_spec(candidate, stage="prebuild")
         self.assertIn("SPEC_PARAGRAPH_BREAKS_INVALID", {item["code"] for item in result["errors"]})
+
+    def test_paragraph_breaks_reject_all_duplicate_newline_encodings(self):
+        candidate = valid_list_spec()
+        text = "一\n二\r\n三"
+        candidate["elements"][0]["content"]["text"] = text
+        item = candidate["modules"]["typography"]["items"][0]
+        item["text"] = text
+        item["runs"][0]["end"] = len(text)
+        paragraph_template = item["paragraphs"][0]
+        item["paragraphs"] = [
+            {**copy.deepcopy(paragraph_template), "start": 0, "end": 2},
+            {**copy.deepcopy(paragraph_template), "start": 2, "end": 5},
+            {**copy.deepcopy(paragraph_template), "start": 5, "end": 6},
+        ]
+        item["text_box"]["paragraph_breaks"] = [2, 5]
+
+        result = MODULE.validate_spec(candidate, stage="authoring")
+
+        issues = [
+            issue
+            for issue in result["errors"]
+            if issue["code"] == "SPEC_PARAGRAPH_BREAK_ENCODING_CONFLICT"
+        ]
+        self.assertEqual(
+            [
+                "modules.typography.items[0].text_box.paragraph_breaks[0]",
+                "modules.typography.items[0].text_box.paragraph_breaks[1]",
+            ],
+            [issue["path"] for issue in issues],
+        )
+        self.assertIn("[1, 2)", issues[0]["detail"])
+        self.assertIn("[3, 5)", issues[1]["detail"])
 
     def test_final_stage_requires_both_gates_passed(self):
         candidate = valid_spec()
