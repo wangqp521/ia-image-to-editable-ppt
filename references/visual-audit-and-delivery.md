@@ -2,7 +2,7 @@
 
 ## 固定模式与审核职责
 
-`verification_profile` 是批次级固定模式：默认 `rapid`，用户明确要求独立复核才用 `reviewed`，明确要求严格审核才用 `strict`。不得在运行中自动升降级，多页合并拒绝混合模式。
+`verification_profile` 必须显式写入每页规格并在批次内固定：用户未指定时写 `rapid`，明确要求独立复核时写 `reviewed`，明确要求严格审核时写 `strict`。不得依赖脚本默认值、在运行中自动升降级；多页合并拒绝缺失或混合模式。
 
 - rapid：主代理是唯一正式语义审核者。每页一次正式判断、最多一次批量修复；修复后只做确定性闭环，不启动第二次语义判断。
 - reviewed|strict：独立 reviewer 是唯一正式语义审核者。主代理不得用自己的观感覆盖 reviewer 决定，只负责准备证据、转交确定性 prompt、保存原始响应和执行一次批量修复。
@@ -34,7 +34,7 @@
 
 P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要内容不可编辑和数据编造；P1 包括数量、比例、结构、fill、字号/换行、Text Run、bullet、crop、connector、图表或关键装饰错误；P2 仅限不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差、线宽或 renderer 近似。
 
-第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希重跑整条核心链：prebuild/snapshot、build/report、render、text geometry、structure、background、visual diff。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
+第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希从 prebuild/snapshot 起重跑 build/report、render、text geometry、structure、background 与 visual diff；runtime 身份未变时复用批次 preflight，发生变化时先重建 preflight。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
 
 `rapid` 修复后只根据新确定性闭包关闭可客观验证的问题；构图平衡、复杂装饰、主观色彩观感、非规则几何等无法被确定性证据关闭的 P0/P1 必须使 `rapid_validation_failed`。`reviewed|strict` 修复后只有全部映射项 `result=passed` 且证据绑定新哈希，才可生成 round 2 prompt。
 

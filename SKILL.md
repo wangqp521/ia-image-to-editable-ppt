@@ -13,7 +13,7 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 
 ## 选择验证模式
 
-`verification_profile` 在一个批次内固定。默认 `rapid`；用户明确要求独立复核时用 `reviewed`；明确要求严格审核时用 `strict`。
+`verification_profile` 必须显式写入每页规格，并在一个批次内固定。用户未指定时写 `rapid`；明确要求独立复核时写 `reviewed`；明确要求严格审核时写 `strict`。不得依赖脚本隐式默认值。
 
 - rapid：主代理是唯一正式语义审核者；每页一次判断，最多一次批量修复。
 - reviewed|strict：独立 reviewer 是唯一正式语义审核者；主代理只准备确定性证据、转交 prompt、接收原始 JSON 和执行获准的批量修复。
@@ -23,6 +23,14 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 
 成功状态分别为 `rapid_validated`、`reviewed_passed`、`strict_gate_passed`；否则诚实写入同模式失败状态并披露 P0/P1、P2 和未验证项。
 
+## 批次初始化
+
+从 Skill 根目录执行。每个批次在处理任何页面前运行一次 runtime preflight，并让所有页面复用同一份 passing report。只有 `soffice`、Poppler 工具或 fontconfig 的路径、版本或文件身份发生变化时才重跑；页面修复不重跑。
+
+```bash
+python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Contents/MacOS/soffice --pdftoppm /usr/local/bin/pdftoppm --pdffonts /usr/local/bin/pdffonts --pdftotext /usr/local/bin/pdftotext --fontconfig assets/fontconfig-macos.conf --output batch/runtime-preflight.json
+```
+
 ## 直接编写完整规格
 
 每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前对象。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
@@ -31,10 +39,9 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 
 ## 单页核心链
 
-从 Skill 根目录执行。下列命令描述无修复时的一次完整执行；`PPTX_SHA256` 是构建后实际 PPTX SHA-256 对应的目录名，不是字面路径。`create_reviewer_prompt.py` 仅供 `reviewed|strict` 执行，`rapid` 跳过该命令。
+从 Skill 根目录执行并复用批次级 passing runtime report。下列命令描述无修复时的一次完整页面执行；`PPTX_SHA256` 是构建后实际 PPTX SHA-256 对应的目录名，不是字面路径。`create_reviewer_prompt.py` 仅供 `reviewed|strict` 执行，`rapid` 跳过该命令。
 
 ```bash
-python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Contents/MacOS/soffice --pdftoppm /usr/local/bin/pdftoppm --pdffonts /usr/local/bin/pdffonts --pdftotext /usr/local/bin/pdftotext --fontconfig assets/fontconfig-macos.conf --output batch/runtime-preflight.json
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --snapshot work/build-spec-snapshot.json --output work/prebuild-validation.json
 python3 scripts/build_pptx_from_spec.py --spec work/build-spec-snapshot.json --prebuild-report work/prebuild-validation.json --output work/page.pptx --build-report work/build-report.json --replace-current
 python3 scripts/render_preview.py work/page.pptx --runtime batch/runtime-preflight.json --output-dir preview/PPTX_SHA256
@@ -54,9 +61,9 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 先核对整页 mapping、regions/层级、文字与 TextBox、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
 
-`rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希重跑整条核心链；主观 P0/P1 无法由确定性证据关闭时必须失败。
+`rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、text geometry、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
 
-`reviewed|strict` 仅在 background、text geometry、structure 与 visual evidence 完整后生成当前轮 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效均按 not_reviewable，并消耗本轮。round 1 要求修复时，一次映射全部 P0/P1、批量修复、按新哈希重跑整条核心链，再生成 round 2 prompt；round 2 结束即终止。
+`reviewed|strict` 仅在 background、text geometry、structure 与 visual evidence 完整后生成当前轮 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效均按 not_reviewable，并消耗本轮。round 1 要求修复时，一次映射全部 P0/P1、批量修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight，round 2 结束即终止。
 
 final 只读：只重新计算并核对当前规格、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
 

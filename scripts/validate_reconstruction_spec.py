@@ -123,7 +123,7 @@ def _pdf_page_size_matches(value: Any) -> bool:
 
 def _verification_profile(spec: dict[str, Any]) -> str:
     value = spec.get("verification_profile")
-    return "strict" if value is None else value
+    return "rapid" if value is None else value
 
 
 def _validate_verification_identity(
@@ -1297,7 +1297,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             declared_profile
             if isinstance(declared_profile, str)
             and declared_profile in VERIFICATION_PROFILES
-            else "strict"
+            else "rapid"
         )
         return {
             "valid": False,
@@ -1321,7 +1321,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         return {
             "valid": False,
             "stage": stage,
-            "verification_profile": "strict",
+            "verification_profile": "rapid",
             "spec_sha256": spec_sha256,
             "errors": [{"code": "SPEC_ROOT_INVALID", "path": "$", "detail": "root must be an object"}],
             "warnings": [],

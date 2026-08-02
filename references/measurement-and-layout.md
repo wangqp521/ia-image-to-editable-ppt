@@ -6,17 +6,17 @@
 
 `content_reference` 唯一裁决文字/数字/单位/数量/分组/语义；`clean_visual_reference` 唯一裁决坐标/比例/颜色/字体观感/图标/纹理/层级。直通页均指原图；清洗页内容仍服从原图，清洗改动禁入 PPTX；页间不借事实。
 
-并行启动 runtime preflight、coordinate overlay 和 source hash/尺寸；输出隔离，任一失败不得消费部分结果。写规格前以 `[第 N/总页数] 坐标定位图` 展示 PNG；同源每页一次。将 overlay path/hash、source hash、grid、manifest、`inspection=passed` 写入 `coordinate_overlay_evidence`。来源/grid 改变即重建；各 profile 不跳过。
+批次开始时先完成一次 runtime preflight；后续页面复用同一 passing report，只有工具或 fontconfig 身份变化时重跑。每页并行启动 coordinate overlay 和 source hash/尺寸；输出隔离，任一失败不得消费部分结果。写规格前以 `[第 N/总页数] 坐标定位图` 展示 PNG；同源每页一次。将 overlay path/hash、source hash、grid、manifest、`inspection=passed` 写入 `coordinate_overlay_evidence`。来源/grid 改变即重建；各 profile 不跳过。
 
 展示后按 frame/mapping → regions → 锚点/层级 → 高风险文字/数据 → 图片/图标 → 颜色完成一次盘点。把明确点位合为一次重复 `--point/--bbox` 调用；仅触边、邻近污染、遮挡/低清或报告无效时二测对应局部，禁多轮小测量。
 
 ## 唯一 schema v2 规格
 
-生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`page_id` 须精确为 `page-NNN`；从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
+生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/verification_profile/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`verification_profile` 必须显式写入并在批次内固定；`page_id` 须精确为 `page-NNN`，从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
 
 `modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；唯一工作规格完整后，由一次正式 `prebuild --snapshot` 验证并冻结 build 输入，通过才构建当前 PPTX。计划非第二 IR，禁构建后补写。
 
-每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。同一内容哈希的正式核心链只运行一次；修复后必须以新哈希整链重建。
+每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。同一内容哈希从 prebuild 开始的正式页面链只运行一次；修复后必须以新哈希从 `prebuild --snapshot` 起重建，runtime 身份未变时复用批次 preflight。
 
 ## 画布、区域与关系
 

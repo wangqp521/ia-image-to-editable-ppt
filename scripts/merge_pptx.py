@@ -174,15 +174,14 @@ def _validate_page_binding(
     if not isinstance(page_id, str) or not page_id:
         raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
     input_hash = _file_sha256(input_path)
-    explicit_profile = spec.get("verification_profile")
-    verification_profile = "strict" if explicit_profile is None else explicit_profile
+    verification_profile = spec.get("verification_profile")
     if verification_profile not in VERIFICATION_PROFILES:
         raise MergeError(
             "VERIFICATION_PROFILE_INVALID",
-            f"Unknown verification profile for {page_id}: {verification_profile}",
+            f"Every page spec requires rapid, reviewed, or strict verification: {page_id}",
         )
     delivery_status = spec.get("delivery_status")
-    if explicit_profile is not None and delivery_status not in PROFILE_DELIVERY_STATUSES[verification_profile]:
+    if delivery_status not in PROFILE_DELIVERY_STATUSES[verification_profile]:
         raise MergeError(
             "DELIVERY_STATUS_INVALID",
             f"Delivery status does not match {verification_profile}: {page_id}",
@@ -608,10 +607,7 @@ def merge_presentations(
     final_report_paths = [Path(item).expanduser().resolve() for item in final_reports]
     page_specs = [_load_page_spec(path) for path in spec_paths]
     page_final_reports = [_load_final_report(path) for path in final_report_paths]
-    verification_profiles = [
-        "strict" if spec.get("verification_profile") is None else spec.get("verification_profile")
-        for spec in page_specs
-    ]
+    verification_profiles = [spec.get("verification_profile") for spec in page_specs]
     if any(profile not in VERIFICATION_PROFILES for profile in verification_profiles):
         raise MergeError(
             "VERIFICATION_PROFILE_INVALID",

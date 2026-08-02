@@ -1409,6 +1409,7 @@
         "regions",
         "schema_version",
         "session_reuse",
+        "verification_profile",
         "visual_gate"
       ],
       "type": "object"
@@ -2521,5 +2522,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "e88adb3c728f3fd9839d09911296f651bdb2b57dcc95716d43c1eac03f02508f"
+  "x-schema-contract-sha256": "7dad9f308a695008684d14b1286a38963e5bad3c0f308e1f0213608653c5bdd6"
 }
