@@ -11,7 +11,7 @@ from PIL import Image, UnidentifiedImageError
 from .error_codes import ContractIssue, ToolError
 from .geometry import is_near_full_page_bbox, validate_bbox
 from .hashing import file_sha256
-from .review_evidence import stable_content_path
+from .artifact_identity import stable_content_path
 from .schema_io import index_elements
 from .schema_contracts import (
     ASSET_FIELDS,

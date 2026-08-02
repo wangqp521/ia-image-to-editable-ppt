@@ -391,6 +391,22 @@ def compile_single_page(
             str(prebuild_report_path),
             "compiler requires a passing prebuild report",
         )
+    snapshot = prebuild_report.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise ToolError(
+            "PREBUILD_SNAPSHOT_MISMATCH",
+            "prebuild_report.snapshot",
+            "snapshot identity is required",
+        )
+    if (
+        snapshot.get("path") != str(spec_path)
+        or snapshot.get("sha256") != file_sha256(spec_path)
+    ):
+        raise ToolError(
+            "PREBUILD_SNAPSHOT_MISMATCH",
+            "prebuild_report.snapshot",
+            "prebuild report does not bind the supplied build snapshot",
+        )
 
     _gate_schema_envelopes(spec)
     elements = index_elements(spec)

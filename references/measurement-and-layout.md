@@ -14,9 +14,9 @@
 
 生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`page_id` 须精确为 `page-NNN`；从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
 
-`modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；唯一工作规格可反复运行正式 `prebuild`，通过后才刷新 build snapshot 并构建当前 PPTX。计划非第二 IR，禁构建后补写。
+`modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；唯一工作规格完整后，由一次正式 `prebuild --snapshot` 验证并冻结 build 输入，通过才构建当前 PPTX。计划非第二 IR，禁构建后补写。
 
-每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。冻结后只运行一次正式 prebuild，通过才生成。
+每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。同一内容哈希的正式核心链只运行一次；修复后必须以新哈希整链重建。
 
 ## 画布、区域与关系
 

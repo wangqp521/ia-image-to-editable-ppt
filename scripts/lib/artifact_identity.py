@@ -92,7 +92,7 @@ class StableEvidenceView:
         self._content_paths: dict[tuple[int, int, str, int], Path] = {}
 
     def __enter__(self) -> StableEvidenceView:
-        self._temporary = tempfile.TemporaryDirectory(prefix="review-evidence-")
+        self._temporary = tempfile.TemporaryDirectory(prefix="artifact-identity-")
         self.root = Path(self._temporary.name).resolve(strict=True)
         self.root.chmod(0o700)
         return self
@@ -741,7 +741,7 @@ class StableEvidenceView:
                 os.close(descriptor)
 
 _ACTIVE_VIEW: contextvars.ContextVar[StableEvidenceView | None] = (
-    contextvars.ContextVar("review_evidence_view", default=None)
+    contextvars.ContextVar("artifact_identity_view", default=None)
 )
 
 

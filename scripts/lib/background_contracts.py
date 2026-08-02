@@ -18,7 +18,7 @@ from .error_codes import ContractIssue, ToolError
 from .geometry import validate_bbox
 from .hashing import canonical_json_sha256, file_sha256
 from .representation_contracts import element_mode_map, require_asset
-from .review_evidence import current_evidence_view
+from .artifact_identity import current_evidence_view
 from .schema_contracts import (
     BACKGROUND_ITEM_FIELDS,
     BACKGROUND_MODES,

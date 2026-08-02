@@ -1835,6 +1835,22 @@
       ],
       "type": "object"
     },
+    "ReviewerBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "independent_read_only_subagent"
+        },
+        "response": {
+          "$ref": "#/$defs/Reference"
+        }
+      },
+      "required": [
+        "mode",
+        "response"
+      ],
+      "type": "object"
+    },
     "RuntimePreflight": {
       "additionalProperties": false,
       "properties": {
@@ -2453,22 +2469,15 @@
             "null"
           ]
         },
-        "review_admission": {
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "review_invocation": {
-          "type": [
-            "object",
-            "null"
-          ]
-        },
-        "review_response_validation": {
-          "type": [
-            "object",
-            "null"
+        "review_context_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-fA-F]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "review_round": {
@@ -2478,9 +2487,13 @@
           ]
         },
         "reviewer": {
-          "type": [
-            "object",
-            "null"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReviewerBinding"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "status": {
@@ -2508,5 +2521,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "52c4dd9d6b0bc1a1696bd416d3b110514da41d210e120ce74c06b611061b3c35"
+  "x-schema-contract-sha256": "e88adb3c728f3fd9839d09911296f651bdb2b57dcc95716d43c1eac03f02508f"
 }

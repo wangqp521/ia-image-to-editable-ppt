@@ -5,106 +5,79 @@ description: Use when converting one or more uploaded images, screenshots, expor
 
 # Image to Editable PPT
 
-## 唯一目标与保留能力
+## 目标与边界
 
-职责：把图片高保真转换为可编辑 PPT，不扩成 OCR 或通用视觉检测系统。
+把输入图片高保真复刻为可编辑 16:9 PPTX。事实正确优先于视觉高保真，视觉高保真优先于主要内容可编辑；禁止美化、自动平均、补造内容和整页图片化。普通文字、基础图形、表格、连接线与图表应原生可编辑；照片、Logo、图标、插画、纹理、艺术字和复杂装饰只保留为当页最小局部 picture。
 
-优先级：事实正确 → 视觉高保真 → 主要内容可编辑 → 多页合并。禁止美化、自动平均、补造、以对象数冒充质量或整页图片化；照片、Logo、图标、插画、纹理与复杂装饰只保留为当页最小局部 picture。
+schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口。精简流程不得削弱 Text Run、Paragraph、原生 bullet、表格 merge、connector、crop、background、字体 fallback 与 OOXML 安全规则。
 
-schema v2 是唯一 Layout IR，compiler 是唯一构建入口；保留结构、字体、图片、Text Run、原生 bullet、表格、连接线、裁剪和 OOXML 安全规则。
+## 选择验证模式
 
-## 三级验证模式
+`verification_profile` 在一个批次内固定。默认 `rapid`；用户明确要求独立复核时用 `reviewed`；明确要求严格审核时用 `strict`。
 
-`verification_profile` 在项目/批次内固定：默认 `rapid`；仅用户明确要求“独立复核”或“严格审核”时分别使用 `reviewed`、`strict`。首个规格写入后不得升降级；失败只在本模式内修正或按失败状态交付。
+- rapid：主代理是唯一正式语义审核者；每页一次判断，最多一次批量修复。
+- reviewed|strict：独立 reviewer 是唯一正式语义审核者；主代理只准备确定性证据、转交 prompt、接收原始 JSON 和执行获准的批量修复。
+- `reviewed` 的 round 1 通过即停止；只有 round 1 要求修复且新证据链通过，才进入 round 2。
+- `strict` 必须生成全部 regions 的 200% 证据；最多两轮。
+- round 2 是终局，不再修复，也没有第三轮。
 
-三个模式共用同一套复刻与构建逻辑，差别仅是后置视觉证据与 reviewer 深度。
+成功状态分别为 `rapid_validated`、`reviewed_passed`、`strict_gate_passed`；否则诚实写入同模式失败状态并披露 P0/P1、P2 和未验证项。
 
-| 模式 | 触发方式 | 终态成功状态 | 验证边界 |
-|---|---|---|---|
-| `rapid` | 默认 | `rapid_validated` | 主代理每页最多 1 轮语义视觉判断、最多 1 次内容修复；无独立 reviewer、无 regions 200% 证据 |
-| `reviewed` | 明确“独立复核” | `reviewed_passed` | 第 1 轮通过即停止；仅修复后进行第 2 轮独立只读 reviewer；每页最多 1 次内容修复 |
-| `strict` | 明确“严格审核” | `strict_gate_passed` | 完整 regions 200% 证据、独立只读 reviewer 最多 2 轮、完整哈希绑定 |
+## 直接编写完整规格
 
-显式规格构建中统一为 `pending`；失败状态为 `rapid_validation_failed`、`reviewed_failed`、`strict_gate_failed`。旧规格缺 profile 仅兼容为 `strict`；新任务必填。
+每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前对象。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
 
-## 单一当前版本流程
+图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
 
-每页只有一份当前工作规格 `work/page-reconstruction.json` 和一份当前成品 `work/page.pptx`。不得建立并行版本、晋级链或版本比较状态机。历史证据可按 PPTX SHA-256 隔离保存，但它不是另一份可交付 PPTX，终态只能绑定当前哈希。
+## 单页核心链
 
-1. 每页建独立目录；非续作写 `session_reuse.mode=fresh_reconstruction`，仅主代理写产物。
-2. 并行启动稳定 runtime preflight、coordinate overlay、source hash/尺寸；输出隔离，任一失败不消费部分结果。后页锁定 runtime；坐标图照常展示。
-3. 展示后一次盘点全页，把全部明确的 `--point/--bbox` 合为一次测量；仅触边、污染、遮挡/低清或报告无效时二测。
-4. 全部图标 bbox 固定后并发运行独立单图标 extractor；只重跑失败/触边项。runtime、overlay、source identity 就绪后运行 initializer，完成唯一规格并绑定最终图标，再生成一次绿幕。未知字体使用 `Noto Sans CJK SC`。
+从 Skill 根目录执行。下列命令描述无修复时的一次完整执行；`PPTX_SHA256` 是构建后实际 PPTX SHA-256 对应的目录名，不是字面路径。`create_reviewer_prompt.py` 仅供 `reviewed|strict` 执行，`rapid` 跳过该命令。
 
 ```bash
-python3 scripts/init_reconstruction_spec.py --source <absolute-source> --visual <absolute-clean-visual> --overlay <absolute-overlay> --page-id page-NNN --profile <rapid|reviewed|strict> --output <absolute-output>
-```
-
-### 前置结构校验与当前版本构建
-
-先完整写好唯一规格，再运行正式 `prebuild`。未通过时只修改同一规格并重验；通过后刷新 build snapshot，并由 compiler 原子发布或替换同一路径的当前 PPTX 与 build report。禁止绕过 prebuild、另建平行 IR 或降级为整页图片。
-
-```bash
-python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --output work/prebuild-validation.json
-python3 scripts/freeze_reconstruction_spec.py work/page-reconstruction.json --purpose build --replace-current --output work/build-spec-snapshot.json
+python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Contents/MacOS/soffice --pdftoppm /usr/local/bin/pdftoppm --pdffonts /usr/local/bin/pdffonts --pdftotext /usr/local/bin/pdftotext --fontconfig assets/fontconfig-macos.conf --output batch/runtime-preflight.json
+python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --snapshot work/build-spec-snapshot.json --output work/prebuild-validation.json
 python3 scripts/build_pptx_from_spec.py --spec work/build-spec-snapshot.json --prebuild-report work/prebuild-validation.json --output work/page.pptx --build-report work/build-report.json --replace-current
-python3 scripts/render_preview.py work/page.pptx --runtime work/preflight-runtime.json --output-dir preview/<pptx-sha256>
-python3 scripts/create_rendered_text_geometry.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --render-report preview/<pptx-sha256>/render-report.json --runtime work/preflight-runtime.json --output evidence/<pptx-sha256>/rendered-text-geometry.json
-python3 scripts/validate_pptx.py work/page.pptx --expected-slides 1 --spec work/build-spec-snapshot.json --build-report work/build-report.json --output evidence/<pptx-sha256>/structure-validation.json
-```
-
-结构校验未通过不得进入语义视觉判断。初次 preview 后按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1，把同根因问题合为同一修复批次；不得边看边改。
-
-### 后置视觉校验与原地修正重验
-
-对当前 PPTX 补齐 background、visual diff 与当前 profile 的视觉证据。`rapid|reviewed` 每页最多 1 次内容修复：先一次列全 P0/P1，按共同根因批量修改同一工作规格，再原子替换 `work/page.pptx`。修复后自动重验核心链为：`prebuild → build snapshot → compiler / build report → render → rendered text geometry → validate_pptx → background contract → visual diff`。`rapid` 在核心链通过后运行一次 `final validation`；`reviewed` 在核心链通过后进入唯一允许的第 2 轮 reviewer，并在 reviewer 结束后运行一次 `final validation`，两者均构成当前 profile 的完整证据链。PPTX 哈希一变，旧结构、文字、背景和视觉证据全部失效；不得只重跑有利指标、复用旧哈希或保留另一份 PPTX 作为质量下限。rapid 省略的是第 2 轮语义视觉判断，不是最终自动证据。
-
-```bash
-python3 scripts/validate_background_contract.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report evidence/<pptx-sha256>/structure-validation.json --output evidence/<pptx-sha256>/background-contract.json
-python3 scripts/create_visual_diff.py <source> --render-report preview/<pptx-sha256>/render-report.json --spec work/build-spec-snapshot.json --output-dir evidence/<pptx-sha256>/visual-diff --profile <rapid|reviewed|strict>
-python3 scripts/freeze_reconstruction_spec.py work/page-reconstruction.json --purpose pre-review --output work/review/round-N/pre-review-spec-snapshot.json
-python3 scripts/review_admission.py issue --spec work/review/round-N/pre-review-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report evidence/<pptx-sha256>/structure-validation.json --render-report preview/<pptx-sha256>/render-report.json --text-geometry evidence/<pptx-sha256>/rendered-text-geometry.json --background-report evidence/<pptx-sha256>/background-contract.json --visual-diff evidence/<pptx-sha256>/visual-diff/visual-diff.json --review-round <1|2> --output-dir work/review/round-N/admission
-python3 scripts/review_admission.py invoke --admission work/review/round-N/admission/review-admission.json --invocation-dir work/review/round-N/invocation
-python3 scripts/review_admission.py validate-response --admission work/review/round-N/admission/review-admission.json --invocation work/review/round-N/invocation/page-NNN-round-N-invocation.json --response work/review/round-N/response.json --output work/review/round-N/response-validation.json
+python3 scripts/render_preview.py work/page.pptx --runtime batch/runtime-preflight.json --output-dir preview/PPTX_SHA256
+python3 scripts/create_rendered_text_geometry.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --render-report preview/PPTX_SHA256/render-report.json --runtime batch/runtime-preflight.json --output evidence/PPTX_SHA256/rendered-text-geometry.json
+python3 scripts/validate_pptx.py work/page.pptx --expected-slides 1 --spec work/build-spec-snapshot.json --build-report work/build-report.json --output evidence/PPTX_SHA256/structure-validation.json
+python3 scripts/validate_background_contract.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report evidence/PPTX_SHA256/structure-validation.json --output evidence/PPTX_SHA256/background-contract.json
+python3 scripts/create_visual_diff.py source.png --render-report preview/PPTX_SHA256/render-report.json --spec work/build-spec-snapshot.json --output-dir evidence/PPTX_SHA256/visual-diff --profile reviewed
+python3 scripts/create_reviewer_prompt.py work/page-reconstruction.json --review-round 1
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage final --output work/final-validation.json
 ```
 
-`rapid` 跳过 freeze/reviewer，每页最多 1 轮语义视觉判断。第 1 轮无 P0/P1 即进入终态；有 P0/P1 时只允许 1 次批量修复，修复后不得进行第 2 轮语义视觉判断。只有全部已知 P0/P1 都能由现有确定性证据关闭时才写 `rapid_validated`；构图平衡、复杂装饰、主观色彩观感、非规则几何等不能由现有确定性证据关闭的问题写 `rapid_validation_failed` 并披露。已知存在此类阻断项时仍可使用唯一一次批量修复改善当前草稿，但终态仍必须失败；修复无交付价值时可直接失败。
+按实际 profile 替换 visual diff 的 `--profile`。规格必须先写齐，再由一次 `prebuild --snapshot` 同时验证并冻结 exact bytes；compiler 只读 snapshot。任何确定性门禁失败都不得进入语义审核。
 
-`reviewed` 把 admission 生成的 prompt 原样交给全新只读 reviewer。第 1 轮通过即停止；`reviewed` 仅在第 1 轮要求修复且全链重验通过后进入第 2 轮。第 2 轮不得再次修复；仍有 P0/P1 或不可审查时写 `reviewed_failed`，不得开启第 3 轮。
+每个 producer 完成后，将当前证据的绝对路径与 SHA-256 回写到同一工作规格的 `runtime_preflight`、`visual_gate`、`editability_gate`；只回写证据与终态字段，不改 build content。`visual_gate.pptx` 与 `editability_gate.pptx` 必须指向同一当前 PPTX。
 
-`strict` 保持现有流程和证据要求：独立只读 reviewer 最多 2 轮，第 1 轮要求修正时原地修正并重跑全部自动证据，再以新哈希进入下一轮。所有模式在 reviewer 通过后禁改 PPTX；final 只绑定当前版本及其当前证据，任何绑定不一致均失败。不新增脚本、状态文件、schema 字段或计数器。
+## 审核、修复与终态
 
-## 自动 preflight 和测量工具
+先核对整页 mapping、regions/层级、文字与 TextBox、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
 
-从 Skill 根目录运行。
+`rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希重跑整条核心链；主观 P0/P1 无法由确定性证据关闭时必须失败。
 
-```bash
-python3 scripts/create_coordinate_overlay.py <source> --output <page>/work/coordinate-overlay.png
-python3 scripts/inspect_image_region.py <source> --output-dir <page>/work/measurements --point X1,Y1 --point X2,Y2 --bbox L1,T1,R1,B1 --bbox L2,T2,R2,B2
-python3 scripts/extract_icon_asset.py <source> --icon-id <id> --bbox-xywh X,Y,W,H --output <page>/assets/icons/<id>.png
-python3 scripts/create_icon_green_preview.py <page>/work/page-reconstruction.json --output <page>/comparisons/icon-alpha-preview.png
-python3 scripts/preflight_runtime.py --soffice <stable-soffice> --pdftoppm <pdftoppm> --pdffonts <pdffonts> --pdftotext <pdftotext> --fontconfig assets/fontconfig-macos.conf --output <page>/work/preflight-runtime.json
-```
+`reviewed|strict` 仅在 background、text geometry、structure 与 visual evidence 完整后生成当前轮 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效均按 not_reviewable，并消耗本轮。round 1 要求修复时，一次映射全部 P0/P1、批量修复、按新哈希重跑整条核心链，再生成 round 2 prompt；round 2 结束即终止。
 
-区域测量输入 LTRB，`source_bbox` 使用 XYWH。禁止外部 OCR/API/Token；未知内容标为未验证，不补造。
+final 只读：只重新计算并核对当前规格、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
 
 ## 条件 reference 路由
 
-普通页面不得全量读取未命中模块。
+只读取命中页面内容的 reference，所有 reference 保持一层：
 
-| 条件 | 读取 |
+| 页面条件 | 必读 reference |
 |---|---|
 | 每个非空页面 | [测量与布局](references/measurement-and-layout.md) |
-| 有普通/特殊文字、列表、表格文字 | [文字与可编辑性](references/text-and-editability.md) |
-| 有表格、矩阵、状态条、图示、连接线或图表 | [图形与图示](references/graphics-and-diagrams.md) |
-| 有图标、照片、Logo、截图、蒙版、背景或图片效果 | [图片与图标](references/pictures-and-icons.md) |
-| 每页视觉审查、结构校验与交付 | [视觉审计与交付](references/visual-audit-and-delivery.md) |
+| 普通/特殊文字、列表、表格文字 | [文字与可编辑性](references/text-and-editability.md) |
+| 表格、矩阵、状态条、图示、连接线或图表 | [图形与图示](references/graphics-and-diagrams.md) |
+| 图标、照片、Logo、截图、蒙版、背景或图片效果 | [图片与图标](references/pictures-and-icons.md) |
+| 每页证据、视觉审核、终态与交付 | [视觉审计与交付](references/visual-audit-and-delivery.md) |
 
-## 多页顺序与合并
+## 多页处理
 
-逐页串行并固定模式。prebuild/compiler 失败只留证据、继续后页，不占位、不降级、不合并，并披露缺页；已有 PPTX 的 visual/final 失败页可按原序合并。只用 `merge_pptx.py`，拒绝混合模式、LibreOffice/fontconfig 身份或预览尺寸；标签须明确快速/独立复核/完整门禁及是否通过。
+逐页执行并保持同一 profile。单页 `prebuild` 或 build 失败时保留诊断、继续后页且不占位；已有 PPTX 但 final 失败的页面只能作为明确标注的未通过草稿单独交付，不进入合并。合并时每页必须按同序提供 input/spec/final-report 三元组；merger 只核对单页实际哈希与 final 绑定，不重跑单页 validator，合并后对临时 merged PPTX 只做一次整份结构验证。
 
-每个 `--input <page>.pptx` 按同序配对 `--spec <page>/work/page-reconstruction.json`；merger 重算各页 PPTX SHA-256、结构报告和 reviewer 绑定，拒绝旧页或错页。
+```bash
+python3 scripts/merge_pptx.py --input page-001/work/page.pptx --spec page-001/work/page-reconstruction.json --final-report page-001/work/final-validation.json --input page-002/work/page.pptx --spec page-002/work/page-reconstruction.json --final-report page-002/work/final-validation.json --output final/deck.pptx
+```
 
-交付可编辑 PPTX、当前 preview/diff、结构/final 报告、当前模式要求的区域/reviewer 证据，并披露 P2、字体 fallback 和未验证项。缺证据、旧哈希、结构/final 失败或 tripwire 触发时不得称完成；失败分支不新增 schema、validator 或状态机。
+交付可编辑 PPTX、当前 preview/diff、结构/final 报告及模式要求的 region/raw reviewer response。缺证据、错哈希、tripwire 触发或开放 P0/P1 时不得称完成。

@@ -16,6 +16,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from lib.spec_identity import content_spec_sha256
+
 
 NS = {
     "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
@@ -93,6 +95,23 @@ def _load_page_spec(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _load_final_report(path: Path) -> dict[str, Any]:
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_file() or resolved.is_symlink():
+        raise MergeError("FINAL_REPORT_NOT_FOUND", f"Final report does not exist: {resolved}")
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MergeError(
+            "FINAL_REPORT_INVALID", f"Final report is not valid JSON: {resolved}"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise MergeError(
+            "FINAL_REPORT_INVALID", f"Final report root must be an object: {resolved}"
+        )
+    return payload
+
+
 def _artifact_identity(value: Any, code: str) -> tuple[Path, str]:
     if not isinstance(value, dict):
         raise MergeError(code, "Required artifact identity is missing")
@@ -149,7 +168,7 @@ def _render_identity(
 def _validate_page_binding(
     input_path: Path,
     spec: dict[str, Any],
-    validator: Any,
+    final_report: dict[str, Any],
 ) -> dict[str, Any]:
     page_id = spec.get("page_id")
     if not isinstance(page_id, str) or not page_id:
@@ -167,6 +186,11 @@ def _validate_page_binding(
         raise MergeError(
             "DELIVERY_STATUS_INVALID",
             f"Delivery status does not match {verification_profile}: {page_id}",
+        )
+    if delivery_status != PROFILE_SUCCESS_STATUSES[verification_profile]:
+        raise MergeError(
+            "FINAL_REPORT_INVALID",
+            f"Only a successfully finalized page can be merged: {page_id}",
         )
     gate_hashes: list[str] = []
     for gate_name in ("visual_gate", "editability_gate"):
@@ -203,59 +227,68 @@ def _validate_page_binding(
             "VALIDATOR_ARTIFACT_INVALID",
             f"Validator report does not bind a valid current PPTX: {input_path}",
         )
-    visual_gate = spec.get("visual_gate")
-    reviewer = visual_gate.get("reviewer") if isinstance(visual_gate, dict) else None
-    preview_identity = visual_gate.get("preview") if isinstance(visual_gate, dict) else None
-    _, preview_hash = _artifact_identity(preview_identity, "PREVIEW_ARTIFACT_INVALID")
-    source = spec.get("clean_visual_reference")
-    source_hash = source.get("sha256") if isinstance(source, dict) else None
-    if verification_profile == "rapid":
-        if reviewer is not None:
-            raise MergeError(
-                "RAPID_REVIEWER_INVALID",
-                f"Rapid page must not claim an independent reviewer: {page_id}",
-            )
-        if (
-            delivery_status == "rapid_validated"
-            and visual_gate.get("status") != "not_independently_reviewed"
-        ):
-            raise MergeError(
-                "RAPID_VISUAL_STATUS_INVALID",
-                f"Rapid validated page requires not_independently_reviewed status: {page_id}",
-            )
-    elif (
-        not isinstance(reviewer, dict)
-        or reviewer.get("page_id") != page_id
-        or reviewer.get("source_sha256") != source_hash
-        or reviewer.get("preview_sha256") != preview_hash
+    final_pptx = final_report.get("current_pptx")
+    if (
+        final_report.get("valid") is not True
+        or final_report.get("errors") != []
+        or final_report.get("stage") != "final"
+        or final_report.get("verification_profile") != verification_profile
+        or final_report.get("delivery_status") != delivery_status
+        or final_report.get("content_spec_sha256") != content_spec_sha256(spec)
+        or not isinstance(final_pptx, dict)
+        or final_pptx.get("sha256") != input_hash
+        or final_pptx.get("path") != str(input_path.resolve())
     ):
         raise MergeError(
-            "REVIEW_BINDING_INVALID",
-            f"Reviewer does not bind the current page source and preview: {page_id}",
+            "FINAL_REPORT_INVALID",
+            f"Final report does not bind the current page, spec, profile, and PPTX: {page_id}",
         )
-    validation = validator.validate_pptx(
-        input_path,
-        expected_slides=1,
-        reconstruction_spec=spec,
+    spec_runtime_path, spec_runtime_hash = _artifact_identity(
+        spec.get("runtime_preflight"), "RUNTIME_PREFLIGHT_INVALID"
     )
-    if validation.get("valid") is not True:
+    final_runtime = final_report.get("runtime_preflight")
+    if (
+        not isinstance(final_runtime, dict)
+        or final_runtime.get("path") != str(spec_runtime_path)
+        or final_runtime.get("sha256") != spec_runtime_hash
+    ):
         raise MergeError(
-            "INPUT_VALIDATION_FAILED",
-            f"Merge input did not pass current spec validation: {input_path}",
-            errors=validation.get("errors", []),
+            "FINAL_REPORT_INVALID",
+            f"Final report runtime identity does not match the current spec: {page_id}",
+        )
+    capability_hash = final_report.get("capability_manifest_sha256")
+    if (
+        not isinstance(capability_hash, str)
+        or len(capability_hash) != 64
+        or any(character not in "0123456789abcdef" for character in capability_hash)
+    ):
+        raise MergeError(
+            "FINAL_REPORT_INVALID",
+            f"Final report capability identity is invalid: {page_id}",
+        )
+    if (
+        not isinstance(validator_report, dict)
+        or validator_report.get("valid") is not True
+        or validator_report.get("errors") != []
+        or validator_report.get("pptx_sha256") != input_hash
+        or validator_report.get("slide_count") != 1
+        or type(validator_report.get("width_emu")) is not int
+        or validator_report["width_emu"] <= 0
+        or type(validator_report.get("height_emu")) is not int
+        or validator_report["height_emu"] <= 0
+    ):
+        raise MergeError(
+            "VALIDATOR_ARTIFACT_INVALID",
+            f"Structure report does not bind one valid current slide: {input_path}",
         )
     return {
         "page_id": page_id,
         "verification_profile": verification_profile,
         "delivery_status": delivery_status,
-        "profile_passed": (
-            delivery_status == PROFILE_SUCCESS_STATUSES[verification_profile]
-            if explicit_profile is not None
-            else visual_gate.get("status") == "passed"
-            and isinstance(reviewer, dict)
-            and reviewer.get("decision") == "passed"
-        ),
-        "validation": validation,
+        "profile_passed": True,
+        "runtime_sha256": spec_runtime_hash,
+        "capability_manifest_sha256": capability_hash,
+        "validation": validator_report,
     }
 
 
@@ -551,6 +584,7 @@ def _write_package(entries: dict[str, bytes], path: Path) -> None:
 def merge_presentations(
     inputs: list[Path],
     specs: list[Path],
+    final_reports: list[Path],
     output: Path,
 ) -> dict[str, Any]:
     if not inputs:
@@ -562,9 +596,18 @@ def merge_presentations(
             input_count=len(inputs),
             spec_count=len(specs),
         )
+    if len(inputs) != len(final_reports):
+        raise MergeError(
+            "FINAL_REPORT_COUNT_MISMATCH",
+            "Every merge input requires one final validation report",
+            input_count=len(inputs),
+            final_report_count=len(final_reports),
+        )
     paths = [Path(item).expanduser().resolve() for item in inputs]
     spec_paths = [Path(item).expanduser().resolve() for item in specs]
+    final_report_paths = [Path(item).expanduser().resolve() for item in final_reports]
     page_specs = [_load_page_spec(path) for path in spec_paths]
+    page_final_reports = [_load_final_report(path) for path in final_report_paths]
     verification_profiles = [
         "strict" if spec.get("verification_profile") is None else spec.get("verification_profile")
         for spec in page_specs
@@ -594,13 +637,12 @@ def merge_presentations(
         raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
     if len(page_ids) != len(set(page_ids)):
         raise MergeError("PAGE_ID_DUPLICATE", "Merge page_id values must be unique")
-    validator = _load_validator()
     validations = []
     page_bindings = []
-    for path, page_spec in zip(paths, page_specs):
+    for path, page_spec, final_report in zip(paths, page_specs, page_final_reports):
         if not path.is_file():
             raise MergeError("INPUT_NOT_FOUND", f"Merge input does not exist: {path}")
-        binding = _validate_page_binding(path, page_spec, validator)
+        binding = _validate_page_binding(path, page_spec, final_report)
         page_bindings.append(binding)
         validation = binding["validation"]
         validations.append(validation)
@@ -608,6 +650,20 @@ def merge_presentations(
             raise MergeError(
                 "INPUT_NOT_SINGLE_SLIDE", f"Merge input must contain one slide: {path}"
             )
+    runtime_hashes = {binding["runtime_sha256"] for binding in page_bindings}
+    if len(runtime_hashes) != 1:
+        raise MergeError(
+            "RUNTIME_PREFLIGHT_MIXED",
+            "All merge inputs must use the same runtime preflight identity",
+        )
+    capability_hashes = {
+        binding["capability_manifest_sha256"] for binding in page_bindings
+    }
+    if len(capability_hashes) != 1:
+        raise MergeError(
+            "CAPABILITY_MANIFEST_MIXED",
+            "All merge inputs must use the same capability manifest identity",
+        )
         if not validation.get("valid"):
             raise MergeError(
                 "INPUT_VALIDATION_FAILED",
@@ -649,6 +705,7 @@ def merge_presentations(
     temporary = output.with_name(f".{output.name}.{secrets.token_hex(6)}.tmp")
     try:
         _write_package(destination_entries, temporary)
+        validator = _load_validator()
         validation = validator.validate_pptx(temporary, expected_slides=len(paths))
         if not validation.get("valid"):
             raise MergeError(
@@ -672,6 +729,7 @@ def merge_presentations(
         "slide_count": len(paths),
         "inputs": [str(path) for path in paths],
         "specs": [str(path) for path in spec_paths],
+        "final_reports": [str(path) for path in final_report_paths],
         "page_ids": page_ids,
         "verification_profile": verification_profile,
         "render_identity": {
@@ -691,10 +749,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", action="append", required=True, type=Path)
     parser.add_argument("--spec", action="append", default=[], type=Path)
+    parser.add_argument("--final-report", action="append", default=[], type=Path)
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
-        result = merge_presentations(args.input, args.spec, args.output)
+        result = merge_presentations(
+            args.input, args.spec, args.final_report, args.output
+        )
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2))
         return 0
     except MergeError as exc:

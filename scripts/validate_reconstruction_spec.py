@@ -17,10 +17,11 @@ from typing import Any
 
 from PIL import Image, UnidentifiedImageError
 
+from lib.atomic_write import atomic_write_bytes
+from lib.artifact_identity import is_sha256
 from lib.hashing import canonical_json_sha256
 from lib.background_contracts import (
     resolved_element_mode_map,
-    validate_background_postbuild,
     validate_background_prebuild,
 )
 from lib.capabilities import (
@@ -32,12 +33,12 @@ from lib.capabilities import (
 )
 from lib.element_contracts import validate_element_contract
 from lib.error_codes import ToolError
+from lib.final_identity import collect_current_artifacts
 from lib.representation_contracts import validate_representation_plan
-from lib import review_contracts
 from lib.reviewer_contracts import (
-    VISUAL_REVIEW_COVERAGE_FIELDS,
-    VISUAL_REVIEW_COVERAGE_RESULTS,
-    valid_visual_review_finding,
+    build_review_context,
+    review_context_sha256,
+    reviewer_response_issues,
 )
 from lib.schema_io import (
     NonStandardJsonNumberError,
@@ -51,7 +52,7 @@ from lib.schema_contracts import (
     schema_envelope_issues,
     unknown_field_detail,
 )
-from lib.spec_identity import content_spec_sha256, review_state_sha256
+from lib.spec_identity import content_spec_sha256
 from pptx_builder import validate_renderer_contracts
 
 
@@ -70,7 +71,6 @@ ALLOWED_KINDS = {
 }
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_MODULES = {"page_layout", "typography", "icons", "special_text", "picture_framing", "graphics", "diagram", "chart", "high_risk", "representation_plan", "background"}
-GATE_RESULTS = {"passed", "changes_required", "not_verifiable"}
 VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
 PROFILE_DELIVERY_STATUSES = {
     "rapid": {"pending", "rapid_validated", "rapid_validation_failed"},
@@ -304,7 +304,8 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _load_local_script(filename: str) -> Any:
+def _load_coordinate_overlay_module() -> Any:
+    filename = "create_coordinate_overlay.py"
     cached = _LOCAL_MODULE_CACHE.get(filename)
     if cached is not None:
         return cached
@@ -415,7 +416,7 @@ def _validate_coordinate_overlay_evidence(
         _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate evidence binding is incomplete or stale")
         return
     try:
-        coordinate_module = _load_local_script("create_coordinate_overlay.py")
+        coordinate_module = _load_coordinate_overlay_module()
         expected = coordinate_module.coordinate_overlay_manifest(
             source_path,
             cols=grid["cols"],
@@ -491,823 +492,6 @@ def _load_json_artifact(
         _error(errors, code, path, "artifact root must be an object")
         return None
     return payload
-
-
-def _require_attempt8_artifact(
-    value: Any,
-    *,
-    path: str,
-    missing_code: str,
-    errors: list[dict[str, str]],
-) -> tuple[str, str] | None:
-    """Validate an immutable final artifact while preserving its domain error."""
-    if not isinstance(value, dict):
-        _error(errors, missing_code, path, "required production artifact identity is missing")
-        return None
-    artifact = _validate_gate_artifact(value, path, errors)
-    if artifact is None:
-        _error(errors, missing_code, path, "production artifact identity is not current")
-    return artifact
-
-
-def _artifact_matches_record(
-    artifact: tuple[str, str] | None,
-    record: Any,
-) -> bool:
-    if artifact is None or not isinstance(record, dict):
-        return False
-    raw_path = record.get("path")
-    digest = record.get("sha256")
-    if not isinstance(raw_path, str) or not isinstance(digest, str):
-        return False
-    try:
-        resolved = str(Path(raw_path).expanduser().resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return resolved == artifact[0] and digest.lower() == artifact[1]
-
-
-def _path_identity(path: Any, digest: Any) -> dict[str, str] | None:
-    if not isinstance(path, str) or not isinstance(digest, str):
-        return None
-    try:
-        return {"path": str(Path(path).expanduser().resolve()), "sha256": digest.lower()}
-    except (OSError, RuntimeError, ValueError):
-        return None
-
-
-def _validate_rendered_text_geometry_final(
-    spec: dict[str, Any],
-    artifact: tuple[str, str] | None,
-    *,
-    visual_pptx: tuple[str, str] | None,
-    render_report: tuple[str, str] | None,
-    runtime_preflight: tuple[str, str] | None,
-    errors: list[dict[str, str]],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    report = _load_json_artifact(
-        artifact,
-        code="TEXT_GEOMETRY_IDENTITY_MISMATCH",
-        path="visual_gate.rendered_text_geometry",
-        errors=errors,
-    )
-    if report is None:
-        return None, None
-    input_paths = report.get("input_paths")
-    inputs = report.get("inputs")
-    if not isinstance(input_paths, dict) or not isinstance(inputs, dict):
-        _error(
-            errors,
-            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            "visual_gate.rendered_text_geometry",
-            "rendered-text geometry input identities are incomplete",
-        )
-        return report, None
-
-    current_content_hash = content_spec_sha256(spec)
-    if report.get("spec_sha256") != current_content_hash:
-        _error(
-            errors,
-            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            "visual_gate.rendered_text_geometry.spec_sha256",
-            "rendered-text geometry does not bind the current renderable content",
-        )
-    for label, current_artifact, digest_field in (
-        ("pptx", visual_pptx, "pptx_sha256"),
-        ("render_report", render_report, "render_report_sha256"),
-        ("runtime", runtime_preflight, "runtime_sha256"),
-    ):
-        record = _path_identity(input_paths.get(label), inputs.get(digest_field))
-        if not _artifact_matches_record(current_artifact, record):
-            _error(
-                errors,
-                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-                f"visual_gate.rendered_text_geometry.input_paths.{label}",
-                f"rendered-text geometry does not bind the current {label}",
-            )
-
-    build_report: dict[str, Any] | None = None
-    build_path = input_paths.get("build_report")
-    if isinstance(build_path, str):
-        build_record = _path_identity(build_path, inputs.get("build_report_sha256"))
-        build_artifact = (
-            (build_record["path"], build_record["sha256"])
-            if isinstance(build_record, dict)
-            else None
-        )
-        build_report = _load_json_artifact(
-            build_artifact,
-            code="TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            path="visual_gate.rendered_text_geometry.input_paths.build_report",
-            errors=errors,
-        )
-    else:
-        _error(
-            errors,
-            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            "visual_gate.rendered_text_geometry.input_paths.build_report",
-            "build-report path is missing",
-        )
-    if (
-        isinstance(build_report, dict)
-        and build_report.get("content_spec_sha256") != current_content_hash
-    ):
-        _error(
-            errors,
-            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            "build_report.content_spec_sha256",
-            "build report does not bind the current renderable content",
-        )
-
-    required_paths = ("spec", "pptx", "build_report", "render_report", "runtime")
-    if all(isinstance(input_paths.get(name), str) for name in required_paths):
-        try:
-            geometry = _load_local_script("create_rendered_text_geometry.py")
-            with tempfile.TemporaryDirectory() as directory:
-                rebuilt = geometry.create_rendered_text_geometry(
-                    input_paths["spec"],
-                    input_paths["pptx"],
-                    input_paths["build_report"],
-                    input_paths["render_report"],
-                    input_paths["runtime"],
-                    Path(directory) / "rendered-text-geometry.json",
-                )
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
-            _error(
-                errors,
-                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-                "visual_gate.rendered_text_geometry",
-                f"cannot recompute rendered-text geometry: {exc}",
-            )
-        else:
-            if rebuilt != report:
-                _error(
-                    errors,
-                    "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-                    "visual_gate.rendered_text_geometry",
-                    "stored rendered-text geometry differs from production recomputation",
-                )
-    else:
-        _error(
-            errors,
-            "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-            "visual_gate.rendered_text_geometry.input_paths",
-            "rendered-text geometry input paths are incomplete",
-        )
-    if report.get("valid") is not True:
-        report_errors = report.get("errors")
-        if isinstance(report_errors, list) and report_errors:
-            errors.extend(item for item in report_errors if isinstance(item, dict))
-        else:
-            _error(
-                errors,
-                "TEXT_GEOMETRY_IDENTITY_MISMATCH",
-                "visual_gate.rendered_text_geometry.valid",
-                "rendered-text geometry did not pass",
-            )
-    return report, build_report
-
-
-def _validate_background_contract_final(
-    spec: dict[str, Any],
-    artifact: tuple[str, str] | None,
-    *,
-    text_report: dict[str, Any] | None,
-    structure_report: tuple[str, str] | None,
-    build_report: dict[str, Any] | None,
-    errors: list[dict[str, str]],
-) -> dict[str, Any] | None:
-    report = _load_json_artifact(
-        artifact,
-        code="BACKGROUND_ASSET_INVALID",
-        path="visual_gate.background_contract",
-        errors=errors,
-    )
-    if report is None:
-        return None
-    current_content_hash = content_spec_sha256(spec)
-    if report.get("spec_sha256") != current_content_hash or (
-        isinstance(build_report, dict)
-        and build_report.get("content_spec_sha256") != current_content_hash
-    ):
-        _error(
-            errors,
-            "BACKGROUND_ASSET_INVALID",
-            "visual_gate.background_contract.spec_sha256",
-            "background contract does not bind the current renderable content",
-        )
-    input_paths = text_report.get("input_paths") if isinstance(text_report, dict) else None
-    if (
-        isinstance(input_paths, dict)
-        and all(isinstance(input_paths.get(name), str) for name in ("spec", "pptx", "build_report"))
-        and structure_report is not None
-    ):
-        try:
-            rebuilt = validate_background_postbuild(
-                input_paths["spec"],
-                input_paths["pptx"],
-                input_paths["build_report"],
-                structure_report[0],
-            )
-        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
-            _error(
-                errors,
-                "BACKGROUND_ASSET_INVALID",
-                "visual_gate.background_contract",
-                f"cannot recompute background contract: {exc}",
-            )
-        else:
-            if rebuilt != report:
-                _error(
-                    errors,
-                    "BACKGROUND_ASSET_INVALID",
-                    "visual_gate.background_contract",
-                    "stored background contract differs from production recomputation",
-                )
-    else:
-        _error(
-            errors,
-            "BACKGROUND_ASSET_INVALID",
-            "visual_gate.background_contract",
-            "background recomputation inputs are incomplete",
-        )
-    if report.get("valid") is not True:
-        report_errors = report.get("errors")
-        if isinstance(report_errors, list) and report_errors:
-            errors.extend(item for item in report_errors if isinstance(item, dict))
-        else:
-            _error(
-                errors,
-                "BACKGROUND_ASSET_INVALID",
-                "visual_gate.background_contract.valid",
-                "background contract did not pass",
-            )
-    return report
-
-
-def _validate_review_chain_final(
-    spec: dict[str, Any],
-    visual_gate: dict[str, Any],
-    *,
-    profile: str,
-    admission_artifact: tuple[str, str] | None,
-    invocation_artifact: tuple[str, str] | None,
-    response_validation_artifact: tuple[str, str] | None,
-    current_artifacts: dict[str, tuple[str, str] | None],
-    build_report: dict[str, Any] | None,
-    text_report: dict[str, Any] | None,
-    errors: list[dict[str, str]],
-) -> None:
-    if admission_artifact is None or invocation_artifact is None or response_validation_artifact is None:
-        return
-    try:
-        validated_admission = review_contracts._load_admission_for_invocation(
-            Path(admission_artifact[0])
-        )
-    except ToolError as exc:
-        errors.append(exc.as_dict())
-        return
-    admission = validated_admission.payload
-    current_content_hash = content_spec_sha256(spec)
-    if (
-        admission.get("spec_sha256") != current_content_hash
-        or admission.get("review_state_sha256") != review_state_sha256(spec)
-        or admission.get("verification_profile") != profile
-        or admission.get("page_id") != spec.get("page_id")
-    ):
-        _error(
-            errors,
-            "REVIEW_ADMISSION_STALE",
-            "visual_gate.review_admission",
-            "admission does not bind the current page, profile, and renderable content",
-        )
-    artifacts = admission.get("artifacts")
-    if not isinstance(artifacts, dict):
-        _error(
-            errors,
-            "REVIEW_ADMISSION_STALE",
-            "visual_gate.review_admission.artifacts",
-            "admission artifacts are missing",
-        )
-        return
-    for name, current in current_artifacts.items():
-        if not _artifact_matches_record(current, artifacts.get(name)):
-            _error(
-                errors,
-                "REVIEW_ADMISSION_STALE",
-                f"visual_gate.review_admission.artifacts.{name}",
-                f"admission does not bind the current {name}",
-            )
-    text_inputs = text_report.get("inputs") if isinstance(text_report, dict) else None
-    text_paths = text_report.get("input_paths") if isinstance(text_report, dict) else None
-    build_record = (
-        _path_identity(
-            text_paths.get("build_report"), text_inputs.get("build_report_sha256")
-        )
-        if isinstance(text_paths, dict) and isinstance(text_inputs, dict)
-        else None
-    )
-    if not _artifact_matches_record(
-        (
-            (build_record["path"], build_record["sha256"])
-            if isinstance(build_record, dict)
-            else None
-        ),
-        artifacts.get("build_report"),
-    ) or (
-        isinstance(build_report, dict)
-        and build_report.get("content_spec_sha256") != current_content_hash
-    ):
-        _error(
-            errors,
-            "REVIEW_ADMISSION_STALE",
-            "visual_gate.review_admission.artifacts.build_report",
-            "admission build report does not bind the current renderable content",
-        )
-
-    validation_report = _load_json_artifact(
-        response_validation_artifact,
-        code="REVIEW_RESPONSE_INVALID",
-        path="visual_gate.review_response_validation",
-        errors=errors,
-    )
-    if validation_report is None:
-        return
-    response_path = validation_report.get("response_path")
-    if not isinstance(response_path, str):
-        _error(
-            errors,
-            "REVIEW_RESPONSE_INVALID",
-            "visual_gate.review_response_validation.response_path",
-            "validated raw response path is missing",
-        )
-        return
-    try:
-        with tempfile.TemporaryDirectory() as directory:
-            rebuilt_validation = review_contracts.validate_response(
-                Path(admission_artifact[0]),
-                Path(invocation_artifact[0]),
-                Path(response_path),
-                Path(directory) / "review-response-validation.json",
-            )
-    except ToolError as exc:
-        errors.append(exc.as_dict())
-        return
-    if rebuilt_validation != validation_report or validation_report.get("valid") is not True or validation_report.get("errors") != []:
-        _error(
-            errors,
-            "REVIEW_RESPONSE_INVALID",
-            "visual_gate.review_response_validation",
-            "stored response validation differs from production recomputation or did not pass",
-        )
-    try:
-        raw_response = json.loads(Path(response_path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError):
-        _error(
-            errors,
-            "REVIEW_RESPONSE_INVALID",
-            "visual_gate.review_response_validation.response_path",
-            "validated raw response is unreadable",
-        )
-        return
-    reviewer = visual_gate.get("reviewer")
-    reviewer_response = (
-        {key: value for key, value in reviewer.items() if key != "mode"}
-        if isinstance(reviewer, dict)
-        else None
-    )
-    if (
-        reviewer_response != raw_response
-        or visual_gate.get("review_round") != admission.get("review_round")
-        or (
-            isinstance(raw_response, dict)
-            and (
-                raw_response.get("admission_id") != admission.get("admission_id")
-                or raw_response.get("review_round")
-                != admission.get("review_round")
-            )
-        )
-    ):
-        _error(
-            errors,
-            "REVIEW_RESPONSE_INVALID",
-            "visual_gate.reviewer",
-            "reviewer object is not the response bound to this admission and round",
-        )
-
-
-def _render_file_identity(
-    value: Any,
-    *,
-    path: str,
-    errors: list[dict[str, str]],
-) -> tuple[str, str] | None:
-    if not isinstance(value, dict):
-        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "file identity is required")
-        return None
-    raw_path = value.get("path")
-    digest = value.get("sha256")
-    if (
-        not isinstance(raw_path, str)
-        or not Path(raw_path).is_absolute()
-        or not isinstance(digest, str)
-        or not SHA256_PATTERN.fullmatch(digest)
-    ):
-        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "path and sha256 are invalid")
-        return None
-    resolved = Path(raw_path).expanduser().resolve()
-    if not resolved.is_file() or _file_sha256(resolved).lower() != digest.lower():
-        _error(errors, "SPEC_RENDER_REPORT_INVALID", path, "reported file is missing or stale")
-        return None
-    return str(resolved), digest.lower()
-
-
-def _validate_render_report(
-    artifact: tuple[str, str] | None,
-    visual_pptx: tuple[str, str] | None,
-    preview: tuple[str, str] | None,
-    preflight_artifact: tuple[str, str] | None,
-    errors: list[dict[str, str]],
-) -> dict[str, Any] | None:
-    report = _load_json_artifact(
-        artifact,
-        code="SPEC_RENDER_REPORT_INVALID",
-        path="visual_gate.render_report",
-        errors=errors,
-    )
-    preflight = _load_json_artifact(
-        preflight_artifact,
-        code="SPEC_RUNTIME_PREFLIGHT_INVALID",
-        path="runtime_preflight",
-        errors=errors,
-    )
-    if report is None:
-        return None
-    if report.get("schema_version") != 1:
-        _error(
-            errors,
-            "SPEC_RENDER_REPORT_INVALID",
-            "visual_gate.render_report.schema_version",
-            "expected render report schema_version 1",
-        )
-    pptx = report.get("pptx")
-    reported_pptx_sha = pptx.get("sha256") if isinstance(pptx, dict) else None
-    if visual_pptx is None or reported_pptx_sha != visual_pptx[1]:
-        _error(
-            errors,
-            "SPEC_RENDER_PPTX_MISMATCH",
-            "visual_gate.render_report.pptx",
-            "render report must bind the current visual-gate PPTX",
-        )
-    reported_preview = _render_file_identity(
-        report.get("preview"),
-        path="visual_gate.render_report.preview",
-        errors=errors,
-    )
-    if (
-        preview is None
-        or reported_preview is None
-        or reported_preview != preview
-        or report.get("preview", {}).get("size") != [1920, 1080]
-    ):
-        _error(
-            errors,
-            "SPEC_RENDER_PREVIEW_MISMATCH",
-            "visual_gate.render_report.preview",
-            "render report must bind the current 1920x1080 preview",
-        )
-    _render_file_identity(
-        report.get("pdf"),
-        path="visual_gate.render_report.pdf",
-        errors=errors,
-    )
-    _render_file_identity(
-        report.get("font_report"),
-        path="visual_gate.render_report.font_report",
-        errors=errors,
-    )
-    pdf = report.get("pdf")
-    if (
-        not isinstance(pdf, dict)
-        or pdf.get("pages") != 1
-        or not _pdf_page_size_matches(pdf.get("page_size_pt"))
-    ):
-        _error(
-            errors,
-            "SPEC_RENDER_REPORT_INVALID",
-            "visual_gate.render_report.pdf",
-            "rendered PDF must contain one 960x540 point page",
-        )
-    renderer = report.get("renderer")
-    rasterizer = report.get("rasterizer")
-    runtime_matches = (
-        isinstance(preflight, dict)
-        and preflight.get("valid") is True
-        and preflight.get("renderer_backend") == "libreoffice"
-        and preflight.get("preview_size") == [1920, 1080]
-        and isinstance(renderer, dict)
-        and renderer.get("backend") == "libreoffice"
-        and renderer.get("isolated_profile") is True
-        and renderer.get("path")
-        == preflight.get("executables", {}).get("soffice", {}).get("path")
-        and renderer.get("version")
-        == preflight.get("executables", {}).get("soffice", {}).get("version")
-        and renderer.get("executable_sha256")
-        == preflight.get("executables", {}).get("soffice", {}).get("sha256")
-        and renderer.get("fontconfig_path")
-        == preflight.get("fontconfig", {}).get("path")
-        and renderer.get("fontconfig_sha256")
-        == preflight.get("fontconfig", {}).get("sha256")
-        and isinstance(rasterizer, dict)
-        and rasterizer.get("path")
-        == preflight.get("executables", {}).get("pdftoppm", {}).get("path")
-        and rasterizer.get("version")
-        == preflight.get("executables", {}).get("pdftoppm", {}).get("version")
-        and rasterizer.get("executable_sha256")
-        == preflight.get("executables", {}).get("pdftoppm", {}).get("sha256")
-        and rasterizer.get("output_size") == [1920, 1080]
-    )
-    if not runtime_matches:
-        _error(
-            errors,
-            "SPEC_RENDER_RUNTIME_MISMATCH",
-            "visual_gate.render_report.renderer",
-            "render report must match the fixed stable LibreOffice preflight identity",
-        )
-    return report
-
-
-def _validate_font_traces_against_render(
-    typography: Any,
-    render_report: dict[str, Any] | None,
-    errors: list[dict[str, str]],
-) -> None:
-    if not isinstance(typography, dict) or not isinstance(render_report, dict):
-        return
-    pdf_sha = render_report.get("pdf", {}).get("sha256")
-    resolved_fonts = render_report.get("font_report", {}).get("resolved_fonts")
-    for index, item in enumerate(typography.get("items", [])):
-        trace = item.get("fallback_trace") if isinstance(item, dict) else None
-        if trace is None:
-            continue
-        if (
-            not isinstance(trace, dict)
-            or trace.get("pdf_sha256") != pdf_sha
-            or trace.get("resolved_fonts") != resolved_fonts
-        ):
-            _error(
-                errors,
-                "SPEC_FONT_TRACE_RENDER_MISMATCH",
-                f"modules.typography.items[{index}].fallback_trace",
-                "font fallback trace must bind the current rendered PDF and resolved-font list",
-            )
-
-
-def _validate_validator_report(
-    artifact: tuple[str, str] | None,
-    expected_native_list_contracts: int,
-    expected_pptx_sha256: str | None,
-    errors: list[dict[str, str]],
-) -> None:
-    if artifact is None:
-        return
-    path = Path(artifact[0])
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        _error(
-            errors,
-            "SPEC_VALIDATOR_REPORT_INVALID",
-            "editability_gate.validator",
-            "validator artifact must contain valid JSON",
-        )
-        return
-    if not isinstance(payload, dict):
-        _error(
-            errors,
-            "SPEC_VALIDATOR_REPORT_INVALID",
-            "editability_gate.validator",
-            "validator report root must be an object",
-        )
-        return
-    report_errors = payload.get("errors")
-    if payload.get("valid") is not True or not isinstance(report_errors, list) or report_errors:
-        _error(
-            errors,
-            "SPEC_VALIDATOR_REPORT_FAILED",
-            "editability_gate.validator",
-            "validator report must have valid=true and an empty errors array",
-        )
-    report_pptx_sha256 = payload.get("pptx_sha256")
-    if (
-        not isinstance(report_pptx_sha256, str)
-        or not SHA256_PATTERN.fullmatch(report_pptx_sha256)
-        or expected_pptx_sha256 is None
-        or report_pptx_sha256.lower() != expected_pptx_sha256.lower()
-    ):
-        _error(
-            errors,
-            "SPEC_VALIDATOR_PPTX_MISMATCH",
-            "editability_gate.validator.pptx_sha256",
-            "validator report must bind the current editability-gate PPTX sha256",
-        )
-    checked = payload.get("native_list_contracts_checked")
-    if not isinstance(checked, int) or isinstance(checked, bool) or checked != expected_native_list_contracts:
-        _error(
-            errors,
-            "SPEC_NATIVE_LIST_VALIDATION_MISSING",
-            "editability_gate.validator.native_list_contracts_checked",
-            f"expected {expected_native_list_contracts} checked native-list TextBox contracts",
-        )
-
-
-def _validate_image_artifact(
-    artifact: tuple[str, str] | None,
-    code: str,
-    path: str,
-    errors: list[dict[str, str]],
-) -> bool:
-    if artifact is None:
-        return False
-    try:
-        with Image.open(artifact[0]) as image:
-            width, height = image.size
-            if width <= 0 or height <= 0 or width * height > MAX_IMAGE_PIXELS:
-                raise ValueError("image dimensions exceed the supported limit")
-            image.load()
-    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError):
-        _error(errors, code, path, "artifact must be a decodable image within resource limits")
-        return False
-    return True
-
-
-def _visual_evidence_identity(
-    value: Any,
-    path: str,
-    errors: list[dict[str, str]],
-) -> tuple[str, str] | None:
-    if not isinstance(value, dict):
-        _error(errors, "SPEC_VISUAL_DIFF_EVIDENCE_INCOMPLETE", path, "evidence identity is required")
-        return None
-    artifact = _validate_gate_artifact(value, path, errors)
-    if artifact is None:
-        return None
-    if not _validate_image_artifact(
-        artifact,
-        "SPEC_VISUAL_DIFF_EVIDENCE_INCOMPLETE",
-        path,
-        errors,
-    ):
-        return None
-    return artifact
-
-
-def _validate_visual_diff_report(
-    artifact: tuple[str, str] | None,
-    spec: dict[str, Any],
-    preview: tuple[str, str] | None,
-    render_report: tuple[str, str] | None,
-    visual_pptx: tuple[str, str] | None,
-    errors: list[dict[str, str]],
-    *,
-    require_all_regions: bool = True,
-) -> set[str]:
-    verified: set[str] = set()
-    if artifact is None:
-        return verified
-    try:
-        payload = json.loads(Path(artifact[0]).read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        _error(errors, "SPEC_VISUAL_DIFF_REPORT_INVALID", "visual_gate.report", "visual diff report must contain valid JSON")
-        return verified
-    if not isinstance(payload, dict):
-        _error(errors, "SPEC_VISUAL_DIFF_REPORT_INVALID", "visual_gate.report", "visual diff report root must be an object")
-        return verified
-    expected_profile = _verification_profile(spec)
-    if payload.get("verification_profile") != expected_profile:
-        _error(
-            errors,
-            "SPEC_VISUAL_DIFF_PROFILE_MISMATCH",
-            "visual_gate.report.verification_profile",
-            "visual diff must use the current fixed verification profile",
-        )
-    source_hash = spec.get("clean_visual_reference", {}).get("sha256")
-    report_source = payload.get("reference")
-    if not isinstance(report_source, dict) or report_source.get("sha256") != source_hash:
-        _error(errors, "SPEC_VISUAL_DIFF_SOURCE_MISMATCH", "visual_gate.report.reference", "visual diff must bind the current clean visual reference")
-    report_preview = payload.get("preview")
-    if (
-        preview is None
-        or not isinstance(report_preview, dict)
-        or report_preview.get("sha256") != preview[1]
-    ):
-        _error(errors, "SPEC_VISUAL_DIFF_PREVIEW_MISMATCH", "visual_gate.report.preview", "visual diff must bind the current preview")
-    report_render = payload.get("render_report")
-    if (
-        render_report is None
-        or not isinstance(report_render, dict)
-        or report_render.get("path") != render_report[0]
-        or report_render.get("sha256") != render_report[1]
-        or payload.get("pptx_sha256") != (
-            visual_pptx[1] if visual_pptx is not None else None
-        )
-    ):
-        _error(
-            errors,
-            "SPEC_RENDER_REPORT_INVALID",
-            "visual_gate.report.render_report",
-            "visual diff must bind the current render report and PPTX",
-        )
-    region_presence = payload.get("region_presence")
-    if (
-        not isinstance(region_presence, dict)
-        or region_presence.get("status") != "passed"
-        or region_presence.get("missing") != []
-    ):
-        _error(
-            errors,
-            "SPEC_REGION_PRESENCE_FAILED",
-            "visual_gate.report.region_presence",
-            "region presence must pass before final delivery",
-        )
-    summary = payload.get("region_summary")
-    if require_all_regions:
-        requested = len(spec.get("regions", [])) if isinstance(spec.get("regions"), list) else 0
-    else:
-        requested = summary.get("requested") if isinstance(summary, dict) else None
-    if (
-        not isinstance(summary, dict)
-        or not isinstance(requested, int)
-        or isinstance(requested, bool)
-        or requested < 0
-        or summary.get("skipped") != 0
-        or summary.get("requested") != requested
-        or summary.get("generated") != requested
-    ):
-        _error(errors, "SPEC_VISUAL_DIFF_EVIDENCE_INCOMPLETE", "visual_gate.report.region_summary", "all requested regions must have current evidence and none may be skipped")
-    evidence = payload.get("evidence")
-    for key in ("overlay", "diff"):
-        identity = _visual_evidence_identity(
-            evidence.get(key) if isinstance(evidence, dict) else None,
-            f"visual_gate.report.evidence.{key}",
-            errors,
-        )
-        if identity:
-            verified.update({identity[0], Path(identity[0]).name})
-    regions = payload.get("regions")
-    if not isinstance(regions, list) or len(regions) != requested:
-        _error(errors, "SPEC_VISUAL_DIFF_EVIDENCE_INCOMPLETE", "visual_gate.report.regions", "region evidence count must match the spec")
-    else:
-        for index, region in enumerate(regions):
-            identity = _visual_evidence_identity(
-                {
-                    "path": region.get("evidence"),
-                    "sha256": region.get("evidence_sha256"),
-                }
-                if isinstance(region, dict)
-                else None,
-                f"visual_gate.report.regions[{index}]",
-                errors,
-            )
-            if identity:
-                verified.update({identity[0], Path(identity[0]).name})
-    return verified
-
-
-def _load_pptx_validator():
-    path = Path(__file__).with_name("validate_pptx.py")
-    module_spec = importlib.util.spec_from_file_location("ia_validate_pptx_for_final", path)
-    if module_spec is None or module_spec.loader is None:
-        raise RuntimeError(f"Cannot load {path}")
-    module = importlib.util.module_from_spec(module_spec)
-    module_spec.loader.exec_module(module)
-    return module
-
-
-def _rerun_pptx_validator(
-    pptx: tuple[str, str] | None,
-    spec: dict[str, Any],
-    errors: list[dict[str, str]],
-) -> dict[str, Any] | None:
-    if pptx is None:
-        return None
-    try:
-        result = _load_pptx_validator().validate_pptx(
-            Path(pptx[0]),
-            expected_slides=1,
-            reconstruction_spec=spec,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        _error(errors, "SPEC_CURRENT_PPTX_VALIDATION_FAILED", "editability_gate.pptx", str(exc))
-        return None
-    if result.get("valid") is not True:
-        _error(
-            errors,
-            "SPEC_CURRENT_PPTX_VALIDATION_FAILED",
-            "editability_gate.pptx",
-            f"current PPTX failed structure validation: {result.get('errors', [])}",
-        )
-    return result
 
 
 def _validate_coverage(
@@ -1926,6 +1110,180 @@ def _validate_icons(
         _error(errors, "SPEC_ICON_ELEMENT_MISSING", "modules.icons.icons", f"missing icon records: {', '.join(missing_elements)}")
 
 
+def _identity_only_final(
+    spec: dict[str, Any],
+    *,
+    verification_profile: str,
+    errors: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Validate final delivery from current immutable artifacts only."""
+    visual_gate = spec.get("visual_gate")
+    editability_gate = spec.get("editability_gate")
+    expected_delivery = {
+        "rapid": "rapid_validated",
+        "reviewed": "reviewed_passed",
+        "strict": "strict_gate_passed",
+    }.get(verification_profile)
+    if spec.get("delivery_status") != expected_delivery:
+        _error(
+            errors,
+            "SPEC_DELIVERY_STATUS_INVALID",
+            "delivery_status",
+            f"final {verification_profile} delivery requires {expected_delivery}",
+        )
+    if not isinstance(visual_gate, dict):
+        _error(errors, "SPEC_VISUAL_GATE_NOT_PASSED", "visual_gate", "final visual gate is required")
+        visual_gate = {}
+    if not isinstance(editability_gate, dict):
+        _error(errors, "SPEC_EDITABILITY_GATE_NOT_PASSED", "editability_gate", "final editability gate is required")
+        editability_gate = {}
+
+    expected_visual_status = (
+        "not_independently_reviewed" if verification_profile == "rapid" else "passed"
+    )
+    if visual_gate.get("status") != expected_visual_status:
+        _error(
+            errors,
+            "SPEC_VISUAL_GATE_NOT_PASSED",
+            "visual_gate.status",
+            f"final {verification_profile} requires {expected_visual_status}",
+        )
+    if editability_gate.get("status") != "passed":
+        _error(errors, "SPEC_EDITABILITY_GATE_NOT_PASSED", "editability_gate.status", "editability gate must pass")
+    for gate_name, gate in (("visual_gate", visual_gate), ("editability_gate", editability_gate)):
+        evidence = gate.get("evidence")
+        if not isinstance(evidence, list) or not evidence or not all(
+            isinstance(item, str) and bool(item) for item in evidence
+        ):
+            _error(errors, "SPEC_GATE_EVIDENCE_INVALID", f"{gate_name}.evidence", "non-empty evidence paths are required")
+
+    tripwire = visual_gate.get("tripwire")
+    tripwire_valid = isinstance(tripwire, dict) and (
+        (
+            tripwire.get("available") is False
+            and tripwire.get("triggered") is None
+            and tripwire.get("reason") == "no_approved_baseline"
+        )
+        or (
+            tripwire.get("available") is True
+            and tripwire.get("triggered") is False
+        )
+    )
+    if not tripwire_valid:
+        _error(errors, "SPEC_VISUAL_TRIPWIRE_INVALID", "visual_gate.tripwire", "tripwire must be explicitly safe")
+
+    edit_review = editability_gate.get("review")
+    required_edit = {
+        "text_and_data",
+        "native_text_structure",
+        "basic_structure",
+        "full_slide_picture_risk",
+    }
+    if not isinstance(edit_review, dict) or any(
+        edit_review.get(field) != "passed" for field in required_edit
+    ):
+        _error(errors, "SPEC_EDITABILITY_REVIEW_INVALID", "editability_gate.review", "all editability checks must pass")
+
+    artifacts, artifact_errors = collect_current_artifacts(spec)
+    errors.extend(artifact_errors)
+    summary: dict[str, Any] = {
+        "content_spec_sha256": content_spec_sha256(spec),
+        "delivery_status": spec.get("delivery_status"),
+    }
+    if artifacts is None:
+        return summary
+    summary["current_pptx"] = artifacts.identities["current_pptx"]
+    summary["runtime_preflight"] = artifacts.identities["runtime_preflight"]
+    try:
+        build_payload = json.loads(
+            Path(artifacts.identities["build_report"]["path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError):
+        build_payload = {}
+    summary["capability_manifest_sha256"] = build_payload.get(
+        "capability_manifest_sha256"
+    )
+
+    review_round = visual_gate.get("review_round")
+    reviewer = visual_gate.get("reviewer")
+    bound_context_hash = visual_gate.get("review_context_sha256")
+    if verification_profile == "rapid":
+        for field, value in (
+            ("review_round", review_round),
+            ("reviewer", reviewer),
+            ("review_context_sha256", bound_context_hash),
+        ):
+            if value is not None:
+                _error(errors, "SPEC_RAPID_REVIEWER_FORBIDDEN", f"visual_gate.{field}", "rapid must not carry reviewer state")
+    else:
+        if type(review_round) is not int or review_round not in {1, 2}:
+            _error(errors, "SPEC_VISUAL_REVIEW_ROUND_INVALID", "visual_gate.review_round", "review round must be 1 or 2")
+        if not is_sha256(bound_context_hash):
+            _error(errors, "REVIEW_RESPONSE_CONTEXT_MISMATCH", "visual_gate.review_context_sha256", "current review context hash is required")
+        if (
+            not isinstance(reviewer, dict)
+            or set(reviewer) != {"mode", "response"}
+            or reviewer.get("mode") != "independent_read_only_subagent"
+        ):
+            _error(errors, "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED", "visual_gate.reviewer", "raw independent reviewer response is required")
+        if type(review_round) is int and review_round in {1, 2}:
+            try:
+                context = build_review_context(
+                    page_id=spec["page_id"],
+                    review_round=review_round,
+                    verification_profile=verification_profile,
+                    content_spec_sha256=content_spec_sha256(spec),
+                    artifacts=artifacts.identities,
+                    region_evidence=list(artifacts.region_evidence),
+                )
+                current_context_hash = review_context_sha256(context)
+            except (KeyError, TypeError, ValueError) as exc:
+                _error(errors, "REVIEW_RESPONSE_CONTEXT_MISMATCH", "visual_gate.review_context_sha256", str(exc))
+                current_context_hash = None
+            if current_context_hash != bound_context_hash:
+                _error(errors, "REVIEW_RESPONSE_CONTEXT_MISMATCH", "visual_gate.review_context_sha256", "review context does not bind current artifacts")
+            response_record = reviewer.get("response") if isinstance(reviewer, dict) else None
+            response_artifact = _validate_gate_artifact(
+                response_record,
+                "visual_gate.reviewer.response",
+                errors,
+            )
+            response = _load_json_artifact(
+                response_artifact,
+                code="REVIEW_RESPONSE_INVALID",
+                path="visual_gate.reviewer.response",
+                errors=errors,
+            )
+            if response is not None and current_context_hash is not None:
+                response_errors = reviewer_response_issues(
+                    response,
+                    expected_context_sha256=current_context_hash,
+                    page_id=spec["page_id"],
+                    review_round=review_round,
+                    verification_profile=verification_profile,
+                    required_coverage=artifacts.required_coverage,
+                    allowed_evidence=artifacts.allowed_evidence,
+                )
+                errors.extend(response_errors)
+                if response.get("decision") != "passed":
+                    _error(errors, "SPEC_OPEN_BLOCKING_DIFFERENCE", "visual_gate.reviewer.response", "non-passing reviewer decision blocks delivery")
+
+    high_risk = spec.get("modules", {}).get("high_risk") if isinstance(spec.get("modules"), dict) else None
+    items = high_risk.get("items", []) if isinstance(high_risk, dict) else []
+    if review_round == 2 and (
+        not isinstance(items, list)
+        or not items
+        or any(not isinstance(item, dict) or item.get("result") != "passed" for item in items)
+    ):
+        _error(errors, "SPEC_HIGH_RISK_ITEMS_INVALID", "modules.high_risk.items", "round 2 requires passed high-risk closure")
+    for index, item in enumerate(items if isinstance(items, list) else []):
+        if isinstance(item, dict) and item.get("severity") in {"P0", "P1"} and item.get("result") != "passed":
+            _error(errors, "SPEC_OPEN_BLOCKING_DIFFERENCE", f"modules.high_risk.items[{index}]", "open P0/P1 blocks final delivery")
+    return summary
+
+
 def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     """Return a stable validation report for a reconstruction specification."""
     if stage not in {"prebuild", "final"}:
@@ -2248,494 +1606,20 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         )
 
     if stage == "final":
-        visual_gate = spec.get("visual_gate")
-        editability_gate = spec.get("editability_gate")
-        expected_delivery_status = {
-            "rapid": "rapid_validated",
-            "reviewed": "reviewed_passed",
-            "strict": "strict_gate_passed",
-        }.get(verification_profile)
-        if (
-            spec.get("verification_profile") is not None
-            and spec.get("delivery_status") != expected_delivery_status
-        ):
-            _error(
-                errors,
-                "SPEC_DELIVERY_STATUS_INVALID",
-                "delivery_status",
-                f"final {verification_profile} delivery requires {expected_delivery_status}",
-            )
-        if verification_profile == "rapid":
-            if (
-                not isinstance(visual_gate, dict)
-                or visual_gate.get("status") != "not_independently_reviewed"
-                or not visual_gate.get("evidence")
-            ):
-                _error(
-                    errors,
-                    "SPEC_RAPID_VISUAL_STATUS_INVALID",
-                    "visual_gate",
-                    "rapid final requires not_independently_reviewed status and evidence",
-                )
-        elif not isinstance(visual_gate, dict) or visual_gate.get("status") != "passed" or not visual_gate.get("evidence"):
-            _error(errors, "SPEC_VISUAL_GATE_NOT_PASSED", "visual_gate", "reviewed and strict final require passed visual status and evidence")
-        if isinstance(visual_gate, dict) and isinstance(visual_gate.get("tripwire"), dict) and visual_gate["tripwire"].get("triggered"):
-            _error(errors, "SPEC_VISUAL_TRIPWIRE_TRIGGERED", "visual_gate.tripwire", "triggered tripwire blocks final delivery")
-        if not isinstance(editability_gate, dict) or editability_gate.get("status") != "passed" or not editability_gate.get("evidence"):
-            _error(errors, "SPEC_EDITABILITY_GATE_NOT_PASSED", "editability_gate", "final editability gate requires passed status and evidence")
-        review_round = visual_gate.get("review_round") if isinstance(visual_gate, dict) else None
-        if verification_profile == "rapid" and review_round is not None:
-            _error(
-                errors,
-                "SPEC_RAPID_REVIEWER_FORBIDDEN",
-                "visual_gate.review_round",
-                "rapid verification must not claim an independent review round",
-            )
-        elif verification_profile != "rapid" and (type(review_round) is not int or not 1 <= review_round <= 2):
-            _error(
-                errors,
-                "SPEC_VISUAL_REVIEW_ROUND_INVALID",
-                "visual_gate.review_round",
-                "final visual review round must be an integer from 1 through 2",
-            )
-        for gate_name, gate in (("visual_gate", visual_gate), ("editability_gate", editability_gate)):
-            evidence = gate.get("evidence") if isinstance(gate, dict) else None
-            if not isinstance(evidence, list) or not evidence or not all(isinstance(item, str) and item for item in evidence):
-                _error(errors, "SPEC_GATE_EVIDENCE_INVALID", f"{gate_name}.evidence", "evidence must be a non-empty string array")
-        visual_review = visual_gate.get("review") if isinstance(visual_gate, dict) else None
-        required_visual = {"whole_page", "title", "body", "footer", "high_risk_regions"}
-        if verification_profile == "strict" and (not isinstance(visual_review, dict) or not required_visual.issubset(visual_review) or any(visual_review.get(key) != "passed" for key in ("whole_page", "title", "body", "footer")) or not isinstance(visual_review.get("high_risk_regions"), list)):
-            _error(errors, "SPEC_VISUAL_REVIEW_INVALID", "visual_gate.review", "all visual review fields are required and must pass")
-        reviewer = visual_gate.get("reviewer") if isinstance(visual_gate, dict) else None
-        if verification_profile == "rapid" and reviewer is not None:
-            _error(
-                errors,
-                "SPEC_RAPID_REVIEWER_FORBIDDEN",
-                "visual_gate.reviewer",
-                "rapid verification must not claim an independent reviewer",
-            )
-        elif verification_profile != "rapid" and (not isinstance(reviewer, dict) or reviewer.get("mode") != "independent_read_only_subagent"):
-            _error(
-                errors,
-                "SPEC_INDEPENDENT_VISUAL_REVIEW_REQUIRED",
-                "visual_gate.reviewer",
-                "independent read-only visual review is required",
-            )
-        elif isinstance(reviewer, dict):
-            findings = reviewer.get("findings")
-            disclosures = reviewer.get("p2_disclosures")
-            coverage = reviewer.get("coverage")
-            decision = reviewer.get("decision")
-            blocking_findings = (
-                [
-                    finding
-                    for finding in findings
-                    if isinstance(finding, dict)
-                    and isinstance(finding.get("severity"), str)
-                    and finding["severity"] in {"P0", "P1"}
-                ]
-                if isinstance(findings, list)
-                else []
-            )
-            if (
-                not isinstance(decision, str)
-                or decision not in {"passed", "changes_required", "not_reviewable"}
-                or not isinstance(findings, list)
-                or not all(
-                    valid_visual_review_finding(
-                        finding, evidence_mode="string"
-                    )
-                    for finding in findings
-                )
-                or not isinstance(disclosures, list)
-                or (bool(blocking_findings) and decision != "changes_required")
-                or (decision == "changes_required" and not blocking_findings)
-            ):
-                _error(
-                    errors,
-                    "SPEC_INDEPENDENT_VISUAL_REVIEW_INVALID",
-                    "visual_gate.reviewer",
-                    "reviewer decision, findings and p2_disclosures are invalid",
-                )
-            element_kinds = {
-                element.get("kind")
-                for element in element_map.values()
-                if isinstance(element, dict)
-            }
-            required_checked = {"canvas_and_regions", "objects_and_geometry"}
-            if element_kinds & {"text", "special_text"} or set(activated) & {"typography", "special_text"}:
-                required_checked.add("text_and_typography")
-            if element_kinds & {"table", "matrix"}:
-                required_checked.add("tables_and_matrices")
-            if element_kinds & {"shape", "line", "status", "diagram", "chart"} or set(activated) & {"graphics", "diagram", "chart"}:
-                required_checked.add("graphics_connectors_charts")
-            if element_kinds & {"icon", "picture"} or set(activated) & {"icons", "picture_framing"}:
-                required_checked.add("pictures_crop_layers")
-            high_risk_module = modules.get("high_risk")
-            if (
-                "high_risk" in activated
-                and isinstance(high_risk_module, dict)
-                and high_risk_module.get("items")
-            ):
-                required_checked.add("high_risk_regions")
-            coverage_valid = (
-                isinstance(coverage, dict)
-                and set(coverage) == VISUAL_REVIEW_COVERAGE_FIELDS
-                and all(
-                    isinstance(value, str)
-                    and value in VISUAL_REVIEW_COVERAGE_RESULTS
-                    for value in coverage.values()
-                )
-                and all(coverage.get(category) == "checked" for category in required_checked)
-                and not (
-                    reviewer.get("decision") == "passed"
-                    and "not_reviewable" in coverage.values()
-                )
-            )
-            if not coverage_valid:
-                _error(
-                    errors,
-                    "SPEC_VISUAL_REVIEW_COVERAGE_INVALID",
-                    "visual_gate.reviewer.coverage",
-                    "coverage must contain exactly the required categories, mark applicable categories checked, and a passing review cannot contain not_reviewable",
-                )
-            if reviewer.get("decision") != "passed" or (
-                isinstance(findings, list)
-                and any(
-                    isinstance(finding, dict)
-                    and isinstance(finding.get("severity"), str)
-                    and finding["severity"] in {"P0", "P1"}
-                    for finding in findings
-                )
-            ):
-                _error(
-                    errors,
-                    "SPEC_OPEN_BLOCKING_DIFFERENCE",
-                    "visual_gate.reviewer",
-                    "open P0/P1 or a non-passing reviewer decision blocks final delivery",
-                )
-            preview_hash = (
-                visual_gate.get("preview", {}).get("sha256")
-                if isinstance(visual_gate.get("preview"), dict)
-                else None
-            )
-            if reviewer.get("preview_sha256") != preview_hash:
-                _error(
-                    errors,
-                    "SPEC_VISUAL_REVIEW_PREVIEW_MISMATCH",
-                    "visual_gate.reviewer.preview_sha256",
-                    "review must bind the current preview",
-                )
-            source_hash = (
-                spec.get("clean_visual_reference", {}).get("sha256")
-                if isinstance(spec.get("clean_visual_reference"), dict)
-                else None
-            )
-            if reviewer.get("source_sha256") != source_hash:
-                _error(
-                    errors,
-                    "SPEC_VISUAL_REVIEW_SOURCE_MISMATCH",
-                    "visual_gate.reviewer.source_sha256",
-                    "review must bind the current visual source",
-                )
-            if reviewer.get("page_id") != spec.get("page_id"):
-                _error(
-                    errors,
-                    "SPEC_VISUAL_REVIEW_PAGE_MISMATCH",
-                    "visual_gate.reviewer.page_id",
-                    "review must bind the current page_id",
-                )
-        edit_review = editability_gate.get("review") if isinstance(editability_gate, dict) else None
-        required_edit = {
-            "text_and_data",
-            "native_text_structure",
-            "basic_structure",
-            "full_slide_picture_risk",
+        final_summary = _identity_only_final(
+            spec,
+            verification_profile=verification_profile,
+            errors=errors,
+        )
+        return {
+            "valid": not errors,
+            "stage": stage,
+            "verification_profile": verification_profile,
+            "spec_sha256": spec_sha256,
+            "errors": errors,
+            "warnings": warnings,
+            **final_summary,
         }
-        if not isinstance(edit_review, dict) or not required_edit.issubset(edit_review) or any(edit_review.get(key) != "passed" for key in required_edit):
-            _error(errors, "SPEC_EDITABILITY_REVIEW_INVALID", "editability_gate.review", "all editability review fields are required and must pass")
-        tripwire = visual_gate.get("tripwire") if isinstance(visual_gate, dict) else None
-        tripwire_valid = False
-        if isinstance(tripwire, dict):
-            if tripwire.get("available") is False:
-                tripwire_valid = (
-                    tripwire.get("triggered") is None
-                    and tripwire.get("reason") == "no_approved_baseline"
-                )
-            elif tripwire.get("available") is True:
-                tripwire_valid = tripwire.get("triggered") is False
-        if not tripwire_valid:
-            _error(
-                errors,
-                "SPEC_VISUAL_TRIPWIRE_INVALID",
-                "visual_gate.tripwire",
-                "tripwire must be unavailable with triggered=null or available and explicitly untriggered",
-            )
-        visual_pptx = _validate_gate_artifact(
-            visual_gate.get("pptx") if isinstance(visual_gate, dict) else None,
-            "visual_gate.pptx",
-            errors,
-        )
-        preview_artifact = _validate_gate_artifact(
-            visual_gate.get("preview") if isinstance(visual_gate, dict) else None,
-            "visual_gate.preview",
-            errors,
-        )
-        report_artifact = _validate_gate_artifact(
-            visual_gate.get("report") if isinstance(visual_gate, dict) else None,
-            "visual_gate.report",
-            errors,
-        )
-        if not isinstance(visual_gate, dict) or not isinstance(
-            visual_gate.get("render_report"), dict
-        ):
-            _error(
-                errors,
-                "SPEC_RENDER_REPORT_MISSING",
-                "visual_gate.render_report",
-                "final validation requires the current render-report.json identity",
-            )
-        render_report_artifact = _validate_gate_artifact(
-            visual_gate.get("render_report") if isinstance(visual_gate, dict) else None,
-            "visual_gate.render_report",
-            errors,
-        )
-        if not isinstance(spec.get("runtime_preflight"), dict):
-            _error(
-                errors,
-                "SPEC_RUNTIME_PREFLIGHT_MISSING",
-                "runtime_preflight",
-                "final validation requires the fixed LibreOffice preflight identity",
-            )
-        preflight_artifact = _validate_gate_artifact(
-            spec.get("runtime_preflight"),
-            "runtime_preflight",
-            errors,
-        )
-        editability_pptx = _validate_gate_artifact(
-            editability_gate.get("pptx") if isinstance(editability_gate, dict) else None,
-            "editability_gate.pptx",
-            errors,
-        )
-        validator_artifact = _validate_gate_artifact(
-            editability_gate.get("validator") if isinstance(editability_gate, dict) else None,
-            "editability_gate.validator",
-            errors,
-        )
-        background_artifact = _require_attempt8_artifact(
-            visual_gate.get("background_contract") if isinstance(visual_gate, dict) else None,
-            path="visual_gate.background_contract",
-            missing_code="BACKGROUND_DECLARATION_MISSING",
-            errors=errors,
-        )
-        text_geometry_artifact = _require_attempt8_artifact(
-            visual_gate.get("rendered_text_geometry") if isinstance(visual_gate, dict) else None,
-            path="visual_gate.rendered_text_geometry",
-            missing_code="TEXT_GEOMETRY_MISSING",
-            errors=errors,
-        )
-        text_geometry_report, bound_build_report = (
-            _validate_rendered_text_geometry_final(
-                spec,
-                text_geometry_artifact,
-                visual_pptx=visual_pptx,
-                render_report=render_report_artifact,
-                runtime_preflight=preflight_artifact,
-                errors=errors,
-            )
-        )
-        _validate_background_contract_final(
-            spec,
-            background_artifact,
-            text_report=text_geometry_report,
-            structure_report=validator_artifact,
-            build_report=bound_build_report,
-            errors=errors,
-        )
-
-        review_fields = (
-            "review_admission",
-            "review_invocation",
-            "review_response_validation",
-        )
-        if verification_profile == "rapid":
-            for field in review_fields:
-                if isinstance(visual_gate, dict) and visual_gate.get(field) is not None:
-                    _error(
-                        errors,
-                        "SPEC_RAPID_REVIEWER_FORBIDDEN",
-                        f"visual_gate.{field}",
-                        "rapid verification must not carry independent-review artifacts",
-                    )
-        else:
-            admission_artifact = _require_attempt8_artifact(
-                visual_gate.get("review_admission") if isinstance(visual_gate, dict) else None,
-                path="visual_gate.review_admission",
-                missing_code="REVIEW_ADMISSION_NOT_ISSUED",
-                errors=errors,
-            )
-            invocation_artifact = _require_attempt8_artifact(
-                visual_gate.get("review_invocation") if isinstance(visual_gate, dict) else None,
-                path="visual_gate.review_invocation",
-                missing_code="REVIEW_RESPONSE_INVALID",
-                errors=errors,
-            )
-            response_validation_artifact = _require_attempt8_artifact(
-                visual_gate.get("review_response_validation") if isinstance(visual_gate, dict) else None,
-                path="visual_gate.review_response_validation",
-                missing_code="REVIEW_RESPONSE_INVALID",
-                errors=errors,
-            )
-            source_record = spec.get("clean_visual_reference")
-            source_artifact = (
-                (
-                    str(Path(source_record["path"]).expanduser().resolve()),
-                    source_record["sha256"].lower(),
-                )
-                if isinstance(source_record, dict)
-                and isinstance(source_record.get("path"), str)
-                and isinstance(source_record.get("sha256"), str)
-                else None
-            )
-            _validate_review_chain_final(
-                spec,
-                visual_gate if isinstance(visual_gate, dict) else {},
-                profile=verification_profile,
-                admission_artifact=admission_artifact,
-                invocation_artifact=invocation_artifact,
-                response_validation_artifact=response_validation_artifact,
-                current_artifacts={
-                    "pptx": visual_pptx,
-                    "source": source_artifact,
-                    "preview": preview_artifact,
-                    "structure_report": validator_artifact,
-                    "render_report": render_report_artifact,
-                    "runtime_preflight": preflight_artifact,
-                    "rendered_text_geometry": text_geometry_artifact,
-                    "background_contract": background_artifact,
-                    "visual_diff": report_artifact,
-                },
-                build_report=bound_build_report,
-                text_report=text_geometry_report,
-                errors=errors,
-            )
-        expected_native_list_contracts = sum(
-            1
-            for item in (
-                modules.get("typography", {}).get("items", [])
-                if isinstance(modules.get("typography"), dict)
-                else []
-            )
-            if isinstance(item, dict)
-            and isinstance(item.get("paragraphs"), list)
-            and any(
-                isinstance(paragraph, dict)
-                and isinstance(paragraph.get("list"), dict)
-                and paragraph["list"].get("is_list") is True
-                for paragraph in item["paragraphs"]
-            )
-        )
-        _validate_validator_report(
-            validator_artifact,
-            expected_native_list_contracts,
-            editability_pptx[1] if editability_pptx else None,
-            errors,
-        )
-        _validate_image_artifact(
-            preview_artifact,
-            "SPEC_PREVIEW_IMAGE_INVALID",
-            "visual_gate.preview",
-            errors,
-        )
-        render_payload = _validate_render_report(
-            render_report_artifact,
-            visual_pptx,
-            preview_artifact,
-            preflight_artifact,
-            errors,
-        )
-        _validate_font_traces_against_render(
-            modules.get("typography") if isinstance(modules, dict) else None,
-            render_payload,
-            errors,
-        )
-        verified_visual_evidence = _validate_visual_diff_report(
-            report_artifact,
-            spec,
-            preview_artifact,
-            render_report_artifact,
-            visual_pptx,
-            errors,
-            require_all_regions=verification_profile == "strict",
-        )
-        visual_evidence = visual_gate.get("evidence") if isinstance(visual_gate, dict) else None
-        if isinstance(visual_evidence, list):
-            for index, evidence_path in enumerate(visual_evidence):
-                if evidence_path not in verified_visual_evidence and Path(str(evidence_path)).name not in verified_visual_evidence:
-                    _error(
-                        errors,
-                        "SPEC_GATE_EVIDENCE_INVALID",
-                        f"visual_gate.evidence[{index}]",
-                        "visual gate evidence must come from the verified visual-diff report",
-                    )
-        editability_evidence = editability_gate.get("evidence") if isinstance(editability_gate, dict) else None
-        validator_names = (
-            {validator_artifact[0], Path(validator_artifact[0]).name}
-            if validator_artifact
-            else set()
-        )
-        if isinstance(editability_evidence, list):
-            for index, evidence_path in enumerate(editability_evidence):
-                if evidence_path not in validator_names and Path(str(evidence_path)).name not in validator_names:
-                    _error(
-                        errors,
-                        "SPEC_GATE_EVIDENCE_INVALID",
-                        f"editability_gate.evidence[{index}]",
-                        "editability evidence must identify the verified validator report",
-                    )
-        if isinstance(reviewer, dict) and isinstance(reviewer.get("findings"), list):
-            for index, finding in enumerate(reviewer["findings"]):
-                evidence_path = finding.get("evidence") if isinstance(finding, dict) else None
-                if (
-                    isinstance(evidence_path, str)
-                    and evidence_path
-                    and evidence_path not in verified_visual_evidence
-                    and Path(evidence_path).name not in verified_visual_evidence
-                ):
-                    _error(
-                        errors,
-                        "SPEC_FINDING_EVIDENCE_INVALID",
-                        f"visual_gate.reviewer.findings[{index}].evidence",
-                        "finding evidence must identify current verified visual-diff evidence",
-                    )
-        if visual_pptx and editability_pptx and visual_pptx != editability_pptx:
-            _error(
-                errors,
-                "SPEC_GATE_PPTX_IDENTITY_MISMATCH",
-                "visual_gate.pptx",
-                "visual and editability gates must reference the same current PPTX",
-            )
-        _rerun_pptx_validator(editability_pptx or visual_pptx, spec, errors)
-        high_risk = modules.get("high_risk") if isinstance(modules, dict) else None
-        items = high_risk.get("items", []) if isinstance(high_risk, dict) else []
-        if "high_risk" in activated and (not isinstance(high_risk, dict) or not isinstance(high_risk.get("items"), list)):
-            _error(errors, "SPEC_HIGH_RISK_ITEMS_INVALID", "modules.high_risk.items", "activated high_risk requires an items array")
-            items = []
-        required_risk = {"risk_id", "source", "scope", "category", "expected", "strategy", "result", "evidence", "confidence", "severity", "verification"}
-        for index, item in enumerate(items):
-            if not isinstance(item, dict) or not required_risk.issubset(item) or item.get("result") not in {"passed", "changes_required", "visual_approximation", "not_verifiable"} or item.get("severity") not in {"P0", "P1", "P2"} or item.get("confidence") not in ALLOWED_CONFIDENCE:
-                _error(errors, "SPEC_HIGH_RISK_ITEM_INVALID", f"modules.high_risk.items[{index}]", "high-risk item fields or enums are invalid")
-            if (
-                isinstance(item, dict)
-                and item.get("severity") in {"P0", "P1"}
-                and item.get("result") != "passed"
-            ):
-                _error(
-                    errors,
-                    "SPEC_OPEN_BLOCKING_DIFFERENCE",
-                    f"modules.high_risk.items[{index}]",
-                    "open P0/P1 blocks final delivery",
-                )
 
     return {
         "valid": not errors,
@@ -2745,6 +1629,32 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def validate_spec_file(
+    spec_path: Path,
+    *,
+    stage: str,
+    snapshot_path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate one exact JSON byte stream and optionally freeze it for build."""
+    if snapshot_path is not None and stage != "prebuild":
+        raise ValueError("--snapshot is only valid with --stage prebuild")
+    raw = spec_path.read_bytes()
+    spec = json.loads(
+        raw.decode("utf-8"),
+        parse_constant=reject_nonstandard_json_number,
+    )
+    report = validate_spec(spec, stage=stage)
+    if snapshot_path is not None and report["valid"]:
+        resolved_snapshot = snapshot_path.expanduser().resolve()
+        resolved_snapshot.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(resolved_snapshot, raw)
+        report["snapshot"] = {
+            "path": str(resolved_snapshot),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    return report
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2760,7 +1670,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="atomically save the same JSON emitted to stdout",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--snapshot",
+        type=Path,
+        help="atomically freeze the exact validated bytes for compiler input",
+    )
+    args = parser.parse_args(argv)
+    if args.snapshot is not None and args.stage != "prebuild":
+        parser.error("--snapshot is only valid with --stage prebuild")
+    if args.snapshot is not None and args.output is None:
+        parser.error("--snapshot requires --output")
+    return args
 
 
 def _emit_json(payload: dict[str, Any], output: Path | None) -> None:
@@ -2791,12 +1711,17 @@ def _emit_json(payload: dict[str, Any], output: Path | None) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        spec = json.loads(
-            args.spec.read_text(encoding="utf-8"),
-            parse_constant=reject_nonstandard_json_number,
+        result = validate_spec_file(
+            args.spec,
+            stage=args.stage,
+            snapshot_path=args.snapshot,
         )
-        result = validate_spec(spec, stage=args.stage)
-    except (OSError, json.JSONDecodeError, NonStandardJsonNumberError) as exc:
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        NonStandardJsonNumberError,
+    ) as exc:
         result = {
             "valid": False,
             "stage": args.stage,

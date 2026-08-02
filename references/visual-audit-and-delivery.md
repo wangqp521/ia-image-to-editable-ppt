@@ -1,89 +1,59 @@
 # 视觉审计与交付
 
-## 固定验证模式合同
+## 固定模式与审核职责
 
-`verification_profile` 是项目级固定模式，默认 `rapid`；用户明确提出“独立复核”才用 `reviewed`，明确提出“严格审核”才用 `strict`。运行中不得自动升级、降级或从 `reviewed` 进入 `strict`，多页合并必须拒绝混合模式。
+`verification_profile` 是批次级固定模式：默认 `rapid`，用户明确要求独立复核才用 `reviewed`，明确要求严格审核才用 `strict`。不得在运行中自动升降级，多页合并拒绝混合模式。
 
-| 模式 | 必需视觉证据 | reviewer | 成功状态 |
-|---|---|---|---|
-| `rapid` | 当前 preview、对照图、overlay、diff、`visual-diff.json`；不生成 regions 200% 证据 | 主代理最多 1 轮语义视觉判断，不启动独立 reviewer | `rapid_validated` |
-| `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 第 1 轮通过即停止；仅修复后启动第 2 轮全新上下文只读 reviewer | `reviewed_passed` |
-| `strict` | 全页 + 完整 regions 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
+- rapid：主代理是唯一正式语义审核者。每页一次正式判断、最多一次批量修复；修复后只做确定性闭环，不启动第二次语义判断。
+- reviewed|strict：独立 reviewer 是唯一正式语义审核者。主代理不得用自己的观感覆盖 reviewer 决定，只负责准备证据、转交确定性 prompt、保存原始响应和执行一次批量修复。
+- `reviewed` round 1 通过即停止；只有 `changes_required` 且全部 P0/P1 可修复时进入新哈希的 round 2。
+- `strict` 对全部声明 regions 生成 200% evidence，round 1 通过即停止，最多两轮。
+- round 2 是终局；不得再次修复、降级或开启第三轮。
 
-三个模式共享同一复刻、prebuild、compiler、结构、tripwire、对象身份和失败诚实性。profile 只控制终态证明成本，不得降低构建前输入质量。
+三个模式共享同一复刻、prebuild、compiler、render、文字几何、结构、背景、tripwire 和 final 身份合同。profile 只改变语义审核成本，不降低输入质量或可编辑性。
 
-## 统一 LibreOffice 预览渲染合同
+## 当前哈希的确定性证据
 
-三个模式统一使用稳定版 LibreOffice。LibreOffice 是统一预览渲染器，不是逐 TextBox 字号优化器。`preflight_runtime.py` 拒绝 LibreOfficeDev、alpha、beta、rc，并锁定工具与 fontconfig 身份。`render_preview.py` 在隔离 profile 中执行唯一 `PPTX → PDF → PNG`，核对 960×540 point 单页 PDF、字体及非空 `1920×1080` PNG，原子写入 `render-report.json`。
+统一使用稳定版 LibreOffice。`preflight_runtime.py` 锁定 `soffice`、`pdftoppm`、`pdffonts`、`pdftotext` 和 fontconfig 的绝对路径、版本与 SHA-256，拒绝开发版或不完整环境。`render_preview.py` 在隔离 profile 中执行唯一 `PPTX → PDF → PNG`，核对单页 960×540 point PDF、resolved fonts 和非空 1920×1080 preview。正常路径不双重渲染；仅明确的沙箱 `SIGABRT` 可重试一次，仍失败即停止。
 
-`create_visual_diff.py` 必须用 `--render-report` 取得 preview。SHA-256 只用于身份与溯源，不是视觉评分；视觉判断来自对照、指标、区域存在性和 reviewer。LibreOffice 是统一验收事实，不承诺 PowerPoint 原生像素一致。
+每个当前 PPTX 哈希必须有且只有一组闭包证据：
 
-macOS 沙箱首次渲染即升级权限；仅 `SIGABRT` 自动重试一次。异常时先确认 PPTX 对象，再到空目录复渲染；第二次失败即停止，不切换渲染器或无限重试。正常路径不双重渲染；PPTX 或运行身份变化即废弃旧证据。
+1. `build-spec-snapshot.json` 与 `prebuild-validation.json`；
+2. `build-report.json` 和当前 PPTX；
+3. `runtime-preflight.json`、`render-report.json`、PDF、font report、preview；
+4. `rendered-text-geometry.json`、`structure-validation.json`、`background-contract.json`；
+5. `visual-diff.json`、overlay、diff 与当前 profile 所需 region evidence；
+6. `reviewed|strict` 的当前 raw reviewer response；
+7. `final-validation.json`。
 
-## 单一当前版本与三个检查点
+任一 spec、PPTX、runtime 或 producer 身份变化，所有下游证据失效。SHA-256 只证明身份，不是视觉分数。tripwire 只单向阻断：有基线且触发则失败；无基线固定为 `available=false, triggered=null, reason=no_approved_baseline`，不能据此自动通过。
 
-每页只维护一个当前工作规格和一个当前 PPTX。所有模式都执行相同三段逻辑：
+## 一次完整检查与批量修复
 
-1. **前置结构校验：** 唯一规格必须通过正式 `prebuild`，compiler 才能生成或替换当前 PPTX。
-2. **生成后结构证据：** 当前 PPTX 依次完成 render、rendered text geometry 和 `validate_pptx.py`；失败不得进入视觉审查。
-3. **后置视觉校验：** 对当前哈希补齐 background、整页/profile 证据；`reviewed|strict` 再做独立只读审查，最后运行 final。
+正式语义审核按以下顺序检查，并一次返回全部差异：画布/mapping → regions/层级 → 对象数量与几何 → 文字、Text Run、Paragraph、bullet、数字与单位 → 表格/矩阵 → 图形、connector、diagram、chart → picture crop、icon、mask、alpha → background 与局部细节。
 
-历史报告只能按哈希留作诊断，不构成另一份可交付版本，也不能成为回退基线。用户反馈、圈选和门禁差异写入唯一 `modules.high_risk.items`；未触发时不建空清单或第二套状态机。
+P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要内容不可编辑和数据编造；P1 包括数量、比例、结构、fill、字号/换行、Text Run、bullet、crop、connector、图表或关键装饰错误；P2 仅限不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差、线宽或 renderer 近似。
 
-## 原地修正重验
+第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希重跑整条核心链：prebuild/snapshot、build/report、render、text geometry、structure、background、visual diff。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
 
-首轮语义视觉判断按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1；同根因用代表对象确认后合并到同一修复批次。`rapid|reviewed` 每页最多 1 次内容修复，只更新同一工作规格，并原子替换同一路径的当前 PPTX 与 build report。
+`rapid` 修复后只根据新确定性闭包关闭可客观验证的问题；构图平衡、复杂装饰、主观色彩观感、非规则几何等无法被确定性证据关闭的 P0/P1 必须使 `rapid_validation_failed`。`reviewed|strict` 修复后只有全部映射项 `result=passed` 且证据绑定新哈希，才可生成 round 2 prompt。
 
-修复后自动重验核心链为 `prebuild → build snapshot → compiler / build report → render → rendered text geometry → validate_pptx → background contract → visual diff`。`rapid` 在核心链通过后运行一次 `final validation`；`reviewed` 在核心链通过后进入唯一允许的第 2 轮 reviewer，并在 reviewer 结束后运行一次 `final validation`。只重跑局部证据、沿用旧结构报告、比较后选择旧 PPTX、以未改善结果冒充通过，均不允许。受影响区域及相邻边界用于诊断，但终态仍需完整执行当前 profile 的全页证据。rapid 省略的是第 2 轮语义视觉判断，不是最终自动证据。
+## reviewer context、prompt 与 raw response
 
-`rapid|reviewed` 修复后的自动证据若失败，立即按当前模式失败交付，不得再次修改内容。`rapid` 修复后不得进行第 2 轮语义视觉判断；`reviewed` 仅在第 1 轮要求修复且全链重验通过后进入第 2 轮。`strict` 保持现有流程和证据要求。
+`create_reviewer_prompt.py` 只读当前工作规格并重新收集当前 artifacts。它生成 canonical context 与 `review_context_sha256`，绑定 `page_id`、round、profile、content spec hash、source、build snapshot/report、PPTX、preview/render/runtime、text、structure、background、visual diff 和排序后的 region evidence。不得手写、改写或复用 prompt，也不得让 reviewer 读取 context 之外的文件。
 
-### 当前任务内证据复用
+reviewer 使用全新只读上下文，不运行 producer、不修改文件，只返回一个 JSON object，精确包含九个字段：`response_schema_version`、`review_context_sha256`、`page_id`、`review_round`、`verification_profile`、`decision`、`coverage`、`findings`、`p2_disclosures`。coverage 精确覆盖七类；decision 只允许 `passed|changes_required|not_reviewable`；finding evidence 必须来自当前 context 允许的绝对路径。
 
-当前任务中未变化的 source identity、coordinate overlay、measurements、runtime preflight、图标/图片资产及其现有复核证据可以复用；图标 bbox 或资产变化时只重做受影响资产。spec 或 PPTX SHA-256 变化后，build snapshot、build report、preview、rendered text geometry、structure、background、visual diff 必须按新哈希重建，final 必须在当前 profile 的终态位置重新运行。
+raw response 是唯一持久化的 reviewer 产物。主代理按收到的 UTF-8 JSON 原样保存，不修补字段、不生成摘要副本。缺失或无效均按 not_reviewable，并消耗本轮；context hash、page、round、profile、coverage、evidence 或语义不匹配同样如此。`passed` 不得包含 P0/P1 或 `not_reviewable` coverage。
 
-完整证据用 `create_visual_diff.py --render-report ...` 生成；检查身份、左右顺序、区域存在性和 `region_summary.skipped==0`。缺证据、错页、旧 preview、拉伸/裁切或非法区域时为 `not_reviewable`。
+## final 与不可变终态
 
-tripwire 只单向阻断：批准基线触发即失败，未触发不能自动通过。无基线固定 `available=false, triggered=null, reason=no_approved_baseline`。全页指标不能覆盖局部缺失、文字、换行、crop、merge 或 connector 错误。
+final 只读。它只重算文件哈希、解析当前 JSON、验证跨报告绑定、重建 review context 并验证 raw response；不得导入或运行 compiler、renderer、结构/背景/文字/视觉 producer，不得创建、修补或覆盖证据。`rapid` 禁止携带 reviewer context/response；`reviewed|strict` 必须绑定当前 raw response。
 
-## rapid 一轮与 reviewed 最多两轮
+final 通过后禁止写入 PPTX。任何 PPTX 或终态字段改动都必须使旧 final 失效，并从新哈希重新建立完整闭包。失败时仍可交付当前可编辑草稿，但必须明确标注未通过原因：P0 为“当前 PPTX 可能不可用”，P1 为“未通过视觉门禁的可编辑草稿”，`not_reviewable` 为“证据不可审查”。
 
-`rapid` 每页最多 1 轮语义视觉判断；第 1 轮无 P0/P1 即进入终态。存在 P0/P1 时只允许一次批量修复，修复后不得进行第 2 轮语义视觉判断。文字溢出、对象数量/位置/层级、媒体错绑、背景身份等可由当前自动证据关闭；构图平衡、复杂装饰、主观色彩观感、非规则几何等不能由现有确定性证据关闭的 P0/P1 必须写 `rapid_validation_failed`。已知存在此类阻断项时仍可使用唯一一次批量修复改善当前草稿，但不得转为成功；修复无交付价值时可直接失败。
+## 多页合并与交付
 
-`reviewed` 第 1 轮通过即停止；第 1 轮要求修正时，把全部 P0/P1 映射到 `modules.high_risk.items`，在同一规格和 PPTX 路径上完成唯一一次修复，重新生成全部自动证据后才允许第 2 轮。第 2 轮不得再次修复；仍失败即停止并写 `reviewed_failed`，不得开启第 3 轮、降级或伪造记录。`not_reviewable` 也计入一轮，每轮使用全新上下文，reviewer 一次返回全部 P0/P1 且不得修文件。
+逐页串行并标注 `[第 n/总页数]`。单页 prebuild/build 失败时不占位、不合并；已有 PPTX 但 final 失败的页面只能作为明确标注的草稿单独交付。合并输入必须逐页配对当前 PPTX、spec 与 `valid=true, errors=[]` 的 final report，核对 profile、delivery status、content spec、runtime、capability、structure 和 PPTX SHA-256 后按原序导入。merger 不重跑单页 producer 或 validator；合并完成后仅对临时 merged deck 运行一次结构验证，通过才原子替换输出。
 
-`strict` 每页仍最多调用 reviewer 2 轮，第 1 轮通过即停止；第 1 轮要求修正时按既有规则重跑全部自动证据后进入第 2 轮，不改变其既有证据要求。
-
-### 第二轮准入
-
-第一轮全部 P0/P1 对应项必须为 `result=passed` 并有绑定当前哈希的真实证据；有未关闭项时不消耗第二轮 reviewer。全局字体度量、字距或换行 P1 关闭前，必须同时核对密集正文、数字与单位、换行敏感区域；任一仍有同根因差异，item 保持未关闭。
-
-失败时继续输出当前可用产物，但不得称为完整完成或审核通过。含 P0 标注“未通过视觉门禁，含 P0，当前 PPTX 可能不可用”；仅 P1 标注“未通过视觉门禁的可编辑草稿”；`not_reviewable` 标注“当前 PPTX 未完成视觉审核，证据不可审查”。
-
-## 准入派生的独立 reviewer 提示词
-
-`reviewed|strict` 在 background/text/structure/visual 通过并回写身份、tripwire、editability 和 P0/P1 关闭事实后，为当前轮 no-overwrite 冻结 pre-review snapshot。issue 只读该快照，控制器仍读 text 锁定的 build snapshot；禁回读工作规格或手工复制。issue 生成 admission/prompt；prompt 禁手写、编辑或复用，page/round/hash 禁人工输入。
-
-reviewer 前必须用 `review_admission.py invoke` 消费当前 admission，再把未改写的 `reviewer-prompt.txt` 交给全新只读 reviewer。reviewer 仅返回 admission 规定的九个 JSON 字段：`admission_id`、`page_id`、`review_round`、`source_sha256`、`preview_sha256`、`decision`、`coverage`、`findings`、`p2_disclosures`。保存原始响应且不改写，随后用 `review_admission.py validate-response` 绑定 admission、invocation 和原始 response；验证失败不得写 visual passed。
-
-`visual_gate.reviewer.mode` 固定为 `independent_read_only_subagent`，其余 reviewer 字段必须与 response-validation 绑定的原始 response 完全一致；`admission_id` 和 `review_round` 同时必须等于 admission。仅 production response-validation `valid=true`、decision=passed、coverage/证据完整且无 P0/P1 时写 visual passed。
-
-## 严重度与修正
-
-- **P0：** PPTX 不可用、页数/比例错误、核心内容缺失、主要内容不可编辑或数据编造；未关闭不得通过。
-- **P1：** 数量、比例、结构、fill、字号/换行、Text Run、bullet、crop、connector 或图表错误；未关闭不得通过。
-- **P2：** 不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差/线宽或 renderer 近似。披露后可交付。
-
-confidence 与 severity 分开；证据不足不自动成为 P1。`changes_required` 必须修；`visual_approximation` 须说明影响，`not_verifiable` 不算通过。假 bullet、拆框、断裂 connector 和整页图片化不得降级为近似。
-
-## 自动结构门禁与终态身份
-
-每轮视觉审查前用 `--output` 保存 validator JSON，要求 `valid=true`，且 schema SHA-256、PPTX SHA-256、compiler identity/capability manifest、representation summary、对象清单、asset fallback 与 build report 三方一致；同时核对页数/16:9、可编辑性、整页图片风险和 `native_list_contracts_checked`。缺 report、旧 report或任一绑定不一致都不得进入视觉审查；结构通过不证明视觉通过。
-
-reviewer 返回通过后禁改 PPTX。终态只运行一次 final：当前工作规格提供终态；PPTX/background/text 重算读 build snapshot；admission 重建读当前轮 pre-review snapshot；当前 review-state hash 必须精确相等。并核对 PPTX/runtime/render/PDF/font/preview/visual 身份。`reviewed|strict` 重跑 response-validation；`rapid` 要 background/text 且拒绝 reviewer artifact。改写 PPTX 即全部失效。
-
-## 多页与交付
-
-逐页串行并标注 `[第 N/总页数]`。prebuild/compiler 失败只留证据、继续后页且不合并；已有 PPTX 的 visual/final 失败页才按原序合并。整份须披露缺页；任一合并页有 P0/P1 或 `not_reviewable` 时标注“未通过视觉门禁版”。合并前核对身份与结论，再用 `merge_pptx.py` 验证。
-
-最终提供 PPTX、当前视觉证据、结构/final 校验、已发生的 reviewer 记录和 P2/未验证说明。缺证据、哈希不一致或有 P0/P1 时不得称完整完成；失败时输出当前产物并标注未通过。
+最终提供可编辑 PPTX、当前 preview/diff、structure/final、模式要求的 regions 和 raw response，并披露 P2、字体 fallback、缺页与未验证项。缺证据、旧哈希、tripwire 触发、开放 P0/P1 或结构/final 失败时不得称完成。

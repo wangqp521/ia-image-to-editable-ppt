@@ -862,6 +862,13 @@ _RECORDS: dict[str, dict[str, Any]] = {
         },
         examples=[_TEXT_EXAMPLE, _SHAPE_EXAMPLE, _PICTURE_EXAMPLE],
     ),
+    "ReviewerBinding": _object(
+        {
+            "mode": {"const": "independent_read_only_subagent"},
+            "response": _ref("Reference"),
+        },
+        required={"mode", "response"},
+    ),
     "VisualGate": _object(
         {
             "status": NON_EMPTY_STRING,
@@ -869,16 +876,14 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "tripwire": {"type": ["object", "null"]},
             "review_round": {"type": ["integer", "null"]},
             "review": {"type": ["object", "null"]},
-            "reviewer": {"type": ["object", "null"]},
+            "reviewer": {"anyOf": [_ref("ReviewerBinding"), {"type": "null"}]},
+            "review_context_sha256": {"anyOf": [SHA256, {"type": "null"}]},
             "pptx": {"type": ["object", "null"]},
             "preview": {"type": ["object", "null"]},
             "report": {"type": ["object", "null"]},
             "render_report": {"type": ["object", "null"]},
             "background_contract": {"type": ["object", "null"]},
             "rendered_text_geometry": {"type": ["object", "null"]},
-            "review_admission": {"type": ["object", "null"]},
-            "review_invocation": {"type": ["object", "null"]},
-            "review_response_validation": {"type": ["object", "null"]},
         },
         required={"status", "evidence", "tripwire"},
     ),

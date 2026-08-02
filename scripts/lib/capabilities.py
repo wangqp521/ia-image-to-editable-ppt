@@ -67,7 +67,6 @@ WORKFLOW_CAPABILITIES = frozenset(
     {
         "workflow.background_contract.v1",
         "workflow.rendered_text_geometry.v1",
-        "workflow.review_admission.v1",
     }
 )
 

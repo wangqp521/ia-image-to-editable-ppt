@@ -1,4 +1,4 @@
-"""Stable identities for immutable reconstruction-spec build and review state."""
+"""Stable identities for immutable reconstruction-spec build state."""
 
 from __future__ import annotations
 
@@ -7,19 +7,6 @@ from typing import Any
 
 from .error_codes import ToolError
 from .hashing import canonical_json_sha256
-
-
-POST_REVIEW_VISUAL_FIELDS = frozenset(
-    {
-        "status",
-        "review_round",
-        "review",
-        "reviewer",
-        "review_admission",
-        "review_invocation",
-        "review_response_validation",
-    }
-)
 
 
 def _validated_copy(spec: dict[str, Any]) -> dict[str, Any]:
@@ -85,19 +72,3 @@ def content_spec_sha256(spec: dict[str, Any]) -> str:
 def input_spec_sha256(spec: dict[str, Any]) -> str:
     """Return the identity of the exact supplied reconstruction specification."""
     return canonical_json_sha256(_validated_copy(spec))
-
-
-def review_state_projection(spec: dict[str, Any]) -> dict[str, Any]:
-    """Keep pre-review evidence while excluding only post-review visual result fields."""
-    projected = _validated_copy(spec)
-    projected.pop("delivery_status", None)
-    visual_gate = projected.get("visual_gate")
-    if isinstance(visual_gate, dict):
-        for field in POST_REVIEW_VISUAL_FIELDS:
-            visual_gate.pop(field, None)
-    return projected
-
-
-def review_state_sha256(spec: dict[str, Any]) -> str:
-    """Return the frozen review-state identity for a reconstruction specification."""
-    return canonical_json_sha256(review_state_projection(spec))
