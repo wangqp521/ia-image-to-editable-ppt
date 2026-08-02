@@ -4,6 +4,8 @@
 
 v1 native：文字、rectangle/roundRect/ellipse/chevron/rightArrow、线、表格、matrix/status、picture/icon；multipart 用 `composite` parts/repeat，不建 IR。自由曲线/其他 preset/native chart unsupported；`required_editability=full|labels_and_geometry` 禁 asset fallback，prebuild 失败即停。`parts/repeat_sequence` 默认禁重叠；仅源图确有重叠且各 part bbox/层级忠实时，父 element `content.allow_overlap=true`；禁为绕错改 bbox、并 parts、滥用开关。
 
+首轮构建时，块状、带面积填充的箭头优先使用 `rightArrow`；细连接关系才使用 line arrow marker。该选择只复用 compiler 已支持表示，不得为规避 renderer 差异改变来源语义、方向或几何。
+
 ## 表格、矩阵与框线
 
 行列/合并明确用原生表格；不规则分区/边界/组/跨行用 Shape/Line/TextBox。表格不拆文本框，网格图示不强制表格化。

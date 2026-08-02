@@ -6,8 +6,8 @@
 
 | 模式 | 必需视觉证据 | reviewer | 成功状态 |
 |---|---|---|---|
-| `rapid` | 当前 preview、对照图、overlay、diff、`visual-diff.json`；不生成 regions 200% 证据 | 不启动独立 reviewer，visual status 为 `not_independently_reviewed` | `rapid_validated` |
-| `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `reviewed_passed` |
+| `rapid` | 当前 preview、对照图、overlay、diff、`visual-diff.json`；不生成 regions 200% 证据 | 主代理最多 1 轮语义视觉判断，不启动独立 reviewer | `rapid_validated` |
+| `reviewed` | rapid 全部证据 + finding、高风险对象和审查所需的必要区域 200% 证据 | 第 1 轮通过即停止；仅修复后启动第 2 轮全新上下文只读 reviewer | `reviewed_passed` |
 | `strict` | 全页 + 完整 regions 200% 证据 | 全新上下文只读 reviewer，最多 2 轮 | `strict_gate_passed` |
 
 三个模式共享同一复刻、prebuild、compiler、结构、tripwire、对象身份和失败诚实性。profile 只控制终态证明成本，不得降低构建前输入质量。
@@ -32,25 +32,27 @@ macOS 沙箱首次渲染即升级权限；仅 `SIGABRT` 自动重试一次。异
 
 ## 原地修正重验
 
-每轮检查按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1；同根因用代表对象确认后批量修正。需要修正时只更新同一工作规格，并原子替换同一路径的当前 PPTX 与 build report。
+首轮语义视觉判断按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1；同根因用代表对象确认后合并到同一修复批次。`rapid|reviewed` 每页最多 1 次内容修复，只更新同一工作规格，并原子替换同一路径的当前 PPTX 与 build report。
 
-每次写入后都必须从 `prebuild → compiler → render → text geometry → structure → background → visual` 全链重验。只重跑局部证据、沿用旧结构报告、比较后选择旧 PPTX、以未改善结果冒充通过，均不允许。受影响区域及相邻边界用于诊断，但终态仍需完整执行当前 profile 的全页证据。
+修复后自动重验核心链为 `prebuild → build snapshot → compiler / build report → render → rendered text geometry → validate_pptx → background contract → visual diff`。`rapid` 在核心链通过后运行一次 `final validation`；`reviewed` 在核心链通过后进入唯一允许的第 2 轮 reviewer，并在 reviewer 结束后运行一次 `final validation`。只重跑局部证据、沿用旧结构报告、比较后选择旧 PPTX、以未改善结果冒充通过，均不允许。受影响区域及相邻边界用于诊断，但终态仍需完整执行当前 profile 的全页证据。rapid 省略的是第 2 轮语义视觉判断，不是最终自动证据。
 
-若修正未改善目标问题、产生新 P0/P1、结构失败或证据不可审查，继续合并同根因问题后原地修正；确认无法可靠改善时停止并失败交付，不创建额外版本或新状态机。
+`rapid|reviewed` 修复后的自动证据若失败，立即按当前模式失败交付，不得再次修改内容。`rapid` 修复后不得进行第 2 轮语义视觉判断；`reviewed` 仅在第 1 轮要求修复且全链重验通过后进入第 2 轮。`strict` 保持现有流程和证据要求。
 
 ### 当前任务内证据复用
 
-仅当前页、当前 PPTX SHA-256 可复用；source/spec、runtime/fontconfig/renderer、preview、validator/证据脚本及 regions 身份必须全部一致。任一身份变化都重建对应证据。
+当前任务中未变化的 source identity、coordinate overlay、measurements、runtime preflight、图标/图片资产及其现有复核证据可以复用；图标 bbox 或资产变化时只重做受影响资产。spec 或 PPTX SHA-256 变化后，build snapshot、build report、preview、rendered text geometry、structure、background、visual diff 必须按新哈希重建，final 必须在当前 profile 的终态位置重新运行。
 
 完整证据用 `create_visual_diff.py --render-report ...` 生成；检查身份、左右顺序、区域存在性和 `region_summary.skipped==0`。缺证据、错页、旧 preview、拉伸/裁切或非法区域时为 `not_reviewable`。
 
 tripwire 只单向阻断：批准基线触发即失败，未触发不能自动通过。无基线固定 `available=false, triggered=null, reason=no_approved_baseline`。全页指标不能覆盖局部缺失、文字、换行、crop、merge 或 connector 错误。
 
-## reviewer 最多两轮
+## rapid 一轮与 reviewed 最多两轮
 
-`reviewed|strict` 每页最多调用 reviewer 2 轮，第 1 轮通过即停止；`not_reviewable` 也计轮，每轮使用全新上下文。reviewer 一次返回全部 P0/P1，不得修文件。
+`rapid` 每页最多 1 轮语义视觉判断；第 1 轮无 P0/P1 即进入终态。存在 P0/P1 时只允许一次批量修复，修复后不得进行第 2 轮语义视觉判断。文字溢出、对象数量/位置/层级、媒体错绑、背景身份等可由当前自动证据关闭；构图平衡、复杂装饰、主观色彩观感、非规则几何等不能由现有确定性证据关闭的 P0/P1 必须写 `rapid_validation_failed`。已知存在此类阻断项时仍可使用唯一一次批量修复改善当前草稿，但不得转为成功；修复无交付价值时可直接失败。
 
-第 1 轮要求修正时，把全部 P0/P1 映射到 `modules.high_risk.items`，在同一规格和 PPTX 路径上修正，重新生成全部自动证据后才允许第 2 轮。第 2 轮仍失败即停止；不得第 3 轮、降级或伪造记录。
+`reviewed` 第 1 轮通过即停止；第 1 轮要求修正时，把全部 P0/P1 映射到 `modules.high_risk.items`，在同一规格和 PPTX 路径上完成唯一一次修复，重新生成全部自动证据后才允许第 2 轮。第 2 轮不得再次修复；仍失败即停止并写 `reviewed_failed`，不得开启第 3 轮、降级或伪造记录。`not_reviewable` 也计入一轮，每轮使用全新上下文，reviewer 一次返回全部 P0/P1 且不得修文件。
+
+`strict` 每页仍最多调用 reviewer 2 轮，第 1 轮通过即停止；第 1 轮要求修正时按既有规则重跑全部自动证据后进入第 2 轮，不改变其既有证据要求。
 
 ### 第二轮准入
 

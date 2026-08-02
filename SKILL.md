@@ -21,8 +21,8 @@ schema v2 是唯一 Layout IR，compiler 是唯一构建入口；保留结构、
 
 | 模式 | 触发方式 | 终态成功状态 | 验证边界 |
 |---|---|---|---|
-| `rapid` | 默认 | `rapid_validated` | 主代理完成整页视觉差异与终态绑定；无独立 reviewer、无 regions 200% 证据 |
-| `reviewed` | 明确“独立复核” | `reviewed_passed` | 独立只读 reviewer 最多 2 轮；只生成必要 regions 200% 证据；不得进入 `strict` |
+| `rapid` | 默认 | `rapid_validated` | 主代理每页最多 1 轮语义视觉判断、最多 1 次内容修复；无独立 reviewer、无 regions 200% 证据 |
+| `reviewed` | 明确“独立复核” | `reviewed_passed` | 第 1 轮通过即停止；仅修复后进行第 2 轮独立只读 reviewer；每页最多 1 次内容修复 |
 | `strict` | 明确“严格审核” | `strict_gate_passed` | 完整 regions 200% 证据、独立只读 reviewer 最多 2 轮、完整哈希绑定 |
 
 显式规格构建中统一为 `pending`；失败状态为 `rapid_validation_failed`、`reviewed_failed`、`strict_gate_failed`。旧规格缺 profile 仅兼容为 `strict`；新任务必填。
@@ -53,11 +53,11 @@ python3 scripts/create_rendered_text_geometry.py work/build-spec-snapshot.json -
 python3 scripts/validate_pptx.py work/page.pptx --expected-slides 1 --spec work/build-spec-snapshot.json --build-report work/build-report.json --output evidence/<pptx-sha256>/structure-validation.json
 ```
 
-结构校验未通过不得进入视觉校验。初次 preview 后按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1，把同根因问题合为一组修正。
+结构校验未通过不得进入语义视觉判断。初次 preview 后按 mapping → regions/层级 → 系统文字 → TextBox → 图示 → 图片/图标 → 细节一次列全 P0/P1，把同根因问题合为同一修复批次；不得边看边改。
 
 ### 后置视觉校验与原地修正重验
 
-对当前 PPTX 补齐 background、visual diff 与当前 profile 的视觉证据。发现需要修正时，直接修改同一工作规格，原子替换 `work/page.pptx`，并从 `prebuild → build → render → text geometry → structure → background → visual` 全链重验；PPTX 哈希一变，旧证据全部失效。不得只重跑有利指标、复用旧哈希或保留另一份 PPTX 作为质量下限。
+对当前 PPTX 补齐 background、visual diff 与当前 profile 的视觉证据。`rapid|reviewed` 每页最多 1 次内容修复：先一次列全 P0/P1，按共同根因批量修改同一工作规格，再原子替换 `work/page.pptx`。修复后自动重验核心链为：`prebuild → build snapshot → compiler / build report → render → rendered text geometry → validate_pptx → background contract → visual diff`。`rapid` 在核心链通过后运行一次 `final validation`；`reviewed` 在核心链通过后进入唯一允许的第 2 轮 reviewer，并在 reviewer 结束后运行一次 `final validation`，两者均构成当前 profile 的完整证据链。PPTX 哈希一变，旧结构、文字、背景和视觉证据全部失效；不得只重跑有利指标、复用旧哈希或保留另一份 PPTX 作为质量下限。rapid 省略的是第 2 轮语义视觉判断，不是最终自动证据。
 
 ```bash
 python3 scripts/validate_background_contract.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report evidence/<pptx-sha256>/structure-validation.json --output evidence/<pptx-sha256>/background-contract.json
@@ -69,7 +69,11 @@ python3 scripts/review_admission.py validate-response --admission work/review/ro
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage final --output work/final-validation.json
 ```
 
-`rapid` 跳过 freeze/reviewer；`reviewed|strict` 把 admission 生成的 prompt 原样交给全新只读 reviewer。若 reviewer 要求修正，先原地修正并重跑全部自动证据，再以新哈希进入下一轮；最多 2 轮。reviewer 通过后禁改 PPTX。final 只绑定当前版本及其当前证据；任何绑定不一致均失败。
+`rapid` 跳过 freeze/reviewer，每页最多 1 轮语义视觉判断。第 1 轮无 P0/P1 即进入终态；有 P0/P1 时只允许 1 次批量修复，修复后不得进行第 2 轮语义视觉判断。只有全部已知 P0/P1 都能由现有确定性证据关闭时才写 `rapid_validated`；构图平衡、复杂装饰、主观色彩观感、非规则几何等不能由现有确定性证据关闭的问题写 `rapid_validation_failed` 并披露。已知存在此类阻断项时仍可使用唯一一次批量修复改善当前草稿，但终态仍必须失败；修复无交付价值时可直接失败。
+
+`reviewed` 把 admission 生成的 prompt 原样交给全新只读 reviewer。第 1 轮通过即停止；`reviewed` 仅在第 1 轮要求修复且全链重验通过后进入第 2 轮。第 2 轮不得再次修复；仍有 P0/P1 或不可审查时写 `reviewed_failed`，不得开启第 3 轮。
+
+`strict` 保持现有流程和证据要求：独立只读 reviewer 最多 2 轮，第 1 轮要求修正时原地修正并重跑全部自动证据，再以新哈希进入下一轮。所有模式在 reviewer 通过后禁改 PPTX；final 只绑定当前版本及其当前证据，任何绑定不一致均失败。不新增脚本、状态文件、schema 字段或计数器。
 
 ## 自动 preflight 和测量工具
 
@@ -80,7 +84,7 @@ python3 scripts/create_coordinate_overlay.py <source> --output <page>/work/coord
 python3 scripts/inspect_image_region.py <source> --output-dir <page>/work/measurements --point X1,Y1 --point X2,Y2 --bbox L1,T1,R1,B1 --bbox L2,T2,R2,B2
 python3 scripts/extract_icon_asset.py <source> --icon-id <id> --bbox-xywh X,Y,W,H --output <page>/assets/icons/<id>.png
 python3 scripts/create_icon_green_preview.py <page>/work/page-reconstruction.json --output <page>/comparisons/icon-alpha-preview.png
-python3 scripts/preflight_runtime.py --soffice <stable-soffice> --pdftoppm <pdftoppm> --pdffonts <pdffonts> --fontconfig assets/fontconfig-macos.conf --output <page>/work/preflight-runtime.json
+python3 scripts/preflight_runtime.py --soffice <stable-soffice> --pdftoppm <pdftoppm> --pdffonts <pdffonts> --pdftotext <pdftotext> --fontconfig assets/fontconfig-macos.conf --output <page>/work/preflight-runtime.json
 ```
 
 区域测量输入 LTRB，`source_bbox` 使用 XYWH。禁止外部 OCR/API/Token；未知内容标为未验证，不补造。
