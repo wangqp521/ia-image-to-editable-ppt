@@ -444,9 +444,9 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--soffice", required=True)
-    parser.add_argument("--pdftoppm", required=True)
-    parser.add_argument("--pdffonts", required=True)
-    parser.add_argument("--pdftotext", required=True)
+    parser.add_argument("--pdftoppm", default="pdftoppm")
+    parser.add_argument("--pdffonts", default="pdffonts")
+    parser.add_argument("--pdftotext", default="pdftotext")
     parser.add_argument("--fontconfig", type=Path, required=True)
     parser.add_argument("--expected-runtime", type=Path)
     parser.add_argument("--python-module", action="append", default=[])

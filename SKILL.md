@@ -28,8 +28,10 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 从 Skill 根目录执行。每个批次在处理任何页面前运行一次 runtime preflight，并让所有页面复用同一份 passing report。只有 `soffice`、Poppler 工具或 fontconfig 的路径、版本或文件身份发生变化时才重跑；页面修复不重跑。
 
 ```bash
-python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Contents/MacOS/soffice --pdftoppm /usr/local/bin/pdftoppm --pdffonts /usr/local/bin/pdffonts --pdftotext /usr/local/bin/pdftotext --fontconfig assets/fontconfig-macos.conf --output batch/runtime-preflight.json
+python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Contents/MacOS/soffice --pdftoppm pdftoppm --pdffonts pdffonts --pdftotext pdftotext --fontconfig assets/fontconfig-macos.conf --output batch/runtime-preflight.json
 ```
+
+三个 Poppler 参数默认分别为 `pdftoppm`、`pdffonts`、`pdftotext`，可省略；脚本通过当前 `PATH` 解析并在报告中锁定实际绝对路径、版本与 SHA-256。显式传入绝对路径时必须严格使用该路径，缺失即失败，不得自动切换运行时。可由 PATH 自动恢复的路径差异只在内部处理；通过后再报告预检完成。命令名仍缺失时才定位本机或工作区捆绑运行时，并以同一输出路径重跑。
 
 ## 直接编写完整规格
 
