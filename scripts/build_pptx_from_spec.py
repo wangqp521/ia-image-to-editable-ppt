@@ -18,6 +18,7 @@ from lib.atomic_write import (
     atomic_write_bytes,
     atomic_write_json,
     publish_pair_no_overwrite,
+    publish_pair_replace_current,
 )
 from lib.background_contracts import (
     resolved_element_mode_map,
@@ -343,6 +344,8 @@ def compile_single_page(
     prebuild_report_path: str | Path,
     output_pptx: str | Path,
     build_report_path: str | Path,
+    *,
+    replace_current: bool = False,
 ) -> dict[str, Any]:
     """Compile and atomically publish one schema-bound PPTX/report pair."""
     spec_path = Path(spec_path).expanduser().resolve()
@@ -354,10 +357,17 @@ def compile_single_page(
     output_pptx = output_pptx.resolve()
     build_report_path = build_report_path.resolve()
     _validate_output_paths(output_pptx, build_report_path)
-    if output_pptx.exists() or build_report_path.exists():
+    if not replace_current and (output_pptx.exists() or build_report_path.exists()):
         existing = output_pptx if output_pptx.exists() else build_report_path
         raise ToolError(
             "BUILD_OUTPUT_INCOMPLETE", str(existing), "output path already exists"
+        )
+    if replace_current and output_pptx.exists() != build_report_path.exists():
+        existing = output_pptx if output_pptx.exists() else build_report_path
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(existing),
+            "current PPTX and build report must either both exist or both be absent",
         )
 
     spec, spec_snapshot = _freeze_spec(load_schema_v2(spec_path))
@@ -489,12 +499,10 @@ def compile_single_page(
                 str(build_report_path),
                 "cannot write build report candidate",
             ) from exc
-        publish_pair_no_overwrite(
-            candidate,
-            report_candidate,
-            output_pptx,
-            build_report_path,
+        publisher = (
+            publish_pair_replace_current if replace_current else publish_pair_no_overwrite
         )
+        publisher(candidate, report_candidate, output_pptx, build_report_path)
     return report
 
 
@@ -504,6 +512,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prebuild-report", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--build-report", type=Path, required=True)
+    parser.add_argument(
+        "--replace-current",
+        action="store_true",
+        help="atomically replace the current PPTX/build-report pair if it exists",
+    )
     return parser.parse_args(argv)
 
 
@@ -511,7 +524,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
         report = compile_single_page(
-            args.spec, args.prebuild_report, args.output, args.build_report
+            args.spec,
+            args.prebuild_report,
+            args.output,
+            args.build_report,
+            replace_current=args.replace_current,
         )
     except ToolError as exc:
         print(

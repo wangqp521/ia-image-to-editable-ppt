@@ -30,16 +30,16 @@ scale_pt_per_source_px =
       slide_height_emu / 12700 / page_frame_height_px)
 ```
 
-比例只映射物理长度，不把 glyph 高度当作字体 em。先确认页面映射、`selected_font`、显式 margin 和关闭 AutoFit，再生成首次整页预览。预览无明显字号、换行或溢出差异时继续；有系统性差异时，从标题、正文、数字/KPI、列表/表格等实际存在组别各选一个代表性高风险 TextBox，以 `new_font_pt = current_font_pt × target_glyph_px / current_glyph_px` 生成一个 candidate，目标框及相邻边界改善后应用于同组。不逐框试排，不做自动字号搜索，不新增字体优化状态机。
+比例只映射物理长度，不把 glyph 高度当作字体 em。先确认页面映射、`selected_font`、显式 margin 和关闭 AutoFit，再生成首次整页预览。预览无明显字号、换行或溢出差异时继续；有系统性差异时，从标题、正文、数字/KPI、列表/表格等实际存在组别各选一个代表性高风险 TextBox，以 `new_font_pt = current_font_pt × target_glyph_px / current_glyph_px` 修正同一规格，目标框及相邻边界改善后应用于同组。不逐框试排，不做自动字号搜索，不新增字体优化状态机。
 
 不做字体比较或独立试排。未知字体先用 `render_preview.py` 的 `pdffonts` 确认；同一运行环境下项目级只验证一次。每个最终 PDF 都检查 `pdffonts`；仅特殊字符、生僻字、公式、多语言、缺字、意外 fallback、换行或溢出触发局部调查。
 
-调整顺序：字体 → 字号 → box → margin → 字距 → 行/段距；不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。candidate 只检查目标框和相邻边界；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
+调整顺序：字体 → 字号 → box → margin → 字距 → 行/段距；不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。局部诊断检查目标框和相邻边界，修正后仍须对当前 PPTX 完成全链重验；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
 
-每次 render 后、structure 前立即生成 rendered text geometry；初始 geometry 前禁消耗 candidate。用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出容差固定 **1.5 pt**，报告须绑定当前 spec/PPTX/build/render/runtime，禁手写通过。
+每次 render 后、structure 前立即生成 rendered text geometry，用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出容差固定 **1.5 pt**，报告须绑定当前 spec/PPTX/build/render/runtime；任一身份变化即重建，禁手写通过。
 
 ## 特殊文本与最低可编辑性
 
-特殊文本写入 `modules.special_text`，优先原生。新任务 element rotation 在 authoring/prebuild 用 `[0,360)`，如 `-25→335`，不留到 candidate；legacy final 可兼容负角。确实无法原生还原时才图片化最小字形。
+特殊文本写入 `modules.special_text`，优先原生。新任务 element rotation 在 prebuild 前规范到 `[0,360)`，如 `-25→335`；legacy final 可兼容负角。确实无法原生还原时才图片化最小字形。
 
 文字、数字、表格数据和基础结构须可独立选择；照片与复杂装饰只覆盖最小范围。最终检查选择粒度、Text Run、Paragraph、bullet 和图片化风险。

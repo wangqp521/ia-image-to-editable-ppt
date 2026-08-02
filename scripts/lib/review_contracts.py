@@ -1276,13 +1276,13 @@ def _validate_round_two_prior(
             )
         if prior.payload.get("pptx_sha256") == current_pptx_sha256:
             raise _round_two_error(
-                "current_candidate.pptx_sha256",
-                "round 2 requires a new PPTX candidate",
+                "current.pptx_sha256",
+                "round 2 requires a repaired current PPTX",
             )
         if prior.payload.get("preview_sha256") == current_preview_sha256:
             raise _round_two_error(
-                "current_candidate.preview_sha256",
-                "round 2 requires a new rendered preview",
+                "current.preview_sha256",
+                "round 2 requires a repaired current preview",
             )
         _invocation, invocation_snapshot, invocation_errors = (
             _load_invocation_for_response(inputs.prior_invocation, prior)

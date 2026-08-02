@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Initialize an evidence-bound, authoring-incomplete schema-v2 skeleton."""
+"""Initialize an evidence-bound, prebuild-incomplete schema-v2 skeleton."""
 
 from __future__ import annotations
 

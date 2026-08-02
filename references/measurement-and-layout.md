@@ -14,7 +14,7 @@
 
 生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`page_id` 须精确为 `page-NNN`；从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
 
-`modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；编写期反复跑等价 `authoring`（非门禁）；冻结后正式 prebuild 覆盖全部 element。计划非第二 IR，禁构建后补写。
+`modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；唯一工作规格可反复运行正式 `prebuild`，通过后才刷新 build snapshot 并构建当前 PPTX。计划非第二 IR，禁构建后补写。
 
 每个实际对象记录数量、pixel/EMU bbox、结构关系、样式、层级、可编辑性和 `high|medium|low` confidence。先判断视觉事实和语义对象，再选绘制方式；不能根据代码方便反推原图。冻结后只运行一次正式 prebuild，通过才生成。
 
@@ -28,6 +28,6 @@
 
 ## 生成与修正
 
-顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。初始 preview 后一次检查全页；全局缩放/区域比例错先修全局，再把同根因影响的对象批量写入唯一综合修正集合。局部仅修目标及相邻受影响对象。禁用缩小字号/硬换行/移动单项掩盖区域错，禁整页图片兜底。
+顺序：页边界与映射 → 主要区域 → 锚点/层级/阅读顺序 → elements → 局部文字/图形/图片。首次 preview 后一次检查全页；全局缩放/区域比例错先修全局，再把同根因影响的对象批量写入唯一综合修正集合。局部仅修目标及相邻受影响对象。修正写回单一当前版本并全链重验；禁用缩小字号/硬换行/移动单项掩盖区域错，禁整页图片兜底。
 
 图片保宽高比；`cover` 须有焦点/偏移证据，禁裁主体。圆形须正圆。原图无线/渐变/效果时禁补造。`editable_object_count` 仅作结构证据，不证明质量。

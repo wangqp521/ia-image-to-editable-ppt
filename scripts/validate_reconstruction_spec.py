@@ -1928,9 +1928,8 @@ def _validate_icons(
 
 def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
     """Return a stable validation report for a reconstruction specification."""
-    if stage not in {"authoring", "prebuild", "final"}:
-        raise ValueError("stage must be authoring, prebuild, or final")
-    semantic_stage = "prebuild" if stage == "authoring" else stage
+    if stage not in {"prebuild", "final"}:
+        raise ValueError("stage must be prebuild or final")
     non_finite_paths = non_finite_number_paths(spec)
     if non_finite_paths:
         declared_profile = (
@@ -2172,7 +2171,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             continue
         module = modules.get(module_name)
         if not isinstance(module, dict) or not module:
-            if module_name == "representation_plan" and semantic_stage == "prebuild":
+            if module_name == "representation_plan" and stage == "prebuild":
                 continue
             _error(errors, "SPEC_ACTIVATED_MODULE_EMPTY", f"modules.{module_name}", "activated module must be a non-empty object")
             continue
@@ -2184,7 +2183,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
                 f"modules.{module_name}",
                 f"unknown element references: {', '.join(unknown_references)}",
             )
-    if semantic_stage == "prebuild":
+    if stage == "prebuild":
         if "representation_plan" not in activated:
             _error(
                 errors,
@@ -2212,7 +2211,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             modules.get("typography"),
             element_map,
             canvas,
-            semantic_stage,
+            stage,
             errors,
         )
     if "icons" in activated:
@@ -2222,11 +2221,11 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             canvas,
             spec.get("clean_visual_reference"),
             spec.get("page_id"),
-            semantic_stage,
+            stage,
             errors,
         )
 
-    if semantic_stage == "prebuild" and not errors:
+    if stage == "prebuild" and not errors:
         typography_items = (
             modules.get("typography", {}).get("items", [])
             if isinstance(modules.get("typography"), dict)
@@ -2248,7 +2247,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             )
         )
 
-    if semantic_stage == "final":
+    if stage == "final":
         visual_gate = spec.get("visual_gate")
         editability_gate = spec.get("editability_gate")
         expected_delivery_status = {
@@ -2753,7 +2752,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("spec", type=Path, help="Path to page-reconstruction.json")
     parser.add_argument(
         "--stage",
-        choices=("authoring", "prebuild", "final"),
+        choices=("prebuild", "final"),
         default="prebuild",
     )
     parser.add_argument(

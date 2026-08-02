@@ -2505,7 +2505,7 @@
   "$id": "https://schemas.openai.local/ia-image-to-editable-ppt/page-reconstruction-v2.schema.json",
   "$ref": "#/$defs/PageReconstruction",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Structural authoring contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
+  "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
   "x-schema-contract-sha256": "52c4dd9d6b0bc1a1696bd416d3b110514da41d210e120ce74c06b611061b3c35"

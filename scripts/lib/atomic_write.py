@@ -30,6 +30,7 @@ from .no_replace_transactions import (
 
 
 _rename_no_replace = rename_no_replace
+_replace_current = os.replace
 
 
 def atomic_write_bytes(path: str | Path, payload: bytes) -> None:
@@ -79,6 +80,7 @@ def publish_json_no_overwrite(
             str(destination),
             "JSON payload is not finite canonical data",
         ) from exc
+
 
     parent = destination.parent
     if parent.is_symlink() or not parent.is_dir():
@@ -219,6 +221,60 @@ def publish_json_no_overwrite(
             "BUILD_OUTPUT_INCOMPLETE",
             str(destination),
             "cannot lock or publish JSON output directory",
+        ) from exc
+
+
+def publish_json_replace_current(
+    path: str | Path,
+    payload: Any,
+) -> PublicationReceipt:
+    """Atomically publish JSON as the single current file, replacing it if present."""
+    destination = Path(path).expanduser()
+    try:
+        encoded = encode_json(payload)
+    except (TypeError, UnicodeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(destination),
+            "JSON payload is not finite canonical data",
+        ) from exc
+
+    parent = destination.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(parent),
+            "output parent must be an existing real directory",
+        )
+    try:
+        with DirectoryLock(parent):
+            if destination.is_symlink() or (
+                destination.exists() and not destination.is_file()
+            ):
+                raise ToolError(
+                    "BUILD_OUTPUT_INCOMPLETE",
+                    str(destination),
+                    "current output must be a regular file",
+                )
+            atomic_write_bytes(destination, encoded)
+            stat_result = destination.stat()
+            receipt = PublicationReceipt(
+                destination=destination,
+                identity=FileIdentity.from_stat(stat_result),
+                sha256=hashlib.sha256(encoded).hexdigest(),
+                byte_count=len(encoded),
+                encoded=encoded,
+            )
+            _fsync_directory(parent)
+            verify_file_receipt(receipt)
+            return receipt
+    except ToolError:
+        raise
+    except OSError as exc:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(destination),
+            "cannot replace current JSON output",
         ) from exc
 
 
@@ -405,3 +461,143 @@ def publish_pair_no_overwrite(
                 "publication failed and pair rollback failed",
             ) from rollback_error
         raise
+
+
+def publish_pair_replace_current(
+    pptx_candidate: str | Path,
+    report_candidate: str | Path,
+    output_pptx: str | Path,
+    output_report: str | Path,
+) -> None:
+    """Replace one current PPTX/report pair while preserving rollback safety."""
+    pptx_candidate = Path(pptx_candidate)
+    report_candidate = Path(report_candidate)
+    output_pptx = Path(output_pptx)
+    output_report = Path(output_report)
+
+    candidate_paths = (_resolved(pptx_candidate), _resolved(report_candidate))
+    output_paths = (_resolved(output_pptx), _resolved(output_report))
+    if candidate_paths[0] == candidate_paths[1]:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(pptx_candidate),
+            "publication inputs must be distinct",
+        )
+    if output_paths[0] == output_paths[1]:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(output_pptx),
+            "PPTX and build report paths must be distinct",
+        )
+    if candidate_paths[0].parent != candidate_paths[1].parent:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(report_candidate),
+            "publication inputs must share one transaction directory",
+        )
+    if set(candidate_paths).intersection(output_paths):
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(output_pptx),
+            "publication inputs and outputs must be distinct",
+        )
+
+    for source in (pptx_candidate, report_candidate):
+        if source.is_symlink() or not source.is_file():
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                str(source),
+                "publication input must be a regular file",
+            )
+    for destination in (output_pptx, output_report):
+        if destination.parent.is_symlink() or not destination.parent.is_dir():
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                str(destination.parent),
+                "output parent must be an existing real directory",
+            )
+
+    exists = (output_pptx.exists(), output_report.exists())
+    if exists == (False, False):
+        publish_pair_no_overwrite(
+            pptx_candidate,
+            report_candidate,
+            output_pptx,
+            output_report,
+        )
+        return
+    if exists[0] != exists[1]:
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(output_pptx if exists[0] else output_report),
+            "current PPTX and build report must either both exist or both be absent",
+        )
+
+    _fsync_file(pptx_candidate)
+    _fsync_file(report_candidate)
+    pairs = (
+        (candidate_paths[0], output_paths[0]),
+        (candidate_paths[1], output_paths[1]),
+    )
+    parents = sorted({path.parent for path in output_paths}, key=os.fspath)
+    backups: dict[Path, Path] = {}
+    replaced: list[Path] = []
+    try:
+        with contextlib.ExitStack() as stack:
+            for parent in parents:
+                stack.enter_context(DirectoryLock(parent))
+            for destination in output_paths:
+                if destination.is_symlink() or not destination.is_file():
+                    raise ToolError(
+                        "BUILD_OUTPUT_INCOMPLETE",
+                        str(destination),
+                        "current output must be a regular file",
+                    )
+                descriptor, backup_name = tempfile.mkstemp(
+                    dir=destination.parent,
+                    prefix=f".{destination.name}.current-",
+                    suffix=".backup",
+                )
+                os.close(descriptor)
+                backup = Path(backup_name)
+                backup.unlink()
+                os.link(destination, backup)
+                backups[destination] = backup
+                _fsync_file(backup)
+
+            for source, destination in pairs:
+                _replace_current(source, destination)
+                replaced.append(destination)
+                _fsync_directory(destination.parent)
+
+            for backup in backups.values():
+                backup.unlink()
+            for parent in parents:
+                _fsync_directory(parent)
+    except BaseException as exc:
+        rollback_error: OSError | ToolError | None = None
+        for destination in reversed(replaced):
+            backup = backups.get(destination)
+            if backup is None or not backup.exists():
+                continue
+            try:
+                _replace_current(backup, destination)
+                _fsync_directory(destination.parent)
+            except (OSError, ToolError) as rollback_exc:
+                rollback_error = rollback_error or rollback_exc
+        for destination, backup in backups.items():
+            if destination not in replaced:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    rollback_error = rollback_error or cleanup_exc
+        detail = "cannot replace current PPTX/report pair"
+        if rollback_error is not None:
+            detail += "; rollback failed"
+        if isinstance(exc, ToolError) and rollback_error is None:
+            raise
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            str(output_pptx),
+            detail,
+        ) from exc

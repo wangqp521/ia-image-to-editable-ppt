@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from lib.atomic_write import publish_json_no_overwrite
+from lib.atomic_write import publish_json_no_overwrite, publish_json_replace_current
 from lib.error_codes import ToolError
 from lib.schema_io import NonStandardJsonNumberError, reject_nonstandard_json_number
 from lib.spec_identity import (
@@ -30,6 +30,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         required=True,
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--replace-current",
+        action="store_true",
+        help="atomically replace the current snapshot if it exists",
+    )
     return parser.parse_args(argv)
 
 
@@ -44,7 +49,13 @@ def _load_spec(path: Path) -> tuple[dict[str, Any], bytes]:
     return payload, raw
 
 
-def freeze_spec(spec_path: Path, output: Path, purpose: str) -> dict[str, Any]:
+def freeze_spec(
+    spec_path: Path,
+    output: Path,
+    purpose: str,
+    *,
+    replace_current: bool = False,
+) -> dict[str, Any]:
     spec, source_bytes = _load_spec(spec_path)
     if purpose == "build":
         validation = validate_spec(spec, stage="prebuild")
@@ -54,7 +65,8 @@ def freeze_spec(spec_path: Path, output: Path, purpose: str) -> dict[str, Any]:
                 str(spec_path),
                 "build snapshot requires a passing production prebuild validation",
             )
-    receipt = publish_json_no_overwrite(output, spec)
+    publisher = publish_json_replace_current if replace_current else publish_json_no_overwrite
+    receipt = publisher(output, spec)
     resolved_source = spec_path.expanduser().resolve()
     resolved_output = receipt.destination.resolve()
     return {
@@ -77,7 +89,12 @@ def freeze_spec(spec_path: Path, output: Path, purpose: str) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        report = freeze_spec(args.spec, args.output, args.purpose)
+        report = freeze_spec(
+            args.spec,
+            args.output,
+            args.purpose,
+            replace_current=args.replace_current,
+        )
     except (
         ToolError,
         OSError,

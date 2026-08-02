@@ -1,4 +1,4 @@
-"""Single machine-readable source for schema-v2 authoring contracts.
+"""Single machine-readable source for schema-v2 structural contracts.
 
 The declarations in this module intentionally describe structure only.  File
 identity, coordinate mapping, representation readiness, renderer support, and
@@ -1108,7 +1108,7 @@ def json_schema_document() -> dict[str, Any]:
         "$id": "https://schemas.openai.local/ia-image-to-editable-ppt/page-reconstruction-v2.schema.json",
         "title": "Editable PPT page reconstruction schema v2",
         "description": (
-            "Structural authoring contract only; semantic, path/hash, representation, "
+            "Structural schema contract only; semantic, path/hash, representation, "
             "renderer, visual, and final gates remain authoritative in public CLIs."
         ),
         "x-schema-contract-id": CONTRACT_ID,
@@ -1232,7 +1232,7 @@ def _iter_exact_schema_envelopes(
 
 
 def iter_exact_schema_envelopes(spec: Any) -> Iterator[tuple[str, Any, str]]:
-    """Yield exact authoring envelopes by following shared schema references."""
+    """Yield exact structural envelopes by following shared schema references."""
     yield from _iter_exact_schema_envelopes("PageReconstruction", spec, "$")
 
 
