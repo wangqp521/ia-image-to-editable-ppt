@@ -28,10 +28,11 @@ CANONICAL_VALUES = {
         {"none", "triangle", "stealth", "diamond", "oval", "arrow"}
     ),
     "picture_mode": frozenset({"contain", "cover", "none"}),
-    "bullet_type": frozenset({"char", "auto_number"}),
+    "bullet_type": frozenset({"char", "auto_number", "picture"}),
+    "chart_type": frozenset({"pie", "doughnut"}),
 }
 BUILDABLE_KINDS = frozenset(
-    {"text", "shape", "line", "table", "matrix", "status", "picture", "icon"}
+    {"text", "shape", "line", "table", "matrix", "status", "picture", "icon", "chart"}
 )
 CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
 VERIFICATION_PROFILES = frozenset({"rapid", "reviewed", "strict"})
@@ -97,6 +98,7 @@ KIND_STYLE_FIELDS = {
     "status": frozenset({"rotation"}),
     "picture": frozenset({"rotation", "opacity"}),
     "icon": frozenset({"rotation", "opacity"}),
+    "chart": frozenset({"first_slice_angle", "hole_size"}),
 }
 KIND_CONTENT_FIELDS = {
     "text": frozenset({"text"}),
@@ -111,6 +113,7 @@ KIND_CONTENT_FIELDS = {
     ),
     "picture": frozenset({"asset", "mode", "crop"}),
     "icon": frozenset({"asset", "mode", "crop"}),
+    "chart": frozenset({"chart_type", "slices", "data_labels"}),
 }
 KIND_REQUIRED_STYLE_FIELDS = {
     "text": frozenset(),
@@ -121,6 +124,7 @@ KIND_REQUIRED_STYLE_FIELDS = {
     "status": frozenset(),
     "picture": frozenset(),
     "icon": frozenset(),
+    "chart": frozenset({"first_slice_angle"}),
 }
 KIND_REQUIRED_CONTENT_FIELDS = {
     "text": frozenset({"text"}),
@@ -131,7 +135,26 @@ KIND_REQUIRED_CONTENT_FIELDS = {
     "status": frozenset({"part_defaults"}),
     "picture": frozenset({"asset", "mode", "crop"}),
     "icon": frozenset({"asset", "mode", "crop"}),
+    "chart": frozenset({"chart_type", "slices", "data_labels"}),
 }
+CHART_SLICE_FIELDS = frozenset({"category", "value", "color", "value_source"})
+CHART_DATA_LABEL_FIELDS = frozenset(
+    {
+        "enabled",
+        "show_category",
+        "show_value",
+        "show_percentage",
+        "position",
+        "number_format",
+        "font_size",
+        "font_weight",
+        "color",
+    }
+)
+CHART_LABEL_POSITIONS = frozenset(
+    {"best_fit", "center", "inside_end", "outside_end"}
+)
+CHART_VALUE_SOURCES = frozenset({"explicit", "derived_complement"})
 PART_FIELDS = frozenset({"part_id", "slide_bbox", "style", "content"})
 PART_STYLE_FIELDS = frozenset(
     {
@@ -279,6 +302,7 @@ TEXT_CONTRACT_ALLOWED_FIELDS = {
             "bullet_size_mode",
             "bullet_size_value",
             "bullet_color",
+            "bullet_asset",
         }
     ),
 }
@@ -582,6 +606,9 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "bullet_size_mode": {"type": ["string", "null"]},
             "bullet_size_value": {"type": ["number", "null"]},
             "bullet_color": {"type": ["string", "null"]},
+            "bullet_asset": {
+                "anyOf": [_ref("Asset"), {"type": "null"}]
+            },
         },
         required={"is_list", "level", "bullet"},
     ),
@@ -828,6 +855,27 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "icons": _array(_ref("IconItem"), minimum=1),
         }
     ),
+    "ChartSlice": _object(
+        {
+            "category": NULLABLE_STRING,
+            "value": NONNEGATIVE_NUMBER,
+            "color": RGB,
+            "value_source": {"enum": sorted(CHART_VALUE_SOURCES)},
+        }
+    ),
+    "ChartDataLabels": _object(
+        {
+            "enabled": BOOLEAN,
+            "show_category": BOOLEAN,
+            "show_value": BOOLEAN,
+            "show_percentage": BOOLEAN,
+            "position": {"enum": sorted(CHART_LABEL_POSITIONS)},
+            "number_format": NON_EMPTY_STRING,
+            "font_size": POSITIVE_NUMBER,
+            "font_weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "color": RGB,
+        }
+    ),
     "Region": _object(
         {
             "region_id": NON_EMPTY_STRING,
@@ -985,6 +1033,22 @@ for _kind in ("picture", "icon"):
         },
         required=KIND_REQUIRED_CONTENT_FIELDS[_kind],
     )
+
+_RECORDS["ChartStyle"] = _object(
+    {
+        "first_slice_angle": {"type": "integer", "minimum": 0, "maximum": 359},
+        "hole_size": {"type": "integer", "minimum": 10, "maximum": 90},
+    },
+    required=KIND_REQUIRED_STYLE_FIELDS["chart"],
+)
+_RECORDS["ChartContent"] = _object(
+    {
+        "chart_type": {"enum": sorted(CANONICAL_VALUES["chart_type"])},
+        "slices": _array(_ref("ChartSlice"), minimum=2),
+        "data_labels": _ref("ChartDataLabels"),
+    },
+    required=KIND_REQUIRED_CONTENT_FIELDS["chart"],
+)
 
 _RECORDS["Modules"] = _object(
     {

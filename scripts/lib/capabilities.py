@@ -25,9 +25,15 @@ CAPABILITY_METADATA = {
     "line_arrow": ("line_arrow", "line"),
     "picture_mode": ("picture_mode", "mode"),
     "bullet_type": ("bullet_type", "text"),
+    "chart_type": ("chart", "chart_type"),
 }
 
 ATOMIC_CAPABILITY_METADATA = {
+    "chart.data_labels": "data_labels",
+    "chart.first_slice_angle": "first_slice_angle",
+    "chart.hole_size": "hole_size",
+    "chart.slice.explicit_color": "slices",
+    "chart.slice.value_source": "slices",
     "line.arrowhead": "line",
     "line.opacity": "line",
     "line.rotation": "rotation",
@@ -52,6 +58,7 @@ ATOMIC_CAPABILITY_METADATA = {
     "text.frame.vertical_alignment": "text",
     "text.frame.wrap": "text",
     "text.paragraph.native_bullet": "text",
+    "text.paragraph.picture_bullet": "text",
     "text.run.baseline": "text",
     "text.run.bold": "text",
     "text.run.color": "text",

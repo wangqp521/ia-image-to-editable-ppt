@@ -34,12 +34,13 @@ from lib.capabilities import (
 from lib.element_contracts import validate_element_contract
 from lib.error_codes import ToolError
 from lib.final_identity import collect_current_artifacts
-from lib.representation_contracts import validate_representation_plan
+from lib.representation_contracts import require_asset, validate_representation_plan
 from lib.reviewer_contracts import (
     build_review_context,
     review_context_sha256,
     reviewer_response_issues,
 )
+from lib.repair_budget import enforce_repair_budget
 from lib.schema_io import (
     NonStandardJsonNumberError,
     non_finite_number_paths,
@@ -53,9 +54,6 @@ from lib.schema_contracts import (
     unknown_field_detail,
 )
 from lib.spec_identity import content_spec_sha256
-from pptx_builder import validate_renderer_contracts
-
-
 ALLOWED_KINDS = {
     "text",
     "shape",
@@ -386,6 +384,8 @@ def _validate_coordinate_overlay_evidence(
     page_layout: Any,
     clean_visual_reference: Any,
     errors: list[dict[str, str]],
+    *,
+    stage: str,
 ) -> None:
     path = "modules.page_layout.coordinate_overlay_evidence"
     evidence = page_layout.get("coordinate_overlay_evidence") if isinstance(page_layout, dict) else None
@@ -415,6 +415,12 @@ def _validate_coordinate_overlay_evidence(
     ):
         _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate evidence binding is incomplete or stale")
         return
+    metadata_manifest = checked[1]
+    if declared_manifest.lower() != metadata_manifest:
+        _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate overlay manifest differs from PNG metadata")
+        return
+    if stage == "final":
+        return
     try:
         coordinate_module = _load_coordinate_overlay_module()
         expected = coordinate_module.coordinate_overlay_manifest(
@@ -426,7 +432,6 @@ def _validate_coordinate_overlay_evidence(
     except (OSError, ValueError, UnidentifiedImageError, RuntimeError):
         _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "cannot recompute coordinate overlay manifest")
         return
-    metadata_manifest = checked[1]
     if declared_manifest.lower() != expected.lower() or metadata_manifest != expected.lower():
         _error(errors, "SPEC_COORDINATE_OVERLAY_EVIDENCE_STALE", path, "coordinate overlay does not bind the current source and grid")
 
@@ -635,6 +640,13 @@ def _validate_paragraphs(
                     f"{paragraph_path}.list.bullet",
                     "non-list paragraph bullet must be null",
                 )
+            if list_contract.get("bullet_asset") is not None:
+                _error(
+                    errors,
+                    "SPEC_PARAGRAPH_LIST_INVALID",
+                    f"{paragraph_path}.list.bullet_asset",
+                    "non-list paragraph bullet_asset must be null or absent",
+                )
             continue
 
         required = {
@@ -679,6 +691,40 @@ def _validate_paragraphs(
                 "SPEC_NATIVE_LIST_CONTRACT_INVALID",
                 f"{paragraph_path}.list",
                 detail,
+            )
+        if bullet_type == "picture":
+            if (
+                bullet != "blip"
+                or bullet_font != "follow_text"
+                or bullet_color != "follow_text"
+            ):
+                _error(
+                    errors,
+                    "SPEC_NATIVE_LIST_CONTRACT_INVALID",
+                    f"{paragraph_path}.list",
+                    "picture bullet requires blip identity and follow_text font/color",
+                )
+            asset_path = f"{paragraph_path}.list.bullet_asset"
+            try:
+                resolved_asset, _, _ = require_asset(
+                    list_contract.get("bullet_asset"), asset_path
+                )
+            except ToolError as exc:
+                _error(errors, exc.code, exc.path, exc.detail)
+            else:
+                if resolved_asset.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+                    _error(
+                        errors,
+                        "SPEC_PICTURE_BULLET_FORMAT_UNSUPPORTED",
+                        f"{asset_path}.path",
+                        "picture bullet must be PNG or JPEG",
+                    )
+        elif list_contract.get("bullet_asset") is not None:
+            _error(
+                errors,
+                "SPEC_NATIVE_LIST_CONTRACT_INVALID",
+                f"{paragraph_path}.list.bullet_asset",
+                "bullet_asset is allowed only for picture bullets",
             )
         if not _is_number(paragraph.get("margin_left")) or not _is_number(paragraph.get("indent")):
             _error(
@@ -1563,6 +1609,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         modules.get("page_layout"),
         spec.get("clean_visual_reference"),
         errors,
+        stage=stage,
     )
     if "typography" in activated:
         _validate_typography(
@@ -1584,6 +1631,8 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         )
 
     if stage == "prebuild" and not errors:
+        from pptx_builder import validate_renderer_contracts
+
         typography_items = (
             modules.get("typography", {}).get("items", [])
             if isinstance(modules.get("typography"), dict)
@@ -1646,6 +1695,22 @@ def validate_spec_file(
         parse_constant=reject_nonstandard_json_number,
     )
     report = validate_spec(spec, stage=stage)
+    if report["valid"]:
+        repair_budget_path = spec_path.parent / "repair-budget.json"
+        try:
+            repair_budget = enforce_repair_budget(
+                spec,
+                repair_budget_path,
+                stage=stage,
+            )
+        except ToolError as exc:
+            report["valid"] = False
+            report["errors"].append(exc.as_dict())
+        else:
+            report["repair_budget"] = {
+                "path": str(repair_budget_path.resolve()),
+                **repair_budget,
+            }
     if snapshot_path is not None and report["valid"]:
         resolved_snapshot = snapshot_path.expanduser().resolve()
         resolved_snapshot.parent.mkdir(parents=True, exist_ok=True)

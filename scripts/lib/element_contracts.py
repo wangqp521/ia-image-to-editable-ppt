@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from typing import Any
 
 from .capabilities import BUILDABLE_KINDS, require_supported_value
@@ -19,6 +20,8 @@ from .geometry import (
     validate_bbox,
 )
 from .schema_contracts import (
+    CHART_DATA_LABEL_FIELDS,
+    CHART_SLICE_FIELDS,
     ELEMENT_FIELDS,
     KIND_CONTENT_FIELDS,
     KIND_REQUIRED_CONTENT_FIELDS,
@@ -45,6 +48,7 @@ EXPECTED_OBJECT_TYPES = {
     "status": frozenset({"sp"}),
     "picture": frozenset({"pic"}),
     "icon": frozenset({"pic"}),
+    "chart": frozenset({"graphicFrame"}),
 }
 
 def expected_object_types(kind: str) -> frozenset[str]:
@@ -271,6 +275,191 @@ def _valid_rgb(value: Any) -> bool:
         and value.startswith("#")
         and all(character in "0123456789abcdefABCDEF" for character in value[1:])
     )
+
+
+def validate_chart_contract(
+    element: dict[str, Any], path: str | None = None
+) -> list[ContractIssue]:
+    """Validate the closed simple 2D single-series pie/doughnut contract."""
+    path = path or _element_path(element)
+    style = element.get("style")
+    content = element.get("content")
+    if not isinstance(style, dict) or not isinstance(content, dict):
+        return [_issue("UNSUPPORTED_CAPABILITY", path, "chart style and content must be objects")]
+
+    chart_type = content.get("chart_type")
+    try:
+        require_supported_value("chart_type", chart_type, f"{path}.content.chart_type")
+    except ToolError as exc:
+        return [_issue(exc.code, exc.path, exc.detail, exc.capability)]
+
+    angle = style.get("first_slice_angle")
+    if type(angle) is not int or not 0 <= angle <= 359:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.style.first_slice_angle",
+            "first_slice_angle must be an integer from 0 to 359",
+            "chart.first_slice_angle",
+        )]
+    hole_size = style.get("hole_size")
+    if chart_type == "pie" and "hole_size" in style:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.style.hole_size",
+            "pie must not declare hole_size",
+            "chart.hole_size",
+        )]
+    if chart_type == "doughnut" and (
+        type(hole_size) is not int or not 10 <= hole_size <= 90
+    ):
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.style.hole_size",
+            "doughnut hole_size must be an integer from 10 to 90",
+            "chart.hole_size",
+        )]
+
+    slices = content.get("slices")
+    if not isinstance(slices, list) or len(slices) < 2:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.slices",
+            "chart requires at least two slices",
+        )]
+    total = 0.0
+    derived: list[dict[str, Any]] = []
+    explicit: list[dict[str, Any]] = []
+    for index, item in enumerate(slices):
+        item_path = f"{path}.content.slices[{index}]"
+        issues = _unknown_field_issue(item_path, item, CHART_SLICE_FIELDS)
+        if issues:
+            return issues
+        assert isinstance(item, dict)
+        missing = sorted(CHART_SLICE_FIELDS - set(item))
+        if missing:
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY", item_path, f"missing fields: {', '.join(missing)}"
+            )]
+        category = item["category"]
+        if category is not None and (not isinstance(category, str) or not category):
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY",
+                f"{item_path}.category",
+                "category must be null or a non-empty string",
+            )]
+        value = item["value"]
+        if (
+            type(value) not in {int, float}
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY",
+                f"{item_path}.value",
+                "slice value must be finite and non-negative",
+            )]
+        if not _valid_rgb(item["color"]):
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY",
+                f"{item_path}.color",
+                "slice color must be #RRGGBB",
+                "chart.slice.explicit_color",
+            )]
+        value_source = item["value_source"]
+        if value_source not in {"explicit", "derived_complement"}:
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY",
+                f"{item_path}.value_source",
+                "value_source must be explicit or derived_complement",
+                "chart.slice.value_source",
+            )]
+        total += float(value)
+        (derived if value_source == "derived_complement" else explicit).append(item)
+    if total <= 0:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.slices",
+            "slice values must have a positive total",
+        )]
+    if derived and (
+        len(slices) != 2
+        or len(derived) != 1
+        or len(explicit) != 1
+        or not 0 <= explicit[0]["value"] <= 100
+        or derived[0]["value"] != 100 - explicit[0]["value"]
+    ):
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.slices",
+            "derived_complement requires exactly 100 minus one explicit percentage in a two-slice chart",
+            "chart.slice.value_source",
+        )]
+
+    labels = content.get("data_labels")
+    issues = _unknown_field_issue(
+        f"{path}.content.data_labels", labels, CHART_DATA_LABEL_FIELDS
+    )
+    if issues:
+        return issues
+    assert isinstance(labels, dict)
+    missing = sorted(CHART_DATA_LABEL_FIELDS - set(labels))
+    if missing:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels",
+            f"missing fields: {', '.join(missing)}",
+        )]
+    for field in ("enabled", "show_category", "show_value", "show_percentage"):
+        if type(labels[field]) is not bool:
+            return [_issue(
+                "UNSUPPORTED_CAPABILITY",
+                f"{path}.content.data_labels.{field}",
+                f"{field} must be boolean",
+                "chart.data_labels",
+            )]
+    if labels["position"] not in {"best_fit", "center", "inside_end", "outside_end"}:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels.position",
+            "unsupported data label position",
+            "chart.data_labels",
+        )]
+    if not isinstance(labels["number_format"], str) or not labels["number_format"]:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels.number_format",
+            "number_format must be a non-empty string",
+            "chart.data_labels",
+        )]
+    if not valid_font_size_pt(labels["font_size"]):
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels.font_size",
+            "font_size must be finite and from 1 to 4000 pt",
+            "chart.data_labels",
+        )]
+    if type(labels["font_weight"]) is not int or not 1 <= labels["font_weight"] <= 1000:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels.font_weight",
+            "font_weight must be an integer from 1 to 1000",
+            "chart.data_labels",
+        )]
+    if not _valid_rgb(labels["color"]):
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.data_labels.color",
+            "data label color must be #RRGGBB",
+            "chart.data_labels",
+        )]
+    if labels["show_category"] and any(item["category"] is None for item in slices):
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.slices",
+            "category cannot be null when show_category is true",
+            "chart.data_labels",
+        )]
+    return []
 
 
 def _validate_table(element: dict[str, Any], path: str) -> list[ContractIssue]:
@@ -594,4 +783,6 @@ def validate_element_contract(element: Any) -> list[ContractIssue]:
         return _validate_multipart(element, path)
     if kind == "table":
         return _validate_table(element, path)
+    if kind == "chart":
+        return validate_chart_contract(element, path)
     return []

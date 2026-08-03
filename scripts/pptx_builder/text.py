@@ -131,6 +131,8 @@ def _apply_paragraph_contract(
     paragraph_contract: dict[str, Any],
     contract: dict[str, Any],
     index: int,
+    *,
+    slide_part: Any | None = None,
 ) -> None:
     path = f"modules.typography.items.{contract['element_id']}.paragraphs[{index}]"
     paragraph.alignment = _ALIGNMENTS[paragraph_contract["alignment"]]
@@ -146,7 +148,12 @@ def _apply_paragraph_contract(
     if list_contract["is_list"]:
         bullet_contract = dict(list_contract)
         bullet_contract["indent"] = round(paragraph_contract["indent"])
-        set_native_bullet(paragraph, bullet_contract, f"{path}.list")
+        set_native_bullet(
+            paragraph,
+            bullet_contract,
+            f"{path}.list",
+            slide_part=slide_part,
+        )
     _add_paragraph_runs(
         paragraph,
         contract,
@@ -155,7 +162,9 @@ def _apply_paragraph_contract(
     )
 
 
-def apply_text_contract(text_frame: Any, contract: dict[str, Any]) -> None:
+def apply_text_contract(
+    text_frame: Any, contract: dict[str, Any], *, slide_part: Any | None = None
+) -> None:
     """Apply a validated typography item without inferring missing style."""
     text_box = contract["text_box"]
     margins = text_box["margins"]
@@ -177,7 +186,13 @@ def apply_text_contract(text_frame: Any, contract: dict[str, Any]) -> None:
             if index == 0
             else text_frame.add_paragraph()
         )
-        _apply_paragraph_contract(paragraph, paragraph_contract, contract, index)
+        _apply_paragraph_contract(
+            paragraph,
+            paragraph_contract,
+            contract,
+            index,
+            slide_part=slide_part,
+        )
 
 
 def render(context: RenderContext, element: dict[str, Any]) -> None:
@@ -195,7 +210,7 @@ def render(context: RenderContext, element: dict[str, Any]) -> None:
         shape.line.fill.background()
     _apply_shadow(shape, element["style"].get("effects"))
     shape.rotation = element["style"].get("rotation", 0)
-    apply_text_contract(shape.text_frame, contract)
+    apply_text_contract(shape.text_frame, contract, slide_part=context.slide.part)
     context.registry.register(
         element["element_id"],
         shape,

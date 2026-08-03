@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -15,6 +16,7 @@ from lib.geometry import (
     DRAWINGML_PERCENT_SCALE,
     quantize_drawingml_percentage,
 )
+from lib.representation_contracts import require_asset
 
 
 _BULLET_TAGS = {"a:buChar", "a:buAutoNum", "a:buBlip", "a:buNone"}
@@ -23,11 +25,17 @@ _BORDER_TAGS = {"left": "a:lnL", "right": "a:lnR", "top": "a:lnT", "bottom": "a:
 _HEX_COLOR = re.compile(r"#?[0-9A-Fa-f]{6}")
 
 
-def set_native_bullet(paragraph: Any, contract: dict[str, Any], path: str) -> None:
+def set_native_bullet(
+    paragraph: Any,
+    contract: dict[str, Any],
+    path: str,
+    *,
+    slide_part: Any | None = None,
+) -> None:
     """Set one local native bullet identity and its paragraph level/indent."""
     bullet_type = contract.get("bullet_type")
     bullet = contract.get("bullet")
-    if bullet_type not in {"char", "auto_number"} or not isinstance(bullet, str) or not bullet:
+    if bullet_type not in {"char", "auto_number", "picture"} or not isinstance(bullet, str) or not bullet:
         _invalid(path, "bullet contract must contain a supported type and non-empty bullet")
     properties = paragraph._p.get_or_add_pPr()
     for child in list(properties):
@@ -43,6 +51,42 @@ def set_native_bullet(paragraph: Any, contract: dict[str, Any], path: str) -> No
         if type(indent) is not int:
             _invalid(path, "bullet indent must be an integer")
         properties.set("indent", str(indent))
+    if bullet_type == "picture":
+        if bullet != "blip" or slide_part is None:
+            _invalid(path, "picture bullet requires blip identity and a slide part")
+        asset_path, expected_hash, _ = require_asset(
+            contract.get("bullet_asset"), f"{path}.bullet_asset"
+        )
+        if asset_path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+            _invalid(
+                f"{path}.bullet_asset.path",
+                "picture bullet must be PNG or JPEG",
+                "text.paragraph.picture_bullet",
+            )
+        try:
+            image_part, relationship_id = slide_part.get_or_add_image_part(
+                str(asset_path)
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                f"{path}.bullet_asset",
+                "picture bullet relationship could not be created",
+                "text.paragraph.picture_bullet",
+            ) from exc
+        if hashlib.sha256(image_part.blob).hexdigest() != expected_hash.lower():
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                f"{path}.bullet_asset",
+                "embedded picture bullet media hash changed",
+                "text.paragraph.picture_bullet",
+            )
+        bu_blip = OxmlElement("a:buBlip")
+        blip = OxmlElement("a:blip")
+        blip.set(qn("r:embed"), relationship_id)
+        bu_blip.append(blip)
+        properties.append(bu_blip)
+        return
     element = OxmlElement("a:buChar" if bullet_type == "char" else "a:buAutoNum")
     element.set("char" if bullet_type == "char" else "type", bullet)
     properties.append(element)

@@ -1,6 +1,7 @@
 """Schema v2 PPTX compiler building blocks and static renderers."""
 
 from .common import RENDERERS, RenderContext
+from .charts import CHART_RENDERER
 from .contracts import validate_renderer_contracts
 from .lines import LINE_RENDERER
 from .multipart import MATRIX_RENDERER, STATUS_RENDERER
@@ -12,6 +13,7 @@ from .tables import TABLE_RENDERER
 
 __all__ = [
     "ICON_RENDERER",
+    "CHART_RENDERER",
     "LINE_RENDERER",
     "MATRIX_RENDERER",
     "ObjectRegistry",

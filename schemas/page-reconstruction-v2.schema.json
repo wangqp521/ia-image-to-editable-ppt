@@ -253,6 +253,138 @@
       ],
       "type": "object"
     },
+    "ChartContent": {
+      "additionalProperties": false,
+      "properties": {
+        "chart_type": {
+          "enum": [
+            "doughnut",
+            "pie"
+          ]
+        },
+        "data_labels": {
+          "$ref": "#/$defs/ChartDataLabels"
+        },
+        "slices": {
+          "items": {
+            "$ref": "#/$defs/ChartSlice"
+          },
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "chart_type",
+        "data_labels",
+        "slices"
+      ],
+      "type": "object"
+    },
+    "ChartDataLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "font_size": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "font_weight": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "number_format": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "position": {
+          "enum": [
+            "best_fit",
+            "center",
+            "inside_end",
+            "outside_end"
+          ]
+        },
+        "show_category": {
+          "type": "boolean"
+        },
+        "show_percentage": {
+          "type": "boolean"
+        },
+        "show_value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "color",
+        "enabled",
+        "font_size",
+        "font_weight",
+        "number_format",
+        "position",
+        "show_category",
+        "show_percentage",
+        "show_value"
+      ],
+      "type": "object"
+    },
+    "ChartSlice": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "value": {
+          "minimum": 0,
+          "type": "number"
+        },
+        "value_source": {
+          "enum": [
+            "derived_complement",
+            "explicit"
+          ]
+        }
+      },
+      "required": [
+        "category",
+        "color",
+        "value",
+        "value_source"
+      ],
+      "type": "object"
+    },
+    "ChartStyle": {
+      "additionalProperties": false,
+      "properties": {
+        "first_slice_angle": {
+          "maximum": 359,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hole_size": {
+          "maximum": 90,
+          "minimum": 10,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "first_slice_angle"
+      ],
+      "type": "object"
+    },
     "CoordinateGrid": {
       "additionalProperties": false,
       "properties": {
@@ -403,6 +535,25 @@
     "Element": {
       "additionalProperties": false,
       "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "chart"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/ChartContent"
+              },
+              "style": {
+                "$ref": "#/$defs/ChartStyle"
+              }
+            }
+          }
+        },
         {
           "if": {
             "properties": {
@@ -682,6 +833,7 @@
         },
         "kind": {
           "enum": [
+            "chart",
             "icon",
             "line",
             "matrix",
@@ -1475,6 +1627,16 @@
           "type": [
             "string",
             "null"
+          ]
+        },
+        "bullet_asset": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Asset"
+            },
+            {
+              "type": "null"
+            }
           ]
         },
         "bullet_color": {
@@ -2522,5 +2684,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "7dad9f308a695008684d14b1286a38963e5bad3c0f308e1f0213608653c5bdd6"
+  "x-schema-contract-sha256": "2c8941b8b5d2fdaccb94c71b6bbd128398ce8572e527b3a7e754143e4a9b2278"
 }

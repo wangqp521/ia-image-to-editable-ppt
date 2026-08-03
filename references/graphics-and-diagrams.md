@@ -2,7 +2,7 @@
 
 `modules.graphics/diagram/chart` 引用 v2 `element_id`，禁填 OOXML ID；存数/bbox/结构/样式/层级/可编辑性。
 
-v1 native：文字、rectangle/roundRect/ellipse/chevron/rightArrow、线、表格、matrix/status、picture/icon；multipart 用 `composite` parts/repeat，不建 IR。自由曲线/其他 preset/native chart unsupported；`required_editability=full|labels_and_geometry` 禁 asset fallback，prebuild 失败即停。`parts/repeat_sequence` 默认禁重叠；仅源图确有重叠且各 part bbox/层级忠实时，父 element `content.allow_overlap=true`；禁为绕错改 bbox、并 parts、滥用开关。
+当前 native：文字、rectangle/roundRect/ellipse/chevron/rightArrow、线、表格、matrix/status、picture/icon，以及合格的简单 `pie|doughnut`；multipart 用 `composite` parts/repeat，不建 IR。自由曲线、其他 preset 和超出首期合同的复杂图表不原生构建；`required_editability=full|labels_and_geometry` 禁 asset fallback，prebuild 失败即停。`parts/repeat_sequence` 默认禁重叠；仅源图确有重叠且各 part bbox/层级忠实时，父 element `content.allow_overlap=true`；禁为绕错改 bbox、并 parts、滥用开关。
 
 首轮构建时，块状、带面积填充的箭头优先使用 `rightArrow`；细连接关系才使用 line arrow marker。该选择只复用 compiler 已支持表示，不得为规避 renderer 差异改变来源语义、方向或几何。
 
@@ -33,8 +33,12 @@ v1 shape/line 合同（字段齐全、不扩展）：
 
 ## 图表
 
-证据等级不扩 manifest。v1 无 native chart；`high|medium` 用登记的 Shape/TextBox/Line composite，`low` 且 plan 允许才最小 asset 化并留原生标签，否则 fail closed。禁造数据/分类/系列/轴/趋势。
+简单 2D、单系列、纯色 `pie|doughnut` 只有在分类、数值、扇区顺序、颜色和数据标签均可确认，且不存在 3D、渐变、纹理、爆炸扇区或复杂阴影时，才使用原生 ChartRenderer。Renderer 生成 `graphicFrame + chart part + embedded workbook`，不静默 fallback。
 
-图存 type/三类 bbox/表示法/分类与系列序/确认点/轴/刻度/gridline/legend/label/颜色/线型/fill/marker/裁剪。折线有序，无断口/突刺/串线，marker 居中；缺失值按源断开，不平滑/越界/改极值。柱条查基线/gap/overlap/堆积；饼环查序/角度/内径；散点用数值轴；组合图查主次轴/图例。
+分类、数值、颜色合并写入 `slices[]`；`value_source` 仅为 `explicit|derived_complement`。`derived_complement` 只用于两块扇区、一个明确整体百分比的 `100-x` 补余数，不推断分类名、第三块数据或一般数值归一化。`first_slice_angle` 为 0–359；doughnut 的 `hole_size` 为 10–90；pie 不写孔径。两类图表共用一套数据标签合同；`position=center` 表示扇区中心，圆环中心 KPI 必须另建原生 TextBox。
+
+复杂图表或证据不足时，继续使用当前最小局部 picture 路径；标题、图例、中心 KPI 和外围注释仍可独立使用 TextBox/Shape。不得在原生 Renderer 内改走图片，也不得造数据、分类、系列、轴或趋势。
+
+图存 type/三类 bbox/表示法/分类与系列序/确认点/轴/刻度/gridline/legend/label/颜色/线型/fill/marker/裁剪。结构验证核对原生图表类型、扇区、分类、数值、颜色、标签、角度、孔径和 embedded workbook。折线有序，无断口/突刺/串线，marker 居中；缺失值按源断开，不平滑/越界/改极值。柱条查基线/gap/overlap/堆积；饼环查序/角度/内径；散点用数值轴；组合图查主次轴/图例。
 
 对象数、merge/边界、状态条、connector 连续性、图表映射/裁剪错误不以“整体相似”放行。

@@ -49,6 +49,7 @@ NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "pr": "http://schemas.openxmlformats.org/package/2006/relationships",
+    "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
 }
 RID = f"{{{NS['r']}}}id"
 REMBED = f"{{{NS['r']}}}embed"
@@ -113,6 +114,16 @@ BUILD_REPORT_OBJECT_FIELDS = frozenset(
     }
 )
 SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+TEXT_RUN_STYLE_PROPERTIES = (
+    "font_size",
+    "font_weight",
+    "color",
+    "italic",
+    "underline",
+    "strike",
+    "baseline",
+    "letter_spacing",
+)
 
 
 class ValidationError(ValueError):
@@ -150,12 +161,20 @@ def _result(path: Path) -> dict[str, Any]:
         "text_runs": 0,
         "native_list_paragraphs": 0,
         "native_list_contracts_checked": 0,
+        "native_chart_contracts_checked": 0,
+        "text_run_contracts_checked": 0,
+        "text_run_style_mismatch_count": 0,
+        "text_run_style_mismatches": [],
+        "text_run_style_mismatches_by_property": {
+            name: 0 for name in TEXT_RUN_STYLE_PROPERTIES
+        },
         "build_report_objects_checked": 0,
         "multipart_contracts_checked": 0,
         "representation_facts_checked": 0,
         "asset_fallbacks_checked": 0,
         "text_objects": [],
         "native_shape_objects": [],
+        "native_chart_objects": [],
         "picture_objects": [],
         "structure_objects": [],
         "full_slide_picture_risk": False,
@@ -607,6 +626,7 @@ def _native_bullet_contract(
 ) -> dict[str, Any]:
     bullet_type = None
     bullet = None
+    bullet_relationship_id = None
     for owner in properties:
         if owner is None:
             continue
@@ -621,6 +641,8 @@ def _native_bullet_contract(
             bullet_type, bullet = "auto_number", auto.get("type")
         elif blip is not None:
             bullet_type, bullet = "picture", "blip"
+            image = blip.find("a:blip", NS)
+            bullet_relationship_id = image.get(REMBED) if image is not None else None
         if bullet_type is not None:
             break
     if bullet_type is None:
@@ -674,7 +696,7 @@ def _native_bullet_contract(
             bullet_color = f"scheme:{scheme.get('val')}"
         break
 
-    return {
+    result = {
         "is_list": True,
         "level": level,
         "bullet_type": bullet_type,
@@ -684,6 +706,9 @@ def _native_bullet_contract(
         "bullet_size_value": bullet_size_value,
         "bullet_color": bullet_color,
     }
+    if bullet_type == "picture":
+        result["bullet_relationship_id"] = bullet_relationship_id
+    return result
 
 
 def _alignment(value: str | None) -> str | None:
@@ -704,6 +729,9 @@ def _text_object(
     inheritance: dict[str, Any] | None = None,
     theme_fonts: dict[str, str] | None = None,
     slide_bbox: tuple[int | None, int | None, int | None, int | None] | None = None,
+    archive: zipfile.ZipFile | None = None,
+    names: set[str] | None = None,
+    slide_relationships: dict[str, tuple[str, str, bool]] | None = None,
 ) -> dict[str, Any]:
     theme_fonts = theme_fonts or {}
     inheritance = inheritance or {}
@@ -751,8 +779,12 @@ def _text_object(
             text_parts.append(text)
             size = _chain_int(properties, "sz")
             bold = _chain_attr(properties, "b")
-            underline = _chain_attr(properties, "u")
-            spacing = _chain_int(properties, "spc")
+            italic = _chain_attr(properties, "i") in {"1", "true"}
+            underline = _chain_attr(properties, "u") not in {None, "none"}
+            strike_value = _chain_attr(properties, "strike")
+            strike = strike_value not in {None, "noStrike"}
+            baseline = _chain_int(properties, "baseline") or 0
+            spacing = _chain_int(properties, "spc") or 0
             color = next(
                 (
                     resolved for candidate in properties
@@ -760,6 +792,8 @@ def _text_object(
                 ),
                 None,
             )
+            if isinstance(color, str) and color.startswith("#"):
+                color = color.upper()
             fonts_by_script = {
                 script: _font_from_chain(properties, text, theme_fonts, script)
                 for script in _scripts_in_text(text)
@@ -771,10 +805,36 @@ def _text_object(
                 "font_size": size / 100 if size else None,
                 "font_weight": 700 if bold in {"1", "true"} else 400,
                 "color": color,
-                "decoration": "underline" if underline not in {None, "none"} else "none",
-                "letter_spacing": spacing / 100 if spacing is not None else None,
+                "italic": italic,
+                "underline": underline,
+                "strike": strike,
+                "baseline": baseline,
+                "decoration": "underline" if underline else "none",
+                "letter_spacing": spacing / 100,
             })
         list_contract = _native_bullet_contract(paragraph_properties, level)
+        if list_contract.get("bullet_type") == "picture":
+            relationship_id = list_contract.get("bullet_relationship_id")
+            relationship = (
+                slide_relationships.get(relationship_id)
+                if slide_relationships is not None
+                and isinstance(relationship_id, str)
+                else None
+            )
+            relationship_valid = (
+                archive is not None
+                and names is not None
+                and relationship is not None
+                and not relationship[2]
+                and relationship[1].endswith("/image")
+                and relationship[0] in names
+            )
+            list_contract["bullet_relationship_valid"] = relationship_valid
+            list_contract["bullet_media_sha256"] = (
+                _archive_sha256(archive, relationship[0])
+                if relationship_valid and archive is not None and relationship is not None
+                else None
+            )
         paragraphs_out.append({
             "start": p_start, "end": cursor,
             "alignment": _alignment(_chain_attr(paragraph_properties, "algn")),
@@ -1306,6 +1366,259 @@ def _expected_media_sha256(value: Any, element_id: str) -> str | None:
     return None
 
 
+def _chart_points(series: ET.Element, path: str, *, numeric: bool) -> list[Any]:
+    cache_path = "c:val/c:numRef/c:numCache" if numeric else "c:cat/c:strRef/c:strCache"
+    cache = series.find(cache_path, NS)
+    if cache is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} cache is missing")
+    points: dict[int, Any] = {}
+    for point in cache.findall("c:pt", NS):
+        index = _int_attr(point, "idx")
+        value = point.find("c:v", NS)
+        if index is None or index < 0 or index in points or value is None:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} cache is invalid")
+        raw = value.text or ""
+        if numeric:
+            try:
+                parsed = float(raw)
+            except ValueError as exc:
+                raise ValidationError(
+                    "NATIVE_CHART_CONTRACT_MISMATCH", f"{path} value is not numeric"
+                ) from exc
+            if not math.isfinite(parsed):
+                raise ValidationError(
+                    "NATIVE_CHART_CONTRACT_MISMATCH", f"{path} value is not finite"
+                )
+            points[index] = parsed
+        else:
+            points[index] = raw or None
+    if not points or set(points) != set(range(len(points))):
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} indexes are not contiguous")
+    return [points[index] for index in range(len(points))]
+
+
+def _chart_bool(owner: ET.Element | None, tag: str) -> bool:
+    node = owner.find(f"c:{tag}", NS) if owner is not None else None
+    return node is not None and node.get("val", "1") not in {"0", "false"}
+
+
+def _native_chart_contract(
+    archive: zipfile.ZipFile,
+    names: set[str],
+    slide_part: str,
+    frame: ET.Element,
+    slide_relationships: dict[str, tuple[str, str, bool]],
+) -> dict[str, Any]:
+    """Extract one native pie/doughnut chart and its embedded workbook identity."""
+    identity = frame.find("p:nvGraphicFramePr/p:cNvPr", NS)
+    object_name = identity.get("name") if identity is not None else None
+    chart_ref = frame.find("a:graphic/a:graphicData/c:chart", NS)
+    relationship_id = chart_ref.get(RID) if chart_ref is not None else None
+    relationship = slide_relationships.get(relationship_id or "")
+    if (
+        relationship is None
+        or relationship[2]
+        or not relationship[1].endswith("/chart")
+        or relationship[0] not in names
+    ):
+        raise ValidationError(
+            "NATIVE_CHART_RELATIONSHIP_INVALID",
+            f"{slide_part} chart frame {object_name!r} lacks an internal chart relationship",
+        )
+    chart_part = relationship[0]
+    chart_root = _xml(archive, chart_part)
+    pie = chart_root.find("c:chart/c:plotArea/c:pieChart", NS)
+    doughnut = chart_root.find("c:chart/c:plotArea/c:doughnutChart", NS)
+    if (pie is None) == (doughnut is None):
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH",
+            f"{chart_part} must contain exactly one pieChart or doughnutChart",
+        )
+    plot = doughnut if doughnut is not None else pie
+    assert plot is not None
+    chart_type = "doughnut" if doughnut is not None else "pie"
+    series = plot.findall("c:ser", NS)
+    if len(series) != 1:
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH",
+            f"{chart_part} must contain exactly one series",
+        )
+    categories = _chart_points(series[0], f"{chart_part}.categories", numeric=False)
+    values = _chart_points(series[0], f"{chart_part}.values", numeric=True)
+    if len(categories) != len(values) or len(values) < 2:
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice caches are misaligned"
+        )
+    colors: dict[int, str] = {}
+    for point in series[0].findall("c:dPt", NS):
+        index_node = point.find("c:idx", NS)
+        index = _int_attr(index_node, "val")
+        color = point.find("c:spPr/a:solidFill/a:srgbClr", NS)
+        value = color.get("val") if color is not None else None
+        if (
+            index is None
+            or index in colors
+            or not isinstance(value, str)
+            or re.fullmatch(r"[0-9A-Fa-f]{6}", value) is None
+        ):
+            raise ValidationError(
+                "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice color is invalid"
+            )
+        colors[index] = f"#{value.upper()}"
+    if set(colors) != set(range(len(values))):
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} requires one explicit color per slice"
+        )
+
+    angle = _int_attr(plot.find("c:firstSliceAng", NS), "val")
+    hole_size = _int_attr(plot.find("c:holeSize", NS), "val")
+    labels_node = plot.find("c:dLbls", NS)
+    position_node = labels_node.find("c:dLblPos", NS) if labels_node is not None else None
+    number_format = labels_node.find("c:numFmt", NS) if labels_node is not None else None
+    label_run = labels_node.find("c:txPr/a:p/a:pPr/a:defRPr", NS) if labels_node is not None else None
+    label_color = (
+        label_run.find("a:solidFill/a:srgbClr", NS) if label_run is not None else None
+    )
+    labels = {
+        "enabled": labels_node is not None,
+        "show_category": _chart_bool(labels_node, "showCatName"),
+        "show_value": _chart_bool(labels_node, "showVal"),
+        "show_percentage": _chart_bool(labels_node, "showPercent"),
+        "position": {
+            "bestFit": "best_fit",
+            "ctr": "center",
+            "inEnd": "inside_end",
+            "outEnd": "outside_end",
+        }.get(position_node.get("val") if position_node is not None else None),
+        "number_format": number_format.get("formatCode") if number_format is not None else None,
+        "font_size": (
+            _int_attr(label_run, "sz") / 100
+            if _int_attr(label_run, "sz") is not None
+            else None
+        ),
+        "bold": label_run is not None and label_run.get("b", "0") in {"1", "true"},
+        "color": (
+            f"#{label_color.get('val').upper()}"
+            if label_color is not None and label_color.get("val")
+            else None
+        ),
+    }
+
+    chart_rels_part = _slide_rels_part(chart_part)
+    chart_relationships = (
+        _relationship_map(archive, chart_rels_part) if chart_rels_part in names else {}
+    )
+    external_data = chart_root.find("c:externalData", NS)
+    workbook_id = external_data.get(RID) if external_data is not None else None
+    workbook_relation = chart_relationships.get(workbook_id or "")
+    workbook_part = (
+        workbook_relation[0]
+        if workbook_relation is not None
+        and not workbook_relation[2]
+        and workbook_relation[1].endswith("/package")
+        and workbook_relation[0] in names
+        else None
+    )
+    element_id = (
+        object_name[3:]
+        if isinstance(object_name, str) and object_name.startswith("ia:")
+        else None
+    )
+    return {
+        "element_id": element_id,
+        "object_name": object_name,
+        "slide_part": slide_part,
+        "chart_part": chart_part,
+        "embedded_workbook_part": workbook_part,
+        "chart_type": chart_type,
+        "slices": [
+            {"category": categories[index], "value": values[index], "color": colors[index]}
+            for index in range(len(values))
+        ],
+        "data_labels": labels,
+        "first_slice_angle": angle,
+        "hole_size": hole_size,
+    }
+
+
+def _validate_native_chart_contracts(
+    result: dict[str, Any], spec: dict[str, Any]
+) -> None:
+    elements = spec.get("elements")
+    if not isinstance(elements, list):
+        return
+    expected = {
+        item.get("element_id"): item
+        for item in elements
+        if isinstance(item, dict)
+        and item.get("kind") == "chart"
+        and isinstance(item.get("element_id"), str)
+    }
+    actual = {
+        item.get("element_id"): item
+        for item in result.get("native_chart_objects", [])
+        if isinstance(item, dict) and isinstance(item.get("element_id"), str)
+    }
+    for element_id, element in expected.items():
+        result["native_chart_contracts_checked"] += 1
+        observed = actual.get(element_id)
+        if observed is None:
+            _report_error(
+                result,
+                "NATIVE_CHART_CONTRACT_MISMATCH",
+                f"elements.{element_id}",
+                "named native chart object is missing",
+            )
+            continue
+        if observed.get("embedded_workbook_part") is None:
+            _report_error(
+                result,
+                "NATIVE_CHART_WORKBOOK_MISSING",
+                f"elements.{element_id}.content",
+                "native chart lacks an internal embedded workbook",
+            )
+        content = element.get("content", {})
+        style = element.get("style", {})
+        expected_slices = [
+            {
+                "category": item.get("category"),
+                "value": float(item.get("value")),
+                "color": str(item.get("color", "")).upper(),
+            }
+            for item in content.get("slices", [])
+            if isinstance(item, dict) and type(item.get("value")) in {int, float}
+        ]
+        labels = content.get("data_labels", {})
+        observed_labels = observed.get("data_labels", {})
+        mismatch = (
+            observed.get("chart_type") != content.get("chart_type")
+            or observed.get("slices") != expected_slices
+            or observed.get("first_slice_angle") != style.get("first_slice_angle")
+            or observed.get("hole_size") != style.get("hole_size")
+            or observed_labels.get("enabled") != labels.get("enabled")
+        )
+        if labels.get("enabled") is True:
+            mismatch = mismatch or any(
+                (
+                    observed_labels.get("show_category") != labels.get("show_category"),
+                    observed_labels.get("show_value") != labels.get("show_value"),
+                    observed_labels.get("show_percentage") != labels.get("show_percentage"),
+                    observed_labels.get("position") != labels.get("position"),
+                    observed_labels.get("number_format") != labels.get("number_format"),
+                    observed_labels.get("font_size") != labels.get("font_size"),
+                    observed_labels.get("bold") != (labels.get("font_weight", 0) >= 600),
+                    observed_labels.get("color") != str(labels.get("color", "")).upper(),
+                )
+            )
+        if mismatch:
+            _report_error(
+                result,
+                "NATIVE_CHART_CONTRACT_MISMATCH",
+                f"elements.{element_id}",
+                "native chart type, slices, labels, angle, or hole differs from the spec",
+            )
+
+
 def _validate_element_bindings(
     result: dict[str, Any],
     spec: dict[str, Any],
@@ -1351,7 +1664,7 @@ def _validate_element_bindings(
         "line": {"cxnSp", "sp"},
         "table": {"graphicFrame", "sp"},
         "matrix": {"graphicFrame", "sp"},
-        "chart": {"graphicFrame", "sp"},
+        "chart": {"graphicFrame"},
         "diagram": {"graphicFrame", "sp"},
     }
     for element_id, element in element_map.items():
@@ -2069,63 +2382,121 @@ def _same_value(left: Any, right: Any) -> bool:
     return left == right
 
 
-def _bold_vector(length: int, runs: Any) -> list[bool] | None:
+def _run_ranges_valid(length: int, runs: Any) -> bool:
     if not isinstance(runs, list) or not runs:
-        return None
-    values: list[bool | None] = [None] * length
+        return False
+    covered = [False] * length
     for run in runs:
         if not isinstance(run, dict):
-            return None
-        start, end, weight = run.get("start"), run.get("end"), run.get("font_weight")
+            return False
+        start, end = run.get("start"), run.get("end")
         if (
             not isinstance(start, int)
             or isinstance(start, bool)
             or not isinstance(end, int)
             or isinstance(end, bool)
-            or not isinstance(weight, (int, float))
-            or isinstance(weight, bool)
             or start < 0
             or end <= start
             or end > length
         ):
-            return None
+            return False
         for offset in range(start, end):
-            if values[offset] is not None:
-                return None
-            values[offset] = weight >= 600
-    if any(value is None for value in values):
-        return None
-    return [bool(value) for value in values]
+            if covered[offset]:
+                return False
+            covered[offset] = True
+    return bool(covered) and all(covered)
 
 
-def _font_size_vector(length: int, runs: Any) -> list[float] | None:
-    if not isinstance(runs, list) or not runs:
+def _normalized_run_value(run: dict[str, Any], property_name: str) -> Any:
+    value = run.get(property_name)
+    if property_name == "font_size":
+        return (
+            round(float(value) * 100)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+    if property_name == "font_weight":
+        return (
+            float(value) >= 600
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else None
+        )
+    if property_name == "color":
+        return value.upper() if isinstance(value, str) else None
+    if property_name in {"italic", "underline", "strike"}:
+        return value if isinstance(value, bool) else False
+    if property_name == "baseline":
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+    if property_name == "letter_spacing":
+        return (
+            round(float(value) * 100)
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else 0
+        )
+    raise ValueError(f"unsupported run property: {property_name}")
+
+
+def _style_vector(
+    length: int,
+    runs: Any,
+    property_name: str,
+) -> list[Any] | None:
+    if not _run_ranges_valid(length, runs):
         return None
-    values: list[float | None] = [None] * length
+    values: list[Any] = [None] * length
     for run in runs:
-        if not isinstance(run, dict):
-            return None
-        start, end, size = run.get("start"), run.get("end"), run.get("font_size")
-        if (
-            not isinstance(start, int)
-            or isinstance(start, bool)
-            or not isinstance(end, int)
-            or isinstance(end, bool)
-            or not isinstance(size, (int, float))
-            or isinstance(size, bool)
-            or size <= 0
-            or start < 0
-            or end <= start
-            or end > length
+        normalized = _normalized_run_value(run, property_name)
+        for offset in range(run["start"], run["end"]):
+            values[offset] = normalized
+    return values
+
+
+def _display_run_value(property_name: str, value: Any) -> Any:
+    if property_name in {"font_size", "letter_spacing"} and isinstance(value, int):
+        return value / 100
+    if property_name == "font_weight" and isinstance(value, bool):
+        return 700 if value else 400
+    return value
+
+
+def _append_style_mismatches(
+    result: dict[str, Any],
+    element_id: Any,
+    property_name: str,
+    expected: list[Any],
+    actual: list[Any],
+) -> None:
+    offset = 0
+    while offset < len(expected):
+        if expected[offset] == actual[offset]:
+            offset += 1
+            continue
+        start = offset
+        expected_value = expected[offset]
+        actual_value = actual[offset]
+        offset += 1
+        while (
+            offset < len(expected)
+            and expected[offset] != actual[offset]
+            and expected[offset] == expected_value
+            and actual[offset] == actual_value
         ):
-            return None
-        for offset in range(start, end):
-            if values[offset] is not None:
-                return None
-            values[offset] = float(size)
-    if any(value is None for value in values):
-        return None
-    return [float(value) for value in values]
+            offset += 1
+        mismatch = {
+            "code": "TEXT_RUN_STYLE_MISMATCH",
+            "element_id": element_id,
+            "start": start,
+            "end": offset,
+            "property": property_name,
+            "expected": _display_run_value(property_name, expected_value),
+            "actual": _display_run_value(property_name, actual_value),
+        }
+        result["text_run_style_mismatches"].append(mismatch)
+        result["text_run_style_mismatches_by_property"][property_name] += 1
+        result["warnings"].append(
+            f"{element_id}[{start}:{offset}] {property_name}: "
+            f"expected {mismatch['expected']!r}, got {mismatch['actual']!r}"
+        )
 
 
 def _validate_text_run_contracts(
@@ -2140,8 +2511,7 @@ def _validate_text_run_contracts(
         candidates = [
             text_object
             for text_object in result.get("text_objects", [])
-            if text_object.get("text") == item.get("text")
-            and _text_box_matches(text_object, item.get("text_box"), width, height)
+            if _text_box_matches(text_object, item.get("text_box"), width, height)
             and (
                 text_object.get("object_name") == f"ia:{element_id}"
                 or str(text_object.get("object_name", "")).startswith(f"ia:{element_id}:")
@@ -2161,33 +2531,50 @@ def _validate_text_run_contracts(
             continue
         actual_object = available[0]
         used_objects.add((actual_object.get("slide_part"), actual_object.get("object_id")))
+        result["text_run_contracts_checked"] += 1
         text = item.get("text")
         if not isinstance(text, str):
             continue
-        expected_bold = _bold_vector(len(text), item.get("runs"))
-        actual_bold = _bold_vector(len(text), actual_object.get("runs"))
-        if expected_bold is None or actual_bold is None or expected_bold != actual_bold:
-            result["errors"].append("TEXT_RUN_FONT_WEIGHT_MISMATCH")
-            result["warnings"].append(f"{element_id}: Text Run bold ranges do not match the reconstruction spec")
+        if actual_object.get("text") != text:
+            result["errors"].append("TEXT_RUN_TEXT_MISMATCH")
+            result["warnings"].append(
+                f"{element_id}: TextBox text differs from the typography contract"
+            )
+            continue
         expected_runs = item.get("runs")
-        if isinstance(expected_runs, list) and any(
-            isinstance(run, dict) and "font_size" in run
-            for run in expected_runs
+        actual_runs = actual_object.get("runs")
+        if not _run_ranges_valid(len(text), expected_runs) or not _run_ranges_valid(
+            len(text), actual_runs
         ):
-            expected_sizes = _font_size_vector(len(text), expected_runs)
-            actual_sizes = _font_size_vector(len(text), actual_object.get("runs"))
-            if (
-                expected_sizes is None
-                or actual_sizes is None
-                or any(
-                    not _same_value(expected, actual)
-                    for expected, actual in zip(expected_sizes, actual_sizes)
-                )
-            ):
-                result["errors"].append("TEXT_RUN_FONT_SIZE_MISMATCH")
-                result["warnings"].append(
-                    f"{element_id}: Text Run point sizes do not match the reconstruction spec"
-                )
+            result["errors"].append("TEXT_RUN_STRUCTURE_INVALID")
+            result["warnings"].append(
+                f"{element_id}: Text Run ranges overlap, have gaps, or do not cover the text"
+            )
+            continue
+        compared_properties = [
+            property_name
+            for property_name in TEXT_RUN_STYLE_PROPERTIES
+            if all(
+                isinstance(run, dict) and property_name in run
+                for run in expected_runs
+            )
+        ]
+        for property_name in compared_properties:
+            expected_vector = _style_vector(len(text), expected_runs, property_name)
+            actual_vector = _style_vector(len(text), actual_runs, property_name)
+            if expected_vector is None or actual_vector is None:
+                result["errors"].append("TEXT_RUN_STRUCTURE_INVALID")
+                continue
+            _append_style_mismatches(
+                result,
+                element_id,
+                property_name,
+                expected_vector,
+                actual_vector,
+            )
+    result["text_run_style_mismatch_count"] = len(
+        result["text_run_style_mismatches"]
+    )
 
 
 def _validate_native_list_contracts(
@@ -2276,6 +2663,31 @@ def _validate_native_list_contracts(
             ):
                 result["errors"].append("NATIVE_LIST_STYLE_MISMATCH")
                 result["warnings"].append(f"{element_id} paragraph {index}: bullet style mismatch")
+            if expected_list.get("bullet_type") == "picture":
+                if (
+                    actual_list.get("bullet_relationship_valid") is not True
+                    or not isinstance(actual_list.get("bullet_media_sha256"), str)
+                ):
+                    result["errors"].append(
+                        "NATIVE_LIST_PICTURE_RELATIONSHIP_INVALID"
+                    )
+                    result["warnings"].append(
+                        f"{element_id} paragraph {index}: picture bullet relationship is not an internal image"
+                    )
+                else:
+                    asset = expected_list.get("bullet_asset")
+                    expected_hash = (
+                        asset.get("asset_sha256") if isinstance(asset, dict) else None
+                    )
+                    if not _same_value(
+                        expected_hash, actual_list.get("bullet_media_sha256")
+                    ):
+                        result["errors"].append(
+                            "NATIVE_LIST_PICTURE_MEDIA_HASH_MISMATCH"
+                        )
+                        result["warnings"].append(
+                            f"{element_id} paragraph {index}: picture bullet media hash differs from the spec"
+                        )
 
 
 def _slide_inheritance(
@@ -2815,6 +3227,23 @@ def validate_pptx(
                 shapes = [item for item in object_records if item["object_type"] == "sp"]
                 pictures = [item for item in object_records if item["object_type"] == "pic"]
                 graphic_frames = [item for item in object_records if item["object_type"] == "graphicFrame"]
+                for frame_record in graphic_frames:
+                    frame = frame_record["_element"]
+                    if frame.find("a:graphic/a:graphicData/c:chart", NS) is None:
+                        continue
+                    try:
+                        result["native_chart_objects"].append(
+                            _native_chart_contract(
+                                archive,
+                                names,
+                                slide_part,
+                                frame,
+                                slide_relationships,
+                            )
+                        )
+                    except ValidationError as exc:
+                        result["errors"].append(exc.code)
+                        result["warnings"].append(exc.detail)
                 text_shapes = sum(
                     1 for item in shapes if item["has_text"] and item["visible"] is True
                 )
@@ -2882,11 +3311,22 @@ def validate_pptx(
                             shape, slide_part, shape_record["layer"],
                             inheritance, theme_fonts,
                             (shape_record["x"], shape_record["y"], shape_record["cx"], shape_record["cy"]),
+                            archive, names, slide_relationships,
                         )
                         text_object["visible"] = shape_record["visible"]
                         text_object["geometry_known"] = shape_record["geometry_known"]
                         slide_text_objects.append(text_object)
                         result["text_objects"].append(text_object)
+                        for paragraph in text_object.get("paragraphs", []):
+                            list_contract = paragraph.get("list")
+                            if (
+                                isinstance(list_contract, dict)
+                                and list_contract.get("bullet_type") == "picture"
+                                and list_contract.get("bullet_relationship_valid") is not True
+                            ):
+                                result["errors"].append(
+                                    "NATIVE_LIST_PICTURE_RELATIONSHIP_INVALID"
+                                )
                 slide_list_paragraphs = sum(
                     1
                     for text_object in slide_text_objects
@@ -3000,6 +3440,7 @@ def validate_pptx(
             result["full_slide_picture_risk"] = any_full_slide_picture
             if spec is not None:
                 _validate_native_list_contracts(result, spec, width, height)
+                _validate_native_chart_contracts(result, spec)
                 _validate_text_run_contracts(result, spec, width, height)
                 _validate_element_bindings(result, spec, width, height)
             if report is not None:
