@@ -35,7 +35,7 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前对象。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
 
-图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
+图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。彩色背景上的白色/近白色反白镂空线框图标，尤其是闭合孔洞图标，显式使用 `foreground_profile=reverse-white-outline`；其他图标保持默认 `standard`，不得自动猜测或批量切换。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
 
 简单 2D 单系列 `pie|doughnut` 在分类、数值、纯色和标签合同明确时使用原生 Chart；圆环中心 KPI 仍是独立 TextBox。复杂或证据不足的图表只保留当页最小局部 picture，不在 Renderer 内回退。
 

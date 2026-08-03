@@ -127,37 +127,6 @@
 
 该 Skill 不依赖外部 OCR 服务、云端 OCR API、API Token、Node.js、npm 或数据库。
 
-## 源码仓库结构与维护边界
-
-仓库采用“单仓库、独立 Skill 根目录”的物理分层：
-
-```text
-skill/image-to-editable-ppt/  唯一可安装的 Skill 根目录
-maintainer/                      Release Bundle、安装与回滚工具
-tests/                           仓库级自动化测试
-docs/                            设计、计划和验收记录
-```
-
-开发、测试、发布、安装和回滚文件不会进入已安装 Skill。`rapid`、`reviewed` 两种模式、compiler、schema、渲染、视觉验证及独立审查协议均保留在独立 Skill 根目录中。
-
-从源码直接运行 Skill 命令时，先进入唯一 Skill 根目录：
-
-```bash
-cd skill/image-to-editable-ppt
-python3 scripts/validate_reconstruction_spec.py --help
-```
-
-从仓库根创建 Release Bundle：
-
-```bash
-python3 maintainer/release/create_release_bundle.py \
-  --source . \
-  --destination /private/tmp/image-to-editable-ppt-release \
-  --canary-report docs/superpowers/evals/2026-07-31-schema-v2-compiler-rapid-release.md
-```
-
-发布包中的 `manifest.json` 属于发布证据；只有 `payload/image-to-editable-ppt/` 可以安装。安装 receipt 和 rollback 目录同样保存在 Skill 外。
-
 ## 使用限制与注意事项
 
 - 输出固定为 16:9 PPTX；

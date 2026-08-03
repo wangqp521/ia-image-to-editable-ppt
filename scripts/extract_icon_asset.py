@@ -14,6 +14,7 @@ from PIL import Image, UnidentifiedImageError
 
 
 MAX_TOLERANCE = 64
+FOREGROUND_PROFILES = frozenset({"standard", "reverse-white-outline"})
 
 
 def _file_sha256(path: Path) -> str:
@@ -62,6 +63,31 @@ def _corner_palette(crop: Image.Image) -> tuple[tuple[int, int, int], ...]:
         for y in range(origin_y, origin_y + patch):
             for x in range(origin_x, origin_x + patch):
                 colors.add(crop.getpixel((x, y))[:3])
+    return tuple(sorted(colors))
+
+
+def _is_near_white(rgb: tuple[int, int, int]) -> bool:
+    return min(rgb) >= 208 and max(rgb) - min(rgb) <= 48
+
+
+def _colored_border_palette(crop: Image.Image) -> tuple[tuple[int, int, int], ...]:
+    width, height = crop.size
+    colors: set[tuple[int, int, int]] = set()
+    border = (
+        ((x, 0) for x in range(width)),
+        ((x, height - 1) for x in range(width)),
+        ((0, y) for y in range(height)),
+        ((width - 1, y) for y in range(height)),
+    )
+    for positions in border:
+        for x, y in positions:
+            pixel = crop.getpixel((x, y))
+            if pixel[3] > 0 and not _is_near_white(pixel[:3]):
+                colors.add(pixel[:3])
+    if not colors:
+        raise ValueError(
+            "reverse-white-outline requires a colored background margin"
+        )
     return tuple(sorted(colors))
 
 
@@ -116,6 +142,20 @@ def _edge_connected_background(crop: Image.Image, tolerance: int) -> bytearray:
     return background
 
 
+def _reverse_white_outline_background(crop: Image.Image, tolerance: int) -> bytearray:
+    palette = _colored_border_palette(crop)
+    background = bytearray(crop.width * crop.height)
+    for y in range(crop.height):
+        for x in range(crop.width):
+            pixel = crop.getpixel((x, y))
+            if pixel[3] == 0 or (
+                not _is_near_white(pixel[:3])
+                and _near_palette(pixel[:3], palette, tolerance)
+            ):
+                background[y * crop.width + x] = 1
+    return background
+
+
 def _touching_edges(
     foreground_bbox: tuple[int, int, int, int],
     size: tuple[int, int],
@@ -132,8 +172,12 @@ def _touching_edges(
 def _alpha_isolated_asset(
     crop: Image.Image,
     tolerance: int,
+    foreground_profile: str,
 ) -> tuple[Image.Image, dict[str, Any]]:
-    background = _edge_connected_background(crop, tolerance)
+    if foreground_profile == "standard":
+        background = _edge_connected_background(crop, tolerance)
+    else:
+        background = _reverse_white_outline_background(crop, tolerance)
     alpha = bytearray(crop.getchannel("A").tobytes())
     for offset, is_background in enumerate(background):
         if is_background:
@@ -174,6 +218,7 @@ def extract_icon_asset(
     *,
     icon_id: str,
     tolerance: int = 24,
+    foreground_profile: str = "standard",
 ) -> dict[str, Any]:
     """Extract one icon without changing any source-crop RGB value."""
     raw_source = Path(source_path).expanduser()
@@ -188,6 +233,9 @@ def extract_icon_asset(
         raise ValueError("icon_id must be a non-empty string")
     if type(tolerance) is not int or tolerance < 0 or tolerance > MAX_TOLERANCE:
         raise ValueError(f"tolerance must be an integer from 0 to {MAX_TOLERANCE}")
+    if foreground_profile not in FOREGROUND_PROFILES:
+        choices = ", ".join(sorted(FOREGROUND_PROFILES))
+        raise ValueError(f"foreground_profile must be one of: {choices}")
 
     with Image.open(source) as opened:
         opened.load()
@@ -195,7 +243,11 @@ def extract_icon_asset(
         x, y, width, height = bbox
         crop = opened.convert("RGBA").crop((x, y, x + width, y + height))
 
-    asset, mode_metadata = _alpha_isolated_asset(crop, tolerance)
+    asset, mode_metadata = _alpha_isolated_asset(
+        crop,
+        tolerance,
+        foreground_profile,
+    )
 
     if asset.convert("RGB").tobytes() != crop.convert("RGB").tobytes():
         raise RuntimeError("internal error: icon RGB values changed")
@@ -205,6 +257,7 @@ def extract_icon_asset(
         "ok": True,
         "icon_id": icon_id,
         "crop_mode": "alpha_isolation",
+        "foreground_profile": foreground_profile,
         "source": str(source),
         "source_sha256": _file_sha256(source),
         "bbox_format": "xywh",
@@ -241,6 +294,12 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Source crop including a background margin",
     )
     parser.add_argument("--tolerance", type=int, default=24)
+    parser.add_argument(
+        "--foreground-profile",
+        choices=sorted(FOREGROUND_PROFILES),
+        default="standard",
+        help="Foreground interpretation inside alpha_isolation",
+    )
     parser.add_argument("--output", required=True, type=Path)
     return parser.parse_args(argv)
 
@@ -254,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
             args.bbox_xywh,
             icon_id=args.icon_id,
             tolerance=args.tolerance,
+            foreground_profile=args.foreground_profile,
         )
     except (OSError, ValueError, RuntimeError, UnidentifiedImageError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
