@@ -35,7 +35,7 @@ BUILDABLE_KINDS = frozenset(
     {"text", "shape", "line", "table", "matrix", "status", "picture", "icon", "chart"}
 )
 CONFIDENCE_VALUES = frozenset({"high", "medium", "low"})
-VERIFICATION_PROFILES = frozenset({"rapid", "reviewed", "strict"})
+VERIFICATION_PROFILES = frozenset({"rapid", "reviewed"})
 DELIVERY_STATUSES = frozenset(
     {
         "pending",
@@ -43,8 +43,6 @@ DELIVERY_STATUSES = frozenset(
         "rapid_validation_failed",
         "reviewed_passed",
         "reviewed_failed",
-        "strict_gate_passed",
-        "strict_gate_failed",
     }
 )
 SESSION_MODES = frozenset({"fresh_reconstruction", "same_session_reuse"})

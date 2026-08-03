@@ -117,8 +117,6 @@ def _tool_identity(
 
 
 def _required_coverage(spec: dict[str, Any], profile: str) -> frozenset[str]:
-    if profile == "strict":
-        return frozenset(VISUAL_REVIEW_COVERAGE_FIELDS)
     required = {"canvas_and_regions", "objects_and_geometry"}
     elements = spec.get("elements")
     kinds = {
@@ -150,7 +148,7 @@ def collect_current_artifacts(
     try:
         _expect(isinstance(spec, dict), "spec", "spec must be a JSON object")
         profile = spec.get("verification_profile")
-        _expect(profile in {"rapid", "reviewed", "strict"}, "verification_profile", "rapid, reviewed, or strict profile is required")
+        _expect(profile in {"rapid", "reviewed"}, "verification_profile", "rapid or reviewed profile is required")
         page_id = spec.get("page_id")
         _expect(isinstance(page_id, str) and bool(page_id), "page_id", "page ID is required")
         content_hash = content_spec_sha256(spec)
@@ -301,8 +299,6 @@ def collect_current_artifacts(
         _expect(isinstance(regions, list), "visual_diff.regions", "region evidence must be an array")
         _expect(summary.get("skipped") == 0 and summary.get("requested") == summary.get("generated") == len(regions) and visual.get("skipped_regions") == [], "visual_diff.region_summary", "all requested regions must be generated")
         spec_regions = {item.get("region_id"): item for item in spec.get("regions", []) if isinstance(item, dict) and isinstance(item.get("region_id"), str)}
-        if profile == "strict":
-            _expect(len(regions) == len(spec_regions), "visual_diff.regions", "strict review requires every region")
         normalized_regions = []
         seen = set()
         for index, region in enumerate(regions):

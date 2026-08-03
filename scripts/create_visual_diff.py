@@ -321,7 +321,7 @@ def build_visual_diff(
     regions: list[dict[str, Any]] | None = None,
     minimum_similarity: float | None = None,
     changed_threshold: int = 8,
-    profile: str = "strict",
+    profile: str = "rapid",
 ) -> dict[str, Any]:
     """Create visual evidence and return the JSON-serializable report."""
     reference_path = Path(reference_path).expanduser().resolve()
@@ -337,8 +337,8 @@ def build_visual_diff(
         raise ValueError("changed_threshold must be between 0 and 254")
     if minimum_similarity is not None and not 0 <= minimum_similarity <= 1:
         raise ValueError("minimum_similarity must be between 0 and 1")
-    if profile not in {"rapid", "reviewed", "strict"}:
-        raise ValueError("profile must be rapid, reviewed, or strict")
+    if profile not in {"rapid", "reviewed"}:
+        raise ValueError("profile must be rapid or reviewed")
 
     with Image.open(reference_path) as source_image:
         reference = source_image.convert("RGB")
@@ -424,7 +424,7 @@ def build_visual_diff_from_render_report(
     regions: list[dict[str, Any]] | None = None,
     minimum_similarity: float | None = None,
     changed_threshold: int = 8,
-    profile: str = "strict",
+    profile: str = "rapid",
 ) -> dict[str, Any]:
     """Create visual evidence using only the preview bound by a render report."""
     render_report, resolved_report_path = load_render_report(render_report_path)
@@ -480,7 +480,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--spec", type=Path, help="Optional page-reconstruction.json for region crops")
     parser.add_argument("--minimum-similarity", type=float)
     parser.add_argument("--changed-threshold", type=int, default=8)
-    parser.add_argument("--profile", choices=("rapid", "reviewed", "strict"))
+    parser.add_argument("--profile", choices=("rapid", "reviewed"))
     return parser.parse_args(argv)
 
 
@@ -502,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
         regions=regions,
         minimum_similarity=args.minimum_similarity,
         changed_threshold=args.changed_threshold,
-        profile=args.profile or spec_profile or "strict",
+        profile=args.profile or spec_profile or "rapid",
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if report["tripwire"]["triggered"] or report["region_presence"]["status"] == "failed":

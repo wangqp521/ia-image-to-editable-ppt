@@ -1494,9 +1494,7 @@
             "rapid_validated",
             "rapid_validation_failed",
             "reviewed_failed",
-            "reviewed_passed",
-            "strict_gate_failed",
-            "strict_gate_passed"
+            "reviewed_passed"
           ]
         },
         "editability_gate": {
@@ -1540,8 +1538,7 @@
         "verification_profile": {
           "enum": [
             "rapid",
-            "reviewed",
-            "strict"
+            "reviewed"
           ]
         },
         "visual_gate": {
@@ -2684,5 +2681,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "2c8941b8b5d2fdaccb94c71b6bbd128398ce8572e527b3a7e754143e4a9b2278"
+  "x-schema-contract-sha256": "0f23c03f860c4548fc3e415de6d662950bc8ecba9f2da55bea6a74f0bc112cc6"
 }

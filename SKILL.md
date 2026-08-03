@@ -13,15 +13,13 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 
 ## 选择验证模式
 
-`verification_profile` 必须显式写入每页规格，并在一个批次内固定。用户未指定时写 `rapid`；明确要求独立复核时写 `reviewed`；明确要求严格审核时写 `strict`。不得依赖脚本隐式默认值。
+`verification_profile` 必须显式写入每页规格，并在一个批次内固定。用户未指定时写 `rapid`；明确要求独立复核时写 `reviewed`。不得依赖脚本隐式默认值。
 
-- rapid：主代理是唯一正式语义审核者；每页一次判断，最多一次批量修复。
-- reviewed|strict：独立 reviewer 是唯一正式语义审核者；主代理只准备确定性证据、转交 prompt、接收原始 JSON 和执行获准的批量修复。
-- `reviewed` 的 round 1 通过即停止；只有 round 1 要求修复且新证据链通过，才进入 round 2。
-- `strict` 必须生成全部 regions 的 200% 证据；最多两轮。
-- round 2 是终局，不再修复，也没有第三轮。
+- `rapid`：主代理完成正式语义检查，最多一次集中修复。
+- `reviewed` 先完整执行 `rapid` 基础流程，包括主代理检查和最多一次 rapid 集中修复，但暂不写入 rapid 终态；然后才把当前 PPTX 和当前证据交给独立 reviewer。
+- reviewer round 1 发现可修复 P0/P1 时，允许一次 reviewer 驱动的集中修复并进入 round 2；reviewer round 2 是终局，不再修复，也没有第三轮。
 
-成功状态分别为 `rapid_validated`、`reviewed_passed`、`strict_gate_passed`；否则诚实写入同模式失败状态并披露 P0/P1、P2 和未验证项。
+成功状态分别为 `rapid_validated`、`reviewed_passed`；否则诚实写入 `rapid_validation_failed` 或 `reviewed_failed`，并披露 P0/P1、P2 和未验证项。`reviewed_failed` 不得阻止交付已生成的当前 PPTX。
 
 ## 批次初始化
 
@@ -43,7 +41,7 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 ## 单页核心链
 
-从 Skill 根目录执行并复用批次级 passing runtime report。下列命令描述无修复时的一次完整页面执行；`PPTX_SHA256` 是构建后实际 PPTX SHA-256 对应的目录名，不是字面路径。`create_reviewer_prompt.py` 仅供 `reviewed|strict` 执行，`rapid` 跳过该命令。
+从 Skill 根目录执行并复用批次级 passing runtime report。下列命令描述无修复时的一次完整页面执行；`PPTX_SHA256` 是构建后实际 PPTX SHA-256 对应的目录名，不是字面路径。`create_reviewer_prompt.py` 仅供 `reviewed` 执行，`rapid` 跳过该命令。
 
 ```bash
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --snapshot work/build-spec-snapshot.json --output work/prebuild-validation.json
@@ -67,7 +65,7 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 `rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、text geometry、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
 
-`reviewed|strict` 仅在 background、text geometry、structure 与 visual evidence 完整后生成当前轮 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效均按 not_reviewable，并消耗本轮。round 1 要求修复时，一次映射全部 P0/P1、批量修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight，round 2 结束即终止。
+`reviewed` 在完整执行 rapid 基础流程，且 background、text geometry、structure 与 visual evidence 完整后，才生成 round 1 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效、`not_reviewable` 或不可修复的 P0/P1 均写入 `reviewed_failed`。round 1 发现可修复 P0/P1 时，一次映射全部问题、集中修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight。round 2 只有 `passed` 才写入 `reviewed_passed`，其他结果均写入 `reviewed_failed` 并终止，不得再修改 PPTX。
 
 final 只读：只重新计算并核对当前规格、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
 
@@ -91,4 +89,4 @@ final 只读：只重新计算并核对当前规格、PPTX、runtime、render、
 python3 scripts/merge_pptx.py --input page-001/work/page.pptx --spec page-001/work/page-reconstruction.json --final-report page-001/work/final-validation.json --input page-002/work/page.pptx --spec page-002/work/page-reconstruction.json --final-report page-002/work/final-validation.json --output final/deck.pptx
 ```
 
-交付可编辑 PPTX、当前 preview/diff、结构/final 报告及模式要求的 region/raw reviewer response。缺证据、错哈希、tripwire 触发或开放 P0/P1 时不得称完成。
+交付可编辑 PPTX、当前 preview/diff、结构/final 报告及模式要求的 region/raw reviewer response。round 2 未通过时仍必须交付当前 PPTX、预览、raw response 和问题报告，但不得称 reviewed 通过，也不得进入成功合并成品。缺证据、错哈希、tripwire 触发或开放 P0/P1 时不得称完成。

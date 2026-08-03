@@ -36,7 +36,7 @@ RAW_REVIEWER_RESPONSE_FIELDS = (
     "p2_disclosures",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_REVIEW_PROFILES = frozenset({"reviewed", "strict"})
+_REVIEW_PROFILES = frozenset({"reviewed"})
 _REGION_FIELDS = frozenset({"region_id", "path", "sha256", "bbox", "scale"})
 
 
@@ -185,7 +185,7 @@ def build_review_context(
     if type(review_round) is not int or review_round not in {1, 2}:
         raise ValueError("review_round must be integer 1 or 2")
     if verification_profile not in _REVIEW_PROFILES:
-        raise ValueError("verification_profile must be reviewed or strict")
+        raise ValueError("verification_profile must be reviewed")
     if not _valid_sha256(content_spec_sha256):
         raise ValueError("content_spec_sha256 must be lowercase 64-character hex")
     if not isinstance(artifacts, dict) or set(artifacts) != set(

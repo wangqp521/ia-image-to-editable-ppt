@@ -2,15 +2,14 @@
 
 ## 固定模式与审核职责
 
-`verification_profile` 必须显式写入每页规格并在批次内固定：用户未指定时写 `rapid`，明确要求独立复核时写 `reviewed`，明确要求严格审核时写 `strict`。不得依赖脚本默认值、在运行中自动升降级；多页合并拒绝缺失或混合模式。
+`verification_profile` 必须显式写入每页规格并在批次内固定：用户未指定时写 `rapid`，明确要求独立复核时写 `reviewed`。不得依赖脚本默认值、在运行中自动升降级；多页合并拒绝缺失或混合模式。
 
-- rapid：主代理是唯一正式语义审核者。每页一次正式判断、最多一次批量修复；修复后只做确定性闭环，不启动第二次语义判断。
-- reviewed|strict：独立 reviewer 是唯一正式语义审核者。主代理不得用自己的观感覆盖 reviewer 决定，只负责准备证据、转交确定性 prompt、保存原始响应和执行一次批量修复。
-- `reviewed` round 1 通过即停止；只有 `changes_required` 且全部 P0/P1 可修复时进入新哈希的 round 2。
-- `strict` 对全部声明 regions 生成 200% evidence，round 1 通过即停止，最多两轮。
-- round 2 是终局；不得再次修复、降级或开启第三轮。
+- `rapid`：主代理完成一次正式语义判断，最多一次集中修复；修复后只做确定性闭环，不启动第二次语义判断。
+- `reviewed`：先完整执行 rapid 基础流程，包括主代理检查和最多一次 rapid 集中修复，但暂不写 rapid 终态；再把当前 PPTX 和当前证据交给独立 reviewer。
+- reviewer round 1 直接通过即停止；发现可修复 P0/P1 时允许一次 reviewer 驱动的集中修复，重建新哈希证据后进入 round 2。
+- round 2 是终局；只有 `passed` 才通过，其他结果均写入 `reviewed_failed`，不得再次修复或开启第三轮。
 
-三个模式共享同一复刻、prebuild、compiler、render、文字几何、结构、背景、tripwire 和 final 身份合同。profile 只改变语义审核成本，不降低输入质量或可编辑性。
+两个模式共享同一复刻、prebuild、compiler、render、文字几何、结构、背景、tripwire 和 final 身份合同。reviewed 只在 rapid 基础流程后增加独立复核，不增加新的证据强度子模式。
 
 ## 当前哈希的确定性证据
 
@@ -23,7 +22,7 @@
 3. `runtime-preflight.json`、`render-report.json`、PDF、font report、preview；
 4. `rendered-text-geometry.json`、`structure-validation.json`、`background-contract.json`；
 5. `visual-diff.json`、overlay、diff 与当前 profile 所需 region evidence；
-6. `reviewed|strict` 的当前 raw reviewer response；
+6. `reviewed` 的当前 raw reviewer response；
 7. `final-validation.json`。
 
 任一 spec、PPTX、runtime 或 producer 身份变化，所有下游证据失效。SHA-256 只证明身份，不是视觉分数。tripwire 只单向阻断：有基线且触发则失败；无基线固定为 `available=false, triggered=null, reason=no_approved_baseline`，不能据此自动通过。
@@ -38,7 +37,7 @@ P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要�
 
 第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希从 prebuild/snapshot 起重跑 build/report、render、text geometry、structure、background 与 visual diff；runtime 身份未变时复用批次 preflight，发生变化时先重建 preflight。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
 
-`rapid` 修复后只根据新确定性闭包关闭可客观验证的问题；构图平衡、复杂装饰、主观色彩观感、非规则几何等无法被确定性证据关闭的 P0/P1 必须使 `rapid_validation_failed`。`reviewed|strict` 修复后只有全部映射项 `result=passed` 且证据绑定新哈希，才可生成 round 2 prompt。
+`rapid` 修复后只根据新确定性闭包关闭可客观验证的问题；构图平衡、复杂装饰、主观色彩观感、非规则几何等无法被确定性证据关闭的 P0/P1 必须使 `rapid_validation_failed`。reviewed 的 rapid 基础阶段最多修复一次，reviewer round 1 之后另有且只有一次 reviewer 驱动的集中修复；未使用的 rapid 修复额度不转移。只有全部映射项 `result=passed` 且证据绑定新哈希，才可生成 round 2 prompt。
 
 ## reviewer context、prompt 与 raw response
 
@@ -50,12 +49,12 @@ raw response 是唯一持久化的 reviewer 产物。主代理按收到的 UTF-8
 
 ## final 与不可变终态
 
-final 只读。它只重算文件哈希、解析当前 JSON、验证跨报告绑定、重建 review context 并验证 raw response；不得导入或运行 compiler、renderer、结构/背景/文字/视觉 producer，不得创建、修补或覆盖证据。`rapid` 禁止携带 reviewer context/response；`reviewed|strict` 必须绑定当前 raw response。
+final 只读。它只重算文件哈希、解析当前 JSON、验证跨报告绑定、重建 review context 并验证 raw response；不得导入或运行 compiler、renderer、结构/背景/文字/视觉 producer，不得创建、修补或覆盖证据。`rapid` 禁止携带 reviewer context/response；`reviewed` 必须绑定当前 raw response。
 
-final 通过后禁止写入 PPTX。任何 PPTX 或终态字段改动都必须使旧 final 失效，并从新哈希重新建立完整闭包。失败时仍可交付当前可编辑草稿，但必须明确标注未通过原因：P0 为“当前 PPTX 可能不可用”，P1 为“未通过视觉门禁的可编辑草稿”，`not_reviewable` 为“证据不可审查”。
+final 通过后禁止写入 PPTX。任何 PPTX 或终态字段改动都必须使旧 final 失效，并从新哈希重新建立完整闭包。`reviewed_failed` 只表示审核门禁未通过，不得阻止交付当前 PPTX。失败时必须明确标注未通过原因：P0 为“当前 PPTX 可能不可用”，P1 为“未通过视觉门禁的可编辑草稿”，`not_reviewable` 为“证据不可审查”。
 
 ## 多页合并与交付
 
 逐页串行并标注 `[第 n/总页数]`。单页 prebuild/build 失败时不占位、不合并；已有 PPTX 但 final 失败的页面只能作为明确标注的草稿单独交付。合并输入必须逐页配对当前 PPTX、spec 与 `valid=true, errors=[]` 的 final report，核对 profile、delivery status、content spec、runtime、capability、structure 和 PPTX SHA-256 后按原序导入。merger 不重跑单页 producer 或 validator；合并完成后仅对临时 merged deck 运行一次结构验证，通过才原子替换输出。
 
-最终提供可编辑 PPTX、当前 preview/diff、structure/final、模式要求的 regions 和 raw response，并披露 P2、字体 fallback、缺页与未验证项。缺证据、旧哈希、tripwire 触发、开放 P0/P1 或结构/final 失败时不得称完成。
+最终提供可编辑 PPTX、当前 preview/diff、structure/final、模式要求的 regions 和 raw response，并披露 P2、字体 fallback、缺页与未验证项。round 2 未通过时不再修复，但必须交付当前 PPTX、预览、raw response、final 报告和未解决问题；该页必须单独交付，不得进入成功合并成品。缺证据、旧哈希、tripwire 触发、开放 P0/P1 或结构/final 失败时不得称完成。

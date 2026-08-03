@@ -70,11 +70,10 @@ ALLOWED_KINDS = {
 }
 ALLOWED_CONFIDENCE = {"high", "medium", "low"}
 ALLOWED_MODULES = {"page_layout", "typography", "icons", "special_text", "picture_framing", "graphics", "diagram", "chart", "high_risk", "representation_plan", "background"}
-VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
+VERIFICATION_PROFILES = {"rapid", "reviewed"}
 PROFILE_DELIVERY_STATUSES = {
     "rapid": {"pending", "rapid_validated", "rapid_validation_failed"},
     "reviewed": {"pending", "reviewed_passed", "reviewed_failed"},
-    "strict": {"pending", "strict_gate_passed", "strict_gate_failed"},
 }
 SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 RGB_PATTERN = re.compile(r"^#[0-9a-fA-F]{6}$")
@@ -136,7 +135,7 @@ def _validate_verification_identity(
             errors,
             "SPEC_VERIFICATION_PROFILE_INVALID",
             "verification_profile",
-            "verification_profile must be rapid, reviewed, or strict",
+            "verification_profile must be rapid or reviewed",
         )
         return
     delivery_status = spec.get("delivery_status")
@@ -1169,7 +1168,6 @@ def _identity_only_final(
     expected_delivery = {
         "rapid": "rapid_validated",
         "reviewed": "reviewed_passed",
-        "strict": "strict_gate_passed",
     }.get(verification_profile)
     if spec.get("delivery_status") != expected_delivery:
         _error(

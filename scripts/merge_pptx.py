@@ -25,16 +25,14 @@ NS = {
     "pr": "http://schemas.openxmlformats.org/package/2006/relationships",
     "ct": "http://schemas.openxmlformats.org/package/2006/content-types",
 }
-VERIFICATION_PROFILES = {"rapid", "reviewed", "strict"}
+VERIFICATION_PROFILES = {"rapid", "reviewed"}
 PROFILE_DELIVERY_STATUSES = {
     "rapid": {"rapid_validated", "rapid_validation_failed"},
     "reviewed": {"reviewed_passed", "reviewed_failed"},
-    "strict": {"strict_gate_passed", "strict_gate_failed"},
 }
 PROFILE_SUCCESS_STATUSES = {
     "rapid": "rapid_validated",
     "reviewed": "reviewed_passed",
-    "strict": "strict_gate_passed",
 }
 RID = f"{{{NS['r']}}}id"
 SLIDE_REL_TYPE = (
@@ -178,7 +176,7 @@ def _validate_page_binding(
     if verification_profile not in VERIFICATION_PROFILES:
         raise MergeError(
             "VERIFICATION_PROFILE_INVALID",
-            f"Every page spec requires rapid, reviewed, or strict verification: {page_id}",
+            f"Every page spec requires rapid or reviewed verification: {page_id}",
         )
     delivery_status = spec.get("delivery_status")
     if delivery_status not in PROFILE_DELIVERY_STATUSES[verification_profile]:
@@ -611,7 +609,7 @@ def merge_presentations(
     if any(profile not in VERIFICATION_PROFILES for profile in verification_profiles):
         raise MergeError(
             "VERIFICATION_PROFILE_INVALID",
-            "Every page spec must use rapid, reviewed, or strict verification",
+            "Every page spec must use rapid or reviewed verification",
             profiles=verification_profiles,
         )
     if len(set(verification_profiles)) != 1:
@@ -718,7 +716,6 @@ def merge_presentations(
     delivery_labels = {
         "rapid": ("快速校验版", "快速校验未通过版"),
         "reviewed": ("独立复核通过版", "独立复核未通过版"),
-        "strict": ("完整视觉门禁通过版", "完整视觉门禁未通过版"),
     }
     return {
         "output": str(output),

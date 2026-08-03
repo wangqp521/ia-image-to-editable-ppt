@@ -14,7 +14,6 @@ SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
-from lib.atomic_write import atomic_write_bytes
 from lib.final_identity import prepare_review_context
 from lib.reviewer_contracts import render_reviewer_prompt, review_context_sha256
 
@@ -52,7 +51,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("spec", type=Path)
     parser.add_argument("--review-round", type=int, required=True, choices=(1, 2))
-    parser.add_argument("--prompt-output", type=Path)
     return parser.parse_args(argv)
 
 
@@ -61,17 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     spec, errors = _load_spec(args.spec)
     if spec is None:
         payload = {"valid": False, "review_context_sha256": None, "prompt": None, "errors": errors}
-    elif args.prompt_output is not None and spec.get("verification_profile") != "strict":
-        payload = {
-            "valid": False,
-            "review_context_sha256": None,
-            "prompt": None,
-            "errors": [_issue("PROMPT_OUTPUT_NOT_ALLOWED", "prompt_output", "only strict may persist an audit prompt")],
-        }
     else:
         payload = create_payload(spec, args.review_round)
-    if payload["valid"] and args.prompt_output is not None:
-        atomic_write_bytes(args.prompt_output, payload["prompt"].encode("utf-8"))
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     return 0 if payload["valid"] else 2
 
