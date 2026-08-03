@@ -20,7 +20,6 @@ schema v2 是唯一 Layout IR，`build_pptx_from_spec.py` 是唯一构建入口�
 - `reviewed` 的 round 1 通过即停止；只有 round 1 要求修复且新证据链通过，才进入 round 2。
 - `strict` 必须生成全部 regions 的 200% 证据；最多两轮。
 - round 2 是终局，不再修复，也没有第三轮。
-- 三个模式共享同一内容修复预算：首个 passing prebuild 登记 candidate 1，此后最多一次 `content_spec_sha256` 迁移；candidate 2 之后禁止再改 build content。
 
 成功状态分别为 `rapid_validated`、`reviewed_passed`、`strict_gate_passed`；否则诚实写入同模式失败状态并披露 P0/P1、P2 和未验证项。
 
@@ -36,7 +35,7 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 ## 直接编写完整规格
 
-每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前内容对象；`work/repair-budget.json` 仅保存不可绕过的内容版本预算。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
+每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前对象。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
 
 图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
 
@@ -60,21 +59,17 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 按实际 profile 替换 visual diff 的 `--profile`。规格必须先写齐，再由一次 `prebuild --snapshot` 同时验证并冻结 exact bytes；compiler 只读 snapshot。任何确定性门禁失败都不得进入语义审核。
 
-首次 passing prebuild 自动在规格同目录创建 `repair-budget.json`。同一内容哈希重跑幂等；第二个内容哈希必须先在 `modules.high_risk.repair_budget` 写入一条完整授权记录，绑定前后 `content_spec_sha256`、触发来源和非空 issue IDs。第三个不同内容哈希固定报 `REPAIR_BUDGET_EXHAUSTED`，不得删除、覆盖或重建预算文件规避门禁。具体合同见视觉审计 reference。
-
 每个 producer 完成后，将当前证据的绝对路径与 SHA-256 回写到同一工作规格的 `runtime_preflight`、`visual_gate`、`editability_gate`；只回写证据与终态字段，不改 build content。`visual_gate.pptx` 与 `editability_gate.pptx` 必须指向同一当前 PPTX。
 
 ## 审核、修复与终态
 
 先核对整页 mapping、regions/层级、文字与 TextBox、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
 
-修复是一个原子内容迁移，不是无限试排：candidate 1 通过即结束；需要修复时，一次性修改规格并登记 candidate 2。candidate 2 只能通过或失败，任何模式都不得产生 candidate 3。同一 PPTX 哈希因允许的 LibreOffice `SIGABRT` 重试不计为新内容版本；源图、page、profile 或用户需求变化必须开启新批次。
-
 `rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、text geometry、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
 
 `reviewed|strict` 仅在 background、text geometry、structure 与 visual evidence 完整后生成当前轮 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效均按 not_reviewable，并消耗本轮。round 1 要求修复时，一次映射全部 P0/P1、批量修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight，round 2 结束即终止。
 
-final 只读：只重新计算并核对当前规格、repair budget、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
+final 只读：只重新计算并核对当前规格、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
 
 ## 条件 reference 路由
 
@@ -96,4 +91,4 @@ final 只读：只重新计算并核对当前规格、repair budget、PPTX、run
 python3 scripts/merge_pptx.py --input page-001/work/page.pptx --spec page-001/work/page-reconstruction.json --final-report page-001/work/final-validation.json --input page-002/work/page.pptx --spec page-002/work/page-reconstruction.json --final-report page-002/work/final-validation.json --output final/deck.pptx
 ```
 
-交付可编辑 PPTX、repair budget、当前 preview/diff、结构/final 报告及模式要求的 region/raw reviewer response。缺预算/证据、错哈希、tripwire 触发或开放 P0/P1 时不得称完成。
+交付可编辑 PPTX、当前 preview/diff、结构/final 报告及模式要求的 region/raw reviewer response。缺证据、错哈希、tripwire 触发或开放 P0/P1 时不得称完成。

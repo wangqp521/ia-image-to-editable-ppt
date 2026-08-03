@@ -9,40 +9,8 @@
 - `reviewed` round 1 通过即停止；只有 `changes_required` 且全部 P0/P1 可修复时进入新哈希的 round 2。
 - `strict` 对全部声明 regions 生成 200% evidence，round 1 通过即停止，最多两轮。
 - round 2 是终局；不得再次修复、降级或开启第三轮。
-- 三个模式最多两个内容版本：candidate 1 加唯一一次批量修复产生的 candidate 2；candidate 2 后内容不可变。
 
 三个模式共享同一复刻、prebuild、compiler、render、文字几何、结构、背景、tripwire 和 final 身份合同。profile 只改变语义审核成本，不降低输入质量或可编辑性。
-
-## 内容修复预算
-
-`validate_reconstruction_spec.py --stage prebuild` 在规格同目录维护 `repair-budget.json`。预算身份绑定 `page_id`、`verification_profile` 与 `content_reference.sha256`，并以 `content_spec_sha256` 记录候选：
-
-- 首个 passing prebuild 原子登记 candidate 1；
-- 同一内容哈希重跑不改预算，不消耗修复；
-- 第二个内容哈希要求一条完整授权并原子登记 candidate 2；
-- 第三个不同哈希报 `REPAIR_BUDGET_EXHAUSTED`；
-- final 只读核对当前哈希必须等于最后登记候选，预算缺失、过期或身份变化均失败。
-
-第二个候选的授权记录写入 `modules.high_risk.repair_budget`。该模块不参与 content identity，记录不得形成自引用哈希：
-
-```json
-{
-  "schema_version": 1,
-  "max_content_versions": 2,
-  "repair_batches": [
-    {
-      "batch_index": 1,
-      "source_content_spec_sha256": "<candidate-1-content-sha256>",
-      "target_content_spec_sha256": "<candidate-2-content-sha256>",
-      "trigger": "deterministic_gate|rapid_review|reviewer_round_1",
-      "issue_ids": ["stable-non-empty-issue-id"],
-      "status": "consumed"
-    }
-  ]
-}
-```
-
-`rapid_review` 只允许 rapid，`reviewer_round_1` 只允许 reviewed|strict，`deterministic_gate` 三个模式均可使用。若确定性修复已经消耗预算，后续审核仍有 P0/P1 时必须失败；不得生成第三个内容版本。只有同一 PPTX 内容哈希的允许渲染重试不计数。源图、page、profile 或用户要求变化时开启新批次，禁止删除、覆盖或重建预算文件来规避限制。
 
 ## 当前哈希的确定性证据
 
@@ -58,8 +26,6 @@
 6. `reviewed|strict` 的当前 raw reviewer response；
 7. `final-validation.json`。
 
-当前页还必须存在与最终 content hash 一致的 `repair-budget.json`；它不替代任何当前哈希闭包证据。
-
 任一 spec、PPTX、runtime 或 producer 身份变化，所有下游证据失效。SHA-256 只证明身份，不是视觉分数。tripwire 只单向阻断：有基线且触发则失败；无基线固定为 `available=false, triggered=null, reason=no_approved_baseline`，不能据此自动通过。
 
 ## 一次完整检查与批量修复
@@ -71,8 +37,6 @@ structure report 中的 `TEXT_RUN_STYLE_MISMATCH` 是非阻断诊断，final/rev
 P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要内容不可编辑和数据编造；P1 包括数量、比例、结构、fill、字号/换行、Text Run、bullet、crop、connector、图表或关键装饰错误；P2 仅限不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差、线宽或 renderer 近似。
 
 第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希从 prebuild/snapshot 起重跑 build/report、render、text geometry、structure、background 与 visual diff；runtime 身份未变时复用批次 preflight，发生变化时先重建 preflight。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
-
-修复后的 candidate 2 是内容终局。确定性闭包或 round 2 仍有 P0/P1 时按当前 profile 写失败状态，不得再次修改规格内容。任何第三个 content hash 都由 prebuild 修复预算门禁直接拒绝。
 
 `rapid` 修复后只根据新确定性闭包关闭可客观验证的问题；构图平衡、复杂装饰、主观色彩观感、非规则几何等无法被确定性证据关闭的 P0/P1 必须使 `rapid_validation_failed`。`reviewed|strict` 修复后只有全部映射项 `result=passed` 且证据绑定新哈希，才可生成 round 2 prompt。
 
@@ -86,7 +50,7 @@ raw response 是唯一持久化的 reviewer 产物。主代理按收到的 UTF-8
 
 ## final 与不可变终态
 
-final 只读。它只重算文件哈希、解析当前 JSON、核对 repair budget、验证跨报告绑定、重建 review context 并验证 raw response；不得导入或运行 compiler、renderer、结构/背景/文字/视觉 producer，不得创建、修补或覆盖预算/证据。`rapid` 禁止携带 reviewer context/response；`reviewed|strict` 必须绑定当前 raw response。
+final 只读。它只重算文件哈希、解析当前 JSON、验证跨报告绑定、重建 review context 并验证 raw response；不得导入或运行 compiler、renderer、结构/背景/文字/视觉 producer，不得创建、修补或覆盖证据。`rapid` 禁止携带 reviewer context/response；`reviewed|strict` 必须绑定当前 raw response。
 
 final 通过后禁止写入 PPTX。任何 PPTX 或终态字段改动都必须使旧 final 失效，并从新哈希重新建立完整闭包。失败时仍可交付当前可编辑草稿，但必须明确标注未通过原因：P0 为“当前 PPTX 可能不可用”，P1 为“未通过视觉门禁的可编辑草稿”，`not_reviewable` 为“证据不可审查”。
 

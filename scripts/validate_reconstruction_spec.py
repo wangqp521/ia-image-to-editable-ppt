@@ -40,7 +40,6 @@ from lib.reviewer_contracts import (
     review_context_sha256,
     reviewer_response_issues,
 )
-from lib.repair_budget import enforce_repair_budget
 from lib.schema_io import (
     NonStandardJsonNumberError,
     non_finite_number_paths,
@@ -54,6 +53,8 @@ from lib.schema_contracts import (
     unknown_field_detail,
 )
 from lib.spec_identity import content_spec_sha256
+
+
 ALLOWED_KINDS = {
     "text",
     "shape",
@@ -1695,22 +1696,6 @@ def validate_spec_file(
         parse_constant=reject_nonstandard_json_number,
     )
     report = validate_spec(spec, stage=stage)
-    if report["valid"]:
-        repair_budget_path = spec_path.parent / "repair-budget.json"
-        try:
-            repair_budget = enforce_repair_budget(
-                spec,
-                repair_budget_path,
-                stage=stage,
-            )
-        except ToolError as exc:
-            report["valid"] = False
-            report["errors"].append(exc.as_dict())
-        else:
-            report["repair_budget"] = {
-                "path": str(repair_budget_path.resolve()),
-                **repair_budget,
-            }
     if snapshot_path is not None and report["valid"]:
         resolved_snapshot = snapshot_path.expanduser().resolve()
         resolved_snapshot.parent.mkdir(parents=True, exist_ok=True)
