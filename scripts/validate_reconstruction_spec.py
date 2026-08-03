@@ -769,6 +769,55 @@ def _validate_paragraphs(
             "SPEC_PARAGRAPH_BREAK_ENCODING_CONFLICT",
             f"{path.rsplit('.', 1)[0]}.text_box.paragraph_breaks[{index}]",
             f"paragraph boundary {paragraph_break} duplicates text newline [{start}, {end})",
+                )
+
+
+def _validate_source_text_layout(
+    value: Any,
+    path: str,
+    errors: list[dict[str, str]],
+) -> None:
+    if not isinstance(value, dict):
+        _error(
+            errors,
+            "SPEC_SOURCE_TEXT_LAYOUT_INVALID",
+            path,
+            "source_layout must be an object",
+        )
+        return
+    _validate_typography_allowed_fields(
+        value,
+        TEXT_CONTRACT_ALLOWED_FIELDS["source_layout"],
+        path,
+        errors,
+    )
+    required = TEXT_CONTRACT_ALLOWED_FIELDS["source_layout"]
+    missing = sorted(required - set(value))
+    if missing:
+        _error(
+            errors,
+            "SPEC_SOURCE_TEXT_LAYOUT_INVALID",
+            path,
+            f"missing fields: {', '.join(missing)}",
+        )
+        return
+    distances = value.get("line_center_distances_pt")
+    if not isinstance(distances, list) or any(
+        not _is_number(item) or item <= 0 for item in distances
+    ):
+        _error(
+            errors,
+            "SPEC_SOURCE_TEXT_LAYOUT_INVALID",
+            f"{path}.line_center_distances_pt",
+            "line center distances must be positive point values",
+        )
+    center_offset = value.get("text_block_center_offset_y_pt")
+    if not _is_number(center_offset):
+        _error(
+            errors,
+            "SPEC_SOURCE_TEXT_LAYOUT_INVALID",
+            f"{path}.text_block_center_offset_y_pt",
+            "text block center offset must be a point value",
         )
 
 
@@ -883,6 +932,12 @@ def _validate_typography(
             f"{path}.paragraphs",
             errors,
         )
+        if "source_layout" in item:
+            _validate_source_text_layout(
+                item.get("source_layout"),
+                f"{path}.source_layout",
+                errors,
+            )
         if not isinstance(text_box, dict) or not all(
             _is_number(text_box.get(key)) and (text_box[key] > 0 if key in {"w", "h"} else True)
             for key in ("x", "y", "w", "h")

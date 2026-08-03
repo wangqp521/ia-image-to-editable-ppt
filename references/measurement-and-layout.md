@@ -10,6 +10,8 @@
 
 展示后按 frame/mapping → regions → 锚点/层级 → 高风险文字/数据 → 图片/图标 → 颜色完成一次盘点。把明确点位合为一次重复 `--point/--bbox` 调用；仅触边、邻近污染、遮挡/低清或报告无效时二测对应局部，禁多轮小测量。
 
+视觉上包含两行及以上文字，或框内垂直对齐不是 `top` 的 TextBox，纳入同一次批量测量：按可见文字行从上到下记录相邻行中心距，并记录可见文字块中心相对 TextBox 中心的纵向偏移，正值向下。像素量测使用页面 mapping 换算为 point，写入 typography 的可选 `source_layout`；自动折行和真实 Paragraph 共用这组视觉目标，不把视觉行误写成段落边界。
+
 ## 唯一 schema v2 规格
 
 生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/verification_profile/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`verification_profile` 必须显式写入并在批次内固定；`page_id` 须精确为 `page-NNN`，从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。

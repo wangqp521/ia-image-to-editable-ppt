@@ -28,7 +28,7 @@ from lib.hashing import canonical_json_sha256
 from lib.spec_identity import content_spec_sha256, input_spec_sha256
 
 
-OVERFLOW_TOLERANCE_PT = 1.5
+TEXT_GEOMETRY_TOLERANCE_PT = 1.5
 FIRST_TOKEN_SEARCH_MARGIN_PT = 12.0
 AMBIGUITY_DISTANCE_PT = 0.5
 PDFTOTEXT_TIMEOUT_SECONDS = 30
@@ -240,7 +240,8 @@ def _base_report() -> dict[str, Any]:
         "pdftotext": {"path": None, "version": None, "sha256": None},
         "page_size_pt": None,
         "constants": {
-            "overflow_tolerance_pt": OVERFLOW_TOLERANCE_PT,
+            "overflow_tolerance_pt": TEXT_GEOMETRY_TOLERANCE_PT,
+            "text_layout_tolerance_pt": TEXT_GEOMETRY_TOLERANCE_PT,
             "first_token_search_margin_pt": FIRST_TOKEN_SEARCH_MARGIN_PT,
             "ambiguity_distance_pt": AMBIGUITY_DISTANCE_PT,
         },
@@ -825,6 +826,42 @@ def _expected_native_text(spec: dict[str, Any], build: dict[str, Any]) -> list[d
             f"modules.typography.items.{element_id}.text_box",
             "text box derived geometry must be finite",
         )
+        source_layout = contract.get("source_layout")
+        if source_layout is not None:
+            source_path = f"modules.typography.items.{element_id}.source_layout"
+            _expect(
+                isinstance(source_layout, dict),
+                source_path,
+                "source layout must be an object",
+            )
+            _expect(
+                set(source_layout)
+                == {
+                    "line_center_distances_pt",
+                    "text_block_center_offset_y_pt",
+                },
+                source_path,
+                "source layout fields are incomplete or unknown",
+            )
+            distances = source_layout.get("line_center_distances_pt")
+            _expect(
+                isinstance(distances, list)
+                and all(
+                    type(value) in {int, float}
+                    and math.isfinite(float(value))
+                    and value > 0
+                    for value in distances
+                ),
+                f"{source_path}.line_center_distances_pt",
+                "line center distances must be positive finite point values",
+            )
+            center_offset = source_layout.get("text_block_center_offset_y_pt")
+            _expect(
+                type(center_offset) in {int, float}
+                and math.isfinite(float(center_offset)),
+                f"{source_path}.text_block_center_offset_y_pt",
+                "text block center offset must be a finite point value",
+            )
         result.append(
             {
                 "element_id": element_id,
@@ -832,6 +869,7 @@ def _expected_native_text(spec: dict[str, Any], build: dict[str, Any]) -> list[d
                 "match_text": match_text,
                 "has_char_bullet": has_char_bullet,
                 "expected_bbox_pt": values,
+                "source_layout": source_layout,
             }
         )
     return result
@@ -892,6 +930,84 @@ def _token_record(token: PdfToken) -> dict[str, Any]:
         "normalized_text": token.normalized_text,
         "bbox_pt": token.bbox_pt,
     }
+
+
+def _line_bboxes(tokens: list[PdfToken]) -> list[list[float]]:
+    grouped: dict[int, list[PdfToken]] = {}
+    for token in tokens:
+        grouped.setdefault(token.line_index, []).append(token)
+    bboxes = [_union_bbox(group) for group in grouped.values()]
+    return sorted(bboxes, key=lambda bbox: (bbox[1], bbox[0]))
+
+
+def _rounded(value: float) -> float:
+    return round(value, 4)
+
+
+def _layout_metrics(
+    selected_tokens: list[PdfToken],
+    actual_bbox: list[float],
+    expected_bbox: list[float],
+    source_layout: dict[str, Any] | None,
+) -> dict[str, Any]:
+    line_bboxes = _line_bboxes(selected_tokens)
+    line_centers = [bbox[1] + bbox[3] / 2 for bbox in line_bboxes]
+    actual_distances = [
+        _rounded(line_centers[index + 1] - line_centers[index])
+        for index in range(len(line_centers) - 1)
+    ]
+    actual_center_offset = _rounded(
+        actual_bbox[1]
+        + actual_bbox[3] / 2
+        - expected_bbox[1]
+        - expected_bbox[3] / 2
+    )
+    result: dict[str, Any] = {
+        "checked": source_layout is not None,
+        "tolerance_pt": TEXT_GEOMETRY_TOLERANCE_PT,
+        "expected_line_count": None,
+        "actual_line_count": len(line_bboxes),
+        "expected_line_center_distances_pt": None,
+        "actual_line_center_distances_pt": actual_distances,
+        "line_spacing_error_pt": None,
+        "expected_text_block_center_offset_y_pt": None,
+        "actual_text_block_center_offset_y_pt": actual_center_offset,
+        "vertical_center_error_pt": None,
+        "issues": [],
+    }
+    if source_layout is None:
+        return result
+
+    expected_distances = [
+        _rounded(float(value))
+        for value in source_layout["line_center_distances_pt"]
+    ]
+    expected_center_offset = _rounded(
+        float(source_layout["text_block_center_offset_y_pt"])
+    )
+    expected_line_count = len(expected_distances) + 1
+    result.update(
+        {
+            "expected_line_count": expected_line_count,
+            "expected_line_center_distances_pt": expected_distances,
+            "expected_text_block_center_offset_y_pt": expected_center_offset,
+        }
+    )
+    if len(line_bboxes) != expected_line_count:
+        result["issues"].append("line_count")
+    else:
+        errors = [
+            _rounded(abs(actual - expected))
+            for actual, expected in zip(actual_distances, expected_distances)
+        ]
+        result["line_spacing_error_pt"] = errors
+        if any(error > TEXT_GEOMETRY_TOLERANCE_PT for error in errors):
+            result["issues"].append("line_spacing")
+    vertical_error = _rounded(abs(actual_center_offset - expected_center_offset))
+    result["vertical_center_error_pt"] = vertical_error
+    if vertical_error > TEXT_GEOMETRY_TOLERANCE_PT:
+        result["issues"].append("vertical_center")
+    return result
 
 
 def _match_element(
@@ -995,6 +1111,7 @@ def _match_element(
         "matched_tokens": [],
         "line_count": 0,
         "overflow_pt": {"left": 0.0, "top": 0.0, "right": 0.0, "bottom": 0.0},
+        "layout": None,
         "status": "missing",
     }
     if not full:
@@ -1012,11 +1129,18 @@ def _match_element(
     result["matched_tokens"] = [_token_record(token) for token in selected_tokens]
     result["line_count"] = len({token.line_index for token in selected_tokens})
     result["overflow_pt"] = overflow
-    result["status"] = (
-        "overflow"
-        if any(amount > OVERFLOW_TOLERANCE_PT for amount in overflow.values())
-        else "passed"
+    result["layout"] = _layout_metrics(
+        selected_tokens,
+        actual,
+        expected_bbox,
+        expected_item.get("source_layout"),
     )
+    if any(amount > TEXT_GEOMETRY_TOLERANCE_PT for amount in overflow.values()):
+        result["status"] = "overflow"
+    elif result["layout"]["issues"]:
+        result["status"] = "layout_mismatch"
+    else:
+        result["status"] = "passed"
     return result
 
 
@@ -1181,14 +1305,23 @@ def create_rendered_text_geometry(
                 "ambiguous": "TEXT_GEOMETRY_AMBIGUOUS",
                 "incomplete": "TEXT_GEOMETRY_INCOMPLETE",
                 "overflow": "TEXT_GEOMETRY_OVERFLOW",
+                "layout_mismatch": "TEXT_GEOMETRY_LAYOUT_MISMATCH",
             }
             for item in report["elements"]:
                 if item["status"] != "passed":
+                    issues = (
+                        item.get("layout", {}).get("issues", [])
+                        if isinstance(item.get("layout"), dict)
+                        else []
+                    )
+                    detail = f"rendered text status is {item['status']}"
+                    if issues:
+                        detail += f"; layout issues: {', '.join(issues)}"
                     report["errors"].append(
                         {
                             "code": code_by_status[item["status"]],
                             "path": f"elements.{item['element_id']}",
-                            "detail": f"rendered text status is {item['status']}",
+                            "detail": detail,
                         }
                     )
         except Exception as exc:

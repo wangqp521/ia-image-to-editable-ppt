@@ -61,7 +61,7 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 ## 审核、修复与终态
 
-先核对整页 mapping、regions/层级、文字与 TextBox、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
+先核对整页 mapping、regions/层级、文字与 TextBox（含自动折行、Paragraph、行/段距及框内垂直位置）、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
 
 `rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、text geometry、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
 

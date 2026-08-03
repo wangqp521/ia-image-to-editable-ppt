@@ -33,7 +33,7 @@
 
 structure report 中的 `TEXT_RUN_STYLE_MISMATCH` 是非阻断诊断，final/reviewer 通过当前 structure artifact 的 SHA-256 原样绑定，不复制或改写。审核者结合 preview 判断其视觉影响并按既有 P0/P1/P2 合同归类；不得仅因 warning 存在就自动阻断，也不得因 `valid=true` 忽略可见的高保真差异。Run 结构错误仍由 structure gate 直接阻断。
 
-P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要内容不可编辑和数据编造；P1 包括数量、比例、结构、fill、字号/换行、Text Run、bullet、crop、connector、图表或关键装饰错误；P2 仅限不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差、线宽或 renderer 近似。
+P0 包括 PPTX 不可用、页数或比例错误、核心内容缺失、主要内容不可编辑和数据编造；P1 包括数量、比例、结构、fill、字号/换行、行距/段距、框内垂直位置、Text Run、bullet、crop、connector、图表或关键装饰错误；P2 仅限不改变内容、结构、关系和可编辑性的字体 fallback、轻微色差、线宽或不超过确定性容差的 renderer 近似。
 
 第一个正式结果为 `passed` 时立即停止。若为 `changes_required`，把全部 P0/P1 映射到 `modules.high_risk.items`，按共同根因修改同一 `page-reconstruction.json` 一次。PPTX 哈希变化后，以新哈希从 prebuild/snapshot 起重跑 build/report、render、text geometry、structure、background 与 visual diff；runtime 身份未变时复用批次 preflight，发生变化时先重建 preflight。不得只重跑有利指标、沿用旧报告、保留另一份 PPTX 作为回退，或逐项边看边改。
 

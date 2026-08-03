@@ -8,6 +8,23 @@
 
 所有 `kind=text` 对象只交给统一 Text renderer；不得另写页面级 TextBox 生成函数。renderer 从 typography 索引取得 Text Run、段落、边距、对齐、wrap 与 overflow，规格缺项或绑定冲突即 fail closed。
 
+## 行距、段距与框内垂直位置
+
+先按来源语义确定 Paragraph，再调框内排版。一个 Paragraph 自动折成多行时保持连续 text、`wrap=true` 且不写 `soft_breaks`，只用该段 `line_spacing` 控制行距；两个独立段落必须是两个 `paragraphs[]`，段间距只由相邻一侧的 `space_after` 或 `space_before` 承担，另一侧为 0，禁止用空段、硬回车或扩大段内行距模拟段距。
+
+`line_spacing` 沿用 schema v2 的现有比例值，不新增固定磅值模式或平行字段。视觉上包含两行及以上，或来源不是顶部对齐时，该 typography item 必须增加：
+
+```json
+"source_layout": {
+  "line_center_distances_pt": [16.2],
+  "text_block_center_offset_y_pt": 0.0
+}
+```
+
+数组按可见行从上到下记录相邻行中心距；空数组表示单行。中心偏移是可见文字块中心减 TextBox 中心，正值向下。它只保存来源测量目标，不替代 `paragraphs[]`、`text_box.vertical_alignment` 或 margins。
+
+`text_box.vertical_alignment` 必须服从来源的 `top|middle|bottom`，不得统一设为 `middle`。来源居中时写 `middle` 并保留实测上下 margins；来源上下留白对称时 margins 也对称。统一 renderer 已固定 `MSO_AUTO_SIZE.NONE`，规格不得新增 `autoFit/auto_size` 字段，也不得通过收缩框高、移动 y、插入空行或缩小字号伪造居中。
+
 ## Text Run 与原生列表
 
 字体、字号、字重、颜色、斜体、下划线、删除线、上下标和局部字号变化精确到 Text Run；标题、标签和强调范围不得退化为整框样式，Paragraph 与 Run 不互相替代。
@@ -38,9 +55,9 @@ scale_pt_per_source_px =
 
 不做字体比较或独立试排。未知字体先用 `render_preview.py` 的 `pdffonts` 确认；同一运行环境下项目级只验证一次。每个最终 PDF 都检查 `pdffonts`；仅特殊字符、生僻字、公式、多语言、缺字、意外 fallback、换行或溢出触发局部调查。
 
-调整顺序：字体 → 字号 → box → margin → 字距 → 行/段距；不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。首轮 render 后立即汇总 rendered text geometry 的全部问题，并与语义视觉判断发现的文字问题合入同一修复批次；不边看边改或逐框搜索。局部诊断检查目标框和相邻边界，修正后仍须对当前 PPTX 完成全链重验；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
+调整顺序：字体 → 字号 → box → margin/wrap → 字距 → 行/段距 → 垂直对齐；先锁定换行位置，再校准相邻行中心距，最后校准文字块纵向中心。自动折行只改 `line_spacing`，真实段落优先改相邻一侧的 `space_after/space_before`。不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。首轮 render 后立即汇总 rendered text geometry 的全部问题，并与语义视觉判断发现的文字问题合入同一修复批次；不边看边改或逐框搜索。局部诊断检查目标框和相邻边界，修正后仍须对当前 PPTX 完成全链重验；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
 
-每次 render 后、structure 前立即生成 rendered text geometry，用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出容差固定 **1.5 pt**，报告须绑定当前 spec/PPTX/build/render/runtime；任一身份变化即重建，禁手写通过。
+每次 render 后、structure 前立即生成 rendered text geometry，用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出、相邻行中心距和文字块纵向中心偏移共用固定 **1.5 pt** 容差；`source_layout` 存在时，行数、每个中心距及中心偏移均须进入当前报告，任一超差写入 `TEXT_GEOMETRY_LAYOUT_MISMATCH`。报告须绑定当前 spec/PPTX/build/render/runtime；任一身份变化即重建，禁手写通过。
 
 ## 特殊文本与最低可编辑性
 

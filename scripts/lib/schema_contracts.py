@@ -258,8 +258,15 @@ TEXT_CONTRACT_ALLOWED_FIELDS = {
             "runs",
             "paragraphs",
             "text_box",
+            "source_layout",
             "internal_font_declaration",
             "font_declaration_verified",
+        }
+    ),
+    "source_layout": frozenset(
+        {
+            "line_center_distances_pt",
+            "text_block_center_offset_y_pt",
         }
     ),
     "text_box": frozenset(
@@ -652,6 +659,12 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "paragraph_breaks": _array(NONNEGATIVE_INTEGER),
         }
     ),
+    "SourceTextLayout": _object(
+        {
+            "line_center_distances_pt": _array(POSITIVE_NUMBER),
+            "text_block_center_offset_y_pt": NUMBER,
+        }
+    ),
     "TypographyItem": _object(
         {
             "element_id": NON_EMPTY_STRING,
@@ -663,8 +676,22 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "runs": _array(_ref("TextRun"), minimum=1),
             "paragraphs": _array(_ref("Paragraph"), minimum=1),
             "text_box": _ref("TextBox"),
+            "source_layout": _ref("SourceTextLayout"),
             "internal_font_declaration": NON_EMPTY_STRING,
             "font_declaration_verified": BOOLEAN,
+        },
+        required={
+            "element_id",
+            "text",
+            "source_font_guess",
+            "selected_font",
+            "fallback_reason",
+            "fallback_trace",
+            "runs",
+            "paragraphs",
+            "text_box",
+            "internal_font_declaration",
+            "font_declaration_verified",
         },
         examples=[
             {

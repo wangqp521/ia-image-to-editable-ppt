@@ -2168,6 +2168,26 @@
       ],
       "type": "object"
     },
+    "SourceTextLayout": {
+      "additionalProperties": false,
+      "properties": {
+        "line_center_distances_pt": {
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "type": "array"
+        },
+        "text_block_center_offset_y_pt": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "line_center_distances_pt",
+        "text_block_center_offset_y_pt"
+      ],
+      "type": "object"
+    },
     "StatusContent": {
       "additionalProperties": false,
       "properties": {
@@ -2535,6 +2555,9 @@
           "minLength": 1,
           "type": "string"
         },
+        "source_layout": {
+          "$ref": "#/$defs/SourceTextLayout"
+        },
         "text": {
           "minLength": 1,
           "type": "string"
@@ -2681,5 +2704,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "0f23c03f860c4548fc3e415de6d662950bc8ecba9f2da55bea6a74f0bc112cc6"
+  "x-schema-contract-sha256": "ec22dfc14ec68776fe0a81678b777a1af1f152a31795ef7d439083000d204780"
 }
