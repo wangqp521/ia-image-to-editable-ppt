@@ -35,6 +35,8 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 每页维护 `prepare_spec.py`、生成的 `work/page-reconstruction.json` 与当前 `work/page.pptx`。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把明确的点与框合并为一次批量测量。模型使用页面专用 Python 的局部函数、数组、推导式和循环生成完整 schema v2；不得手工逐项展开完整 JSON，也不新增共享 helper、DSL、compact IR 或第二套 schema。
 
+文字按来源 TextBox 一次转录为 `paragraphs_text`，以主体样式覆盖全文，`spans` 只声明视觉上真实存在的局部样式差异；优先使用唯一文本定位，只有歧义范围才计算显式 `start/end`，不得手工展开完整 `runs[]`。
+
 页面脚本负责输出 canvas、regions、elements、reading order、activated modules、representation、background、typography 和条件模块，并计算机械默认值、EMU 坐标及文件哈希。生成 `work/page-reconstruction.json`，它是唯一 Layout IR，必须先通过 prebuild 并冻结 snapshot；compiler 不读取 `prepare_spec.py`。视觉或结构修复必须修改 `prepare_spec.py` 并重新生成，不得直接 patch canvas、modules、regions、elements 或 reading_order。
 
 每页可使用一个小型页面专用 `finalize_spec.py`，从当前真实报告自动计算并回填 runtime、build snapshot/report、PPTX、preview、structure、background、visual diff、gate 与 delivery status。它不得由模型手写证据哈希，不得修改 Layout 内容，也不得抽成 Skill 级共享 helper；final validator 保持只读。

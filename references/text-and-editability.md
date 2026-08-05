@@ -8,6 +8,26 @@
 
 所有 `kind=text` 对象只交给统一 Text renderer；不得另写页面级 TextBox 生成函数。renderer 从 typography 索引取得 Text Run、段落、边距、对齐、wrap 与 overflow，规格缺项或绑定冲突即 fail closed。
 
+## 文字转录与 spans 编写
+
+先确认完整文字、真实 Paragraph 和标点，再处理颜色、字重与局部字号。一个来源 TextBox 对应一次 `add_text()`；自动换行不拆字符串，只有真实 Paragraph 才使用 `list[str]`。数字、百分号、单位、正负号、括号、空格和中英文标点逐字服从来源；模糊字符先检查图片局部，不根据上下文补造。
+
+把框内占比最大的样式作为 `add_text()` 默认值；单一样式 TextBox 不写 `spans`。`spans` 只写差异，按以下顺序定位：唯一文本；多个唯一值使用列表推导式；重复短文本用更长上下文计算显式 `start/end`；只有上下文也无法区分时才使用 `occurrence`。
+
+```python
+spans = [
+    {"text": "过保替换：", "font_weight": 700},
+    *[{"text": value, "color": ORANGE} for value in ("9,312", "4,497", "847", "428")],
+]
+```
+
+```python
+start = text.index("0故障")
+spans = [{"start": start, "end": start + 1, "color": ORANGE}]
+```
+
+不得手工展开完整 `runs[]`，不得使用正则或“所有数字”等内容类别批量推断样式，也不得通过拆框或硬换行规避 Text Run、Paragraph 或排版问题。
+
 ## 行距、段距与框内垂直位置
 
 先按来源语义确定 Paragraph，再调框内排版。一个 Paragraph 自动折成多行时保持连续 text、`wrap=true` 且不写 `soft_breaks`，只用该段 `line_spacing` 控制行距；两个独立段落必须是两个 `paragraphs[]`，段间距只由相邻一侧的 `space_after` 或 `space_before` 承担，另一侧为 0，禁止用空段、硬回车或扩大段内行距模拟段距。
