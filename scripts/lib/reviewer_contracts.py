@@ -19,7 +19,6 @@ REVIEW_CONTEXT_ARTIFACT_FIELDS = (
     "preview",
     "render_report",
     "runtime_preflight",
-    "rendered_text_geometry",
     "structure_validation",
     "background_contract",
     "visual_diff",

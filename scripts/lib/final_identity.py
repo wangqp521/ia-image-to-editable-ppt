@@ -162,23 +162,18 @@ def collect_current_artifacts(
 
         runtime, runtime_snapshot, runtime_identity = _json_record(spec.get("runtime_preflight"), "runtime_preflight", snapshots)
         render, render_snapshot, render_identity = _json_record(visual_gate.get("render_report"), "visual_gate.render_report", snapshots)
-        text, text_snapshot, text_identity = _json_record(visual_gate.get("rendered_text_geometry"), "visual_gate.rendered_text_geometry", snapshots)
         structure, structure_snapshot, structure_identity = _json_record(editability_gate.get("validator"), "editability_gate.validator", snapshots)
         background, background_snapshot, background_identity = _json_record(visual_gate.get("background_contract"), "visual_gate.background_contract", snapshots)
         visual, visual_snapshot, visual_identity = _json_record(visual_gate.get("report"), "visual_gate.report", snapshots)
 
-        input_paths = _dict(text.get("input_paths"), "rendered_text_geometry.input_paths")
-        inputs = _dict(text.get("inputs"), "rendered_text_geometry.inputs")
-        spec_path = input_paths.get("spec")
-        build_path = input_paths.get("build_report")
         build_spec, build_spec_snapshot, build_spec_identity = _json_record(
-            {"path": spec_path, "sha256": inputs.get("spec_file_sha256")},
-            "rendered_text_geometry.build_spec_snapshot",
+            editability_gate.get("build_spec_snapshot"),
+            "editability_gate.build_spec_snapshot",
             snapshots,
         )
         build, build_snapshot, build_identity = _json_record(
-            {"path": build_path, "sha256": inputs.get("build_report_sha256")},
-            "rendered_text_geometry.build_report",
+            editability_gate.get("build_report"),
+            "editability_gate.build_report",
             snapshots,
         )
         _expect(content_spec_sha256(build_spec) == content_hash, "build_spec_snapshot", "build snapshot content identity is stale")
@@ -239,27 +234,6 @@ def collect_current_artifacts(
         _expect(structure.get("pptx_sha256") == pptx.sha256, "structure_validation.pptx_sha256", "structure PPTX identity is stale")
         _expect(structure.get("path") == pptx_identity["path"], "structure_validation.path", "structure report points to another PPTX")
         _expect(structure.get("slide_count") == 1, "structure_validation.slide_count", "exactly one slide is required")
-
-        _expect(text.get("schema_version") == 1 and text.get("valid") is True and text.get("decision") == "passed" and text.get("errors") == [], "rendered_text_geometry.valid", "text geometry must pass")
-        text_expected = {
-            "page_id": page_id,
-            "spec_sha256": content_hash,
-            "input_spec_sha256": build_input_hash,
-            "source_sha256": source.sha256,
-            "spec_file_sha256": build_spec_snapshot.sha256,
-            "pptx_sha256": pptx.sha256,
-            "build_report_sha256": build_snapshot.sha256,
-            "render_report_sha256": render_snapshot.sha256,
-            "runtime_sha256": runtime_snapshot.sha256,
-            "pdf_sha256": pdf.sha256,
-        }
-        for field, expected in text_expected.items():
-            _expect(text.get(field) == expected, f"rendered_text_geometry.{field}", "text geometry identity is stale")
-            if field in inputs:
-                _expect(inputs.get(field) == expected, f"rendered_text_geometry.inputs.{field}", "text geometry input identity is stale")
-        for field, expected in (("pptx", pptx_identity["path"]), ("build_report", build_identity["path"]), ("render_report", render_identity["path"]), ("runtime", runtime_identity["path"]), ("pdf", pdf_identity["path"]), ("spec", build_spec_identity["path"])):
-            _expect(input_paths.get(field) == expected, f"rendered_text_geometry.input_paths.{field}", "text geometry input path is stale")
-        _expect(all(isinstance(item, dict) and item.get("status") == "passed" for item in text.get("elements", [])), "rendered_text_geometry.elements", "all text geometry items must pass")
 
         background_expected = {
             "schema_version": 1,
@@ -322,7 +296,6 @@ def collect_current_artifacts(
             "preview": preview_identity,
             "render_report": render_identity,
             "runtime_preflight": runtime_identity,
-            "rendered_text_geometry": text_identity,
             "structure_validation": structure_identity,
             "background_contract": background_identity,
             "visual_diff": visual_identity,

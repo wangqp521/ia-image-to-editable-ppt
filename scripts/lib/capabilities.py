@@ -73,7 +73,6 @@ ATOMIC_CAPABILITY_METADATA = {
 WORKFLOW_CAPABILITIES = frozenset(
     {
         "workflow.background_contract.v1",
-        "workflow.rendered_text_geometry.v1",
     }
 )
 

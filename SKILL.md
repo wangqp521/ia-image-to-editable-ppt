@@ -31,9 +31,13 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 三个 Poppler 参数默认分别为 `pdftoppm`、`pdffonts`、`pdftotext`，可省略；脚本通过当前 `PATH` 解析并在报告中锁定实际绝对路径、版本与 SHA-256。显式传入绝对路径时必须严格使用该路径，缺失即失败，不得自动切换运行时。可由 PATH 自动恢复的路径差异只在内部处理；通过后再报告预检完成。命令名仍缺失时才定位本机或工作区捆绑运行时，并以同一输出路径重跑。
 
-## 直接编写完整规格
+## 页面专用 Python 生成完整规格
 
-每页只维护 `work/page-reconstruction.json` 与 `work/page.pptx` 两个当前对象。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把全部明确的点与框合并为一次批量测量。直接写完整 `page-reconstruction.json`，一次填齐 canvas、regions、elements、reading order、activated modules、representation、background、typography 以及条件模块；未知内容标未验证，不补造。
+每页维护 `prepare_spec.py`、生成的 `work/page-reconstruction.json` 与当前 `work/page.pptx`。展示 source 与 coordinate overlay 后，一次盘点全部元素和关系；把明确的点与框合并为一次批量测量。模型使用页面专用 Python 的局部函数、数组、推导式和循环生成完整 schema v2；不得手工逐项展开完整 JSON，也不新增共享 helper、DSL、compact IR 或第二套 schema。
+
+页面脚本负责输出 canvas、regions、elements、reading order、activated modules、representation、background、typography 和条件模块，并计算机械默认值、EMU 坐标及文件哈希。生成 `work/page-reconstruction.json`，它是唯一 Layout IR，必须先通过 prebuild 并冻结 snapshot；compiler 不读取 `prepare_spec.py`。视觉或结构修复必须修改 `prepare_spec.py` 并重新生成，不得直接 patch canvas、modules、regions、elements 或 reading_order。
+
+每页可使用一个小型页面专用 `finalize_spec.py`，从当前真实报告自动计算并回填 runtime、build snapshot/report、PPTX、preview、structure、background、visual diff、gate 与 delivery status。它不得由模型手写证据哈希，不得修改 Layout 内容，也不得抽成 Skill 级共享 helper；final validator 保持只读。
 
 图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。彩色背景上的白色/近白色反白镂空线框图标，尤其是闭合孔洞图标，显式使用 `foreground_profile=reverse-white-outline`；其他图标保持默认 `standard`，不得自动猜测或批量切换。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
 
@@ -47,7 +51,6 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --stage prebuild --snapshot work/build-spec-snapshot.json --output work/prebuild-validation.json
 python3 scripts/build_pptx_from_spec.py --spec work/build-spec-snapshot.json --prebuild-report work/prebuild-validation.json --output work/page.pptx --build-report work/build-report.json --replace-current
 python3 scripts/render_preview.py work/page.pptx --runtime batch/runtime-preflight.json --output-dir preview/PPTX_SHA256
-python3 scripts/create_rendered_text_geometry.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --render-report preview/PPTX_SHA256/render-report.json --runtime batch/runtime-preflight.json --output evidence/PPTX_SHA256/rendered-text-geometry.json
 python3 scripts/validate_pptx.py work/page.pptx --expected-slides 1 --spec work/build-spec-snapshot.json --build-report work/build-report.json --output evidence/PPTX_SHA256/structure-validation.json
 python3 scripts/validate_background_contract.py work/build-spec-snapshot.json --pptx work/page.pptx --build-report work/build-report.json --structure-report evidence/PPTX_SHA256/structure-validation.json --output evidence/PPTX_SHA256/background-contract.json
 python3 scripts/create_visual_diff.py source.png --render-report preview/PPTX_SHA256/render-report.json --spec work/build-spec-snapshot.json --output-dir evidence/PPTX_SHA256/visual-diff --profile reviewed
@@ -57,17 +60,17 @@ python3 scripts/validate_reconstruction_spec.py work/page-reconstruction.json --
 
 按实际 profile 替换 visual diff 的 `--profile`。规格必须先写齐，再由一次 `prebuild --snapshot` 同时验证并冻结 exact bytes；compiler 只读 snapshot。任何确定性门禁失败都不得进入语义审核。
 
-每个 producer 完成后，将当前证据的绝对路径与 SHA-256 回写到同一工作规格的 `runtime_preflight`、`visual_gate`、`editability_gate`；只回写证据与终态字段，不改 build content。`visual_gate.pptx` 与 `editability_gate.pptx` 必须指向同一当前 PPTX。
+每个 producer 完成后，由页面专用 `finalize_spec.py` 将当前证据的绝对路径与 SHA-256 回写到同一工作规格的 `runtime_preflight`、`visual_gate`、`editability_gate`，其中 `editability_gate` 必须绑定当前 `build_spec_snapshot` 与 `build_report`；只回写证据与终态字段，不改 build content。`visual_gate.pptx` 与 `editability_gate.pptx` 必须指向同一当前 PPTX。
 
 ## 审核、修复与终态
 
 先核对整页 mapping、regions/层级、文字与 TextBox（含自动折行、Paragraph、行/段距及框内垂直位置）、图形/连接线/图表、图片 crop 与图标、背景及细节，并一次列全 P0/P1。同根因问题合并为一个修复批次，不边看边改。
 
-`rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、text geometry、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
+`rapid` 的一次正式判断若通过，直接补齐终态字段；若存在可由确定性证据关闭的 P0/P1，可批量修改同一规格一次。修复后不再做第二次语义判断，只按新哈希从 `prebuild --snapshot` 起重建 build、render、structure、background 与 visual diff；批次 runtime 身份未变时复用原 preflight。主观 P0/P1 无法由确定性证据关闭时必须失败。
 
-`reviewed` 在完整执行 rapid 基础流程，且 background、text geometry、structure 与 visual evidence 完整后，才生成 round 1 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效、`not_reviewable` 或不可修复的 P0/P1 均写入 `reviewed_failed`。round 1 发现可修复 P0/P1 时，一次映射全部问题、集中修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight。round 2 只有 `passed` 才写入 `reviewed_passed`，其他结果均写入 `reviewed_failed` 并终止，不得再修改 PPTX。
+`reviewed` 在完整执行 rapid 基础流程，且 background、structure 与 visual evidence 完整后，才生成 round 1 prompt。把生成的 prompt 原样交给全新只读 reviewer；reviewer 不改文件，只返回契约 JSON。raw response 是唯一持久化的 reviewer 产物。缺失或无效、`not_reviewable` 或不可修复的 P0/P1 均写入 `reviewed_failed`。round 1 发现可修复 P0/P1 时，一次映射全部问题、集中修复、按新哈希从 `prebuild --snapshot` 起重建下游确定性证据，再生成 round 2 prompt；批次 runtime 身份未变时复用原 preflight。round 2 只有 `passed` 才写入 `reviewed_passed`，其他结果均写入 `reviewed_failed` 并终止，不得再修改 PPTX。
 
-final 只读：只重新计算并核对当前规格、PPTX、runtime、render、text、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
+final 只读：只重新计算并核对当前规格、PPTX、runtime、render、structure、background、visual diff、region evidence 与 raw response 的身份和语义，不运行 producer、不修文件、不补证据。final 通过后禁止写入 PPTX；任何改动都使终态失效。
 
 ## 条件 reference 路由
 

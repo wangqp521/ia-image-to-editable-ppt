@@ -484,6 +484,26 @@
     "EditabilityGate": {
       "additionalProperties": false,
       "properties": {
+        "build_report": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build_spec_snapshot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "evidence": {
           "items": {
             "minLength": 1,
@@ -2704,5 +2724,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "ec22dfc14ec68776fe0a81678b777a1af1f152a31795ef7d439083000d204780"
+  "x-schema-contract-sha256": "4dcbaff6ad8dbf67dbc3b33347460fa5cc463b94cb8fcd72518b285f295fb061"
 }

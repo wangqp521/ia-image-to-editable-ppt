@@ -14,7 +14,7 @@
 
 ## 唯一 schema v2 规格
 
-生成前仅维护 `work/page-reconstruction.json`：`schema_version/page_id/verification_profile/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`。`verification_profile` 必须显式写入并在批次内固定；`page_id` 须精确为 `page-NNN`，从 `page-001` 按交付页序递增，禁用目录/attempt/标题。`source_bbox` 用视觉图 pixel；`slide_bbox` 与 typography 坐标只用 EMU。module 只引用正式 `element_id` 且激活项非空；`reading_order` 覆盖全部 elements，每个 element 至少属一个 region。禁填 OOXML ID、平行对象清单或第二套内容/坐标。
+生成前由页面专用 Python 维护构建事实并原子写出 `work/page-reconstruction.json`；schema v2 JSON 是唯一 Layout IR。页面脚本可定义当前页局部函数和循环，但不得导入或创建共享 authoring helper、第二套对象清单或平行坐标合同。JSON 必须包含 `schema_version/page_id/verification_profile/session_reuse/content_reference/clean_visual_reference/canvas/activated_modules/modules/regions/elements/reading_order/visual_gate/editability_gate`，并继续遵守本节坐标和 element_id 规则。prebuild 冻结后，页面专用 `finalize_spec.py` 只能回填终态字段，不得修改上述 Layout 内容。
 
 `modules.representation_plan.items[]` 是每个来源语义事实进 compiler 前的测量结论：存事实/bbox/必需性、`native|composite|asset`、所需可编辑性、fallback policy、绑定 element、理由、coverage、非空证据。先定表示法再写 element；唯一工作规格完整后，由一次正式 `prebuild --snapshot` 验证并冻结 build 输入，通过才构建当前 PPTX。计划非第二 IR，禁构建后补写。
 

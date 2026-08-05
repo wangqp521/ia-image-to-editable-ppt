@@ -55,9 +55,7 @@ scale_pt_per_source_px =
 
 不做字体比较或独立试排。未知字体先用 `render_preview.py` 的 `pdffonts` 确认；同一运行环境下项目级只验证一次。每个最终 PDF 都检查 `pdffonts`；仅特殊字符、生僻字、公式、多语言、缺字、意外 fallback、换行或溢出触发局部调查。
 
-调整顺序：字体 → 字号 → box → margin/wrap → 字距 → 行/段距 → 垂直对齐；先锁定换行位置，再校准相邻行中心距，最后校准文字块纵向中心。自动折行只改 `line_spacing`，真实段落优先改相邻一侧的 `space_after/space_before`。不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。首轮 render 后立即汇总 rendered text geometry 的全部问题，并与语义视觉判断发现的文字问题合入同一修复批次；不边看边改或逐框搜索。局部诊断检查目标框和相邻边界，修正后仍须对当前 PPTX 完成全链重验；回退即拒绝。`validate_pptx.py --spec` 核对 OOXML Text Run 字号与规格 point 值。
-
-每次 render 后、structure 前立即生成 rendered text geometry，用它一次诊断标题、正文、KPI、列表/表格的系统差异。溢出、相邻行中心距和文字块纵向中心偏移共用固定 **1.5 pt** 容差；`source_layout` 存在时，行数、每个中心距及中心偏移均须进入当前报告，任一超差写入 `TEXT_GEOMETRY_LAYOUT_MISMATCH`。报告须绑定当前 spec/PPTX/build/render/runtime；任一身份变化即重建，禁手写通过。
+调整顺序：字体 → 字号 → box → margin/wrap → 字距 → 行/段距 → 垂直对齐；先锁定换行位置，再校准相邻行中心距，最后校准文字块纵向中心。自动折行只改 `line_spacing`，真实段落优先改相邻一侧的 `space_after/space_before`。不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。首轮 render 后把 source/preview 中全部可见文字问题与 structure/font report 诊断合入同一修复批次；不边看边改或逐框搜索。修正后仍须对当前 PPTX 重跑 build、render、structure、background 与 visual diff；回退即拒绝。`validate_pptx.py --spec` 继续核对 OOXML Text Run 字号与规格 point 值。
 
 ## 特殊文本与最低可编辑性
 

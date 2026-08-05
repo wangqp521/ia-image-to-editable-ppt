@@ -967,6 +967,12 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "review": {"type": ["object", "null"]},
             "pptx": {"type": ["object", "null"]},
             "validator": {"type": ["object", "null"]},
+            "build_spec_snapshot": {
+                "anyOf": [_ref("Reference"), {"type": "null"}]
+            },
+            "build_report": {
+                "anyOf": [_ref("Reference"), {"type": "null"}]
+            },
         },
         required={"status", "evidence"},
     ),
