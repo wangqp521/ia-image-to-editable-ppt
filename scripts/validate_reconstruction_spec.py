@@ -904,15 +904,15 @@ def _validate_typography(
                 f"{path}.selected_font",
                 "selected_font must be a non-empty font family",
             )
-        if source_font_guess == "unknown" and (
-            selected != "Noto Sans CJK SC"
+        if source_font_guess in {"kaiti-like", "unknown"} and (
+            selected != "STKaiti"
             or item.get("fallback_reason") != "source_font_uncertain"
         ):
             _error(
                 errors,
                 "SPEC_UNCERTAIN_FONT_FALLBACK_INVALID",
                 path,
-                "unknown source fonts require selected_font=Noto Sans CJK SC and fallback_reason=source_font_uncertain",
+                "kaiti-like or unknown source fonts require selected_font=STKaiti and fallback_reason=source_font_uncertain",
             )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)

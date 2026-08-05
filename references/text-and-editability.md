@@ -41,7 +41,7 @@
 
 ## 字体与字号
 
-来源字体明确时写实际 family；未知时每项固定 `source_font_guess=unknown`、`selected_font=Noto Sans CJK SC`、`fallback_reason=source_font_uncertain`；`fallback_reason` 是枚举值，不写自然语言。PDF resolved name 为 `NotoSansCJKsc-Regular`（可有六位大写子集前缀）。
+来源字体明确时写实际 family。能判断为楷体/手写体风格但无法确定具体 family 时，固定 `source_font_guess=kaiti-like`、`selected_font=STKaiti`、`fallback_reason=source_font_uncertain`；连字体大类也无法判断时，固定 `source_font_guess=unknown`、`selected_font=STKaiti`、`fallback_reason=source_font_uncertain`。`fallback_reason` 是枚举值，不写自然语言。两类不确定来源的 `internal_font_declaration` 都写 `STKaiti`；structure report 必须确认 PPTX 内部 Text Run 声明为 `STKaiti`。PDF resolved name 只记录 `pdffonts` 的真实结果；运行时替换须披露并按实际视觉影响分级，不得为了迎合预览 renderer 改写 `selected_font`。
 
 `runs[].font_size` 固定使用 point（pt），文本坐标使用 EMU；自定义字号字段以 `_font_size_pt` 结尾。初值按页面实际比例估算，不使用固定 96 DPI：
 

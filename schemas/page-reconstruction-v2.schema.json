@@ -2475,7 +2475,7 @@
           "fallback_reason": "source_font_uncertain",
           "fallback_trace": null,
           "font_declaration_verified": false,
-          "internal_font_declaration": "Noto Sans CJK SC",
+          "internal_font_declaration": "STKaiti",
           "paragraphs": [
             {
               "alignment": "left",
@@ -2506,7 +2506,7 @@
               "underline": false
             }
           ],
-          "selected_font": "Noto Sans CJK SC",
+          "selected_font": "STKaiti",
           "source_font_guess": "unknown",
           "text": "Editable title",
           "text_box": {
@@ -2724,5 +2724,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "4dcbaff6ad8dbf67dbc3b33347460fa5cc463b94cb8fcd72518b285f295fb061"
+  "x-schema-contract-sha256": "50fb6dc8e9b930f4f606c1c0d138bc3a974ddc45dc407e7ab658eb77cfea355b"
 }

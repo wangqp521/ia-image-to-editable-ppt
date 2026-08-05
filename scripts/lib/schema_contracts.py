@@ -698,7 +698,7 @@ _RECORDS: dict[str, dict[str, Any]] = {
                 "element_id": "title",
                 "text": "Editable title",
                 "source_font_guess": "unknown",
-                "selected_font": "Noto Sans CJK SC",
+                "selected_font": "STKaiti",
                 "fallback_reason": "source_font_uncertain",
                 "fallback_trace": None,
                 "runs": [
@@ -740,7 +740,7 @@ _RECORDS: dict[str, dict[str, Any]] = {
                     "soft_breaks": [],
                     "paragraph_breaks": [],
                 },
-                "internal_font_declaration": "Noto Sans CJK SC",
+                "internal_font_declaration": "STKaiti",
                 "font_declaration_verified": False,
             }
         ],
