@@ -297,6 +297,16 @@ def _int_attr(element: ET.Element | None, name: str) -> int | None:
         return None
 
 
+def _float_attr(element: ET.Element | None, name: str) -> float | None:
+    if element is None:
+        return None
+    try:
+        value = float(element.get(name, ""))
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
 
 
 def _archive_sha256(archive: zipfile.ZipFile, part: str) -> str:
@@ -1402,6 +1412,247 @@ def _chart_bool(owner: ET.Element | None, tag: str) -> bool:
     return node is not None and node.get("val", "1") not in {"0", "false"}
 
 
+def _chart_sparse_numeric_points(series: ET.Element, path: str) -> list[float | None]:
+    cache = series.find("c:val/c:numRef/c:numCache", NS)
+    count = _int_attr(cache.find("c:ptCount", NS) if cache is not None else None, "val")
+    if cache is None or count is None or count < 1:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} cache is missing or invalid")
+    values: list[float | None] = [None] * count
+    seen: set[int] = set()
+    for point in cache.findall("c:pt", NS):
+        index = _int_attr(point, "idx")
+        node = point.find("c:v", NS)
+        if index is None or not 0 <= index < count or index in seen or node is None:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} cache point is invalid")
+        try:
+            value = float(node.text or "")
+        except ValueError as exc:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} value is not numeric") from exc
+        if not math.isfinite(value):
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} value is not finite")
+        values[index] = value
+        seen.add(index)
+    return values
+
+
+def _chart_series_name(series: ET.Element) -> str | None:
+    value = series.find("c:tx/c:strRef/c:strCache/c:pt/c:v", NS)
+    text = value.text if value is not None else None
+    return text if isinstance(text, str) and text else None
+
+
+def _chart_rgb(node: ET.Element | None, path: str) -> str:
+    value = node.get("val") if node is not None else None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9A-Fa-f]{6}", value) is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} RGB color is invalid")
+    return f"#{value.upper()}"
+
+
+def _chart_opacity(color: ET.Element | None) -> float:
+    alpha = color.find("a:alpha", NS) if color is not None else None
+    value = _int_attr(alpha, "val")
+    return 1 if value is None else value / 100000
+
+
+def _chart_line_contract(line: ET.Element | None, path: str) -> str | dict[str, Any]:
+    if line is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} line is missing")
+    if line.find("a:noFill", NS) is not None:
+        return "noFill"
+    color = line.find("a:solidFill/a:srgbClr", NS)
+    width = _int_attr(line, "w")
+    dash = line.find("a:prstDash", NS)
+    dash_value = dash.get("val") if dash is not None else None
+    normalized_dash = {
+        "solid": "solid",
+        "dash": "dash",
+        "dot": "dot",
+        "dashDot": "dashDot",
+    }.get(dash_value)
+    if width is None or width < 1 or normalized_dash is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} line width or dash is invalid")
+    return {
+        "color": _chart_rgb(color, f"{path}.color"),
+        "width": width,
+        "dash": normalized_dash,
+        "opacity": _chart_opacity(color),
+    }
+
+
+def _chart_area_contract(owner: ET.Element, path: str) -> dict[str, Any]:
+    properties = owner.find("c:spPr", NS)
+    if properties is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} spPr is missing")
+    if properties.find("a:noFill", NS) is not None:
+        fill: str | dict[str, Any] = "noFill"
+    else:
+        color = properties.find("a:solidFill/a:srgbClr", NS)
+        fill = {
+            "type": "solid",
+            "color": _chart_rgb(color, f"{path}.fill.color"),
+            "opacity": _chart_opacity(color),
+        }
+    return {
+        "fill": fill,
+        "line": _chart_line_contract(properties.find("a:ln", NS), f"{path}.line"),
+    }
+
+
+def _chart_text_style(owner: ET.Element | None, path: str) -> dict[str, Any]:
+    run = owner.find("c:txPr/a:p/a:pPr/a:defRPr", NS) if owner is not None else None
+    if run is None and owner is not None:
+        run = owner.find("c:txPr/a:p/a:endParaRPr", NS)
+    if run is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} text properties are missing")
+    font_node = run.find("a:latin", NS)
+    if font_node is None:
+        font_node = run.find("a:ea", NS)
+    font_name = font_node.get("typeface") if font_node is not None else None
+    color = run.find("a:solidFill/a:srgbClr", NS)
+    size = _int_attr(run, "sz")
+    if not isinstance(font_name, str) or not font_name or size is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} font name or size is missing")
+    return {
+        "font_name": font_name,
+        "font_size": size / 100,
+        "bold": run.get("b", "0") in {"1", "true"},
+        "color": _chart_rgb(color, f"{path}.color"),
+    }
+
+
+def _chart_data_labels(plot: ET.Element, *, cartesian: bool) -> dict[str, Any]:
+    labels = plot.find("c:dLbls", NS)
+    if labels is None and cartesian:
+        series_labels = plot.findall("c:ser/c:dLbls", NS)
+        if series_labels:
+            canonical = ET.tostring(series_labels[0], encoding="unicode")
+            if any(
+                ET.tostring(item, encoding="unicode") != canonical
+                for item in series_labels[1:]
+            ):
+                raise ValidationError(
+                    "NATIVE_CHART_CONTRACT_MISMATCH",
+                    "series-level data label contracts differ",
+                )
+            labels = series_labels[0]
+    position = labels.find("c:dLblPos", NS) if labels is not None else None
+    number_format = labels.find("c:numFmt", NS) if labels is not None else None
+    result = {
+        "enabled": labels is not None,
+        "show_category": _chart_bool(labels, "showCatName"),
+        "show_value": _chart_bool(labels, "showVal"),
+        "position": {
+            "above": "above",
+            "t": "above",
+            "below": "below",
+            "b": "below",
+            "bestFit": "best_fit",
+            "ctr": "center",
+            "inBase": "inside_base",
+            "inEnd": "inside_end",
+            "l": "left",
+            "outEnd": "outside_end",
+            "r": "right",
+        }.get(position.get("val") if position is not None else None),
+        "number_format": number_format.get("formatCode") if number_format is not None else None,
+    }
+    if cartesian:
+        result["show_series_name"] = _chart_bool(labels, "showSerName")
+    else:
+        result["show_percentage"] = _chart_bool(labels, "showPercent")
+    if labels is not None:
+        if cartesian:
+            result.update(_chart_text_style(labels, "data_labels"))
+        else:
+            run = labels.find("c:txPr/a:p/a:pPr/a:defRPr", NS)
+            color = run.find("a:solidFill/a:srgbClr", NS) if run is not None else None
+            size = _int_attr(run, "sz")
+            if run is None or size is None:
+                raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", "data_labels size is missing")
+            result.update(
+                {
+                    "font_size": size / 100,
+                    "bold": run.get("b", "0") in {"1", "true"},
+                    "color": _chart_rgb(color, "data_labels.color"),
+                }
+            )
+    return result
+
+
+def _chart_axis_contract(
+    axis: ET.Element,
+    *,
+    category: bool,
+    path: str,
+) -> dict[str, Any]:
+    position = axis.find("c:axPos", NS)
+    axis_position = {
+        "t": "top",
+        "b": "bottom",
+        "l": "left",
+        "r": "right",
+    }.get(position.get("val") if position is not None else None)
+    result = {
+        "visible": not _chart_bool(axis, "delete"),
+        "position": axis_position,
+        **_chart_text_style(axis, path),
+        "line": _chart_line_contract(axis.find("c:spPr/a:ln", NS), f"{path}.line"),
+    }
+    if category:
+        orientation = axis.find("c:scaling/c:orientation", NS)
+        label_position = axis.find("c:tickLblPos", NS)
+        result.update(
+            {
+                "reverse_order": orientation is not None and orientation.get("val") == "maxMin",
+                "label_position": {
+                    "nextTo": "next_to_axis",
+                    "low": "low",
+                    "high": "high",
+                    "none": "none",
+                }.get(label_position.get("val") if label_position is not None else None),
+            }
+        )
+        return result
+    number_format = axis.find("c:numFmt", NS)
+    gridlines = axis.find("c:majorGridlines", NS)
+    result.update(
+        {
+            "minimum": _float_attr(axis.find("c:scaling/c:min", NS), "val"),
+            "maximum": _float_attr(axis.find("c:scaling/c:max", NS), "val"),
+            "major_unit": _float_attr(axis.find("c:majorUnit", NS), "val"),
+            "number_format": number_format.get("formatCode") if number_format is not None else None,
+            "major_gridlines": {
+                "visible": gridlines is not None,
+                "line": (
+                    _chart_line_contract(gridlines.find("c:spPr/a:ln", NS), f"{path}.major_gridlines.line")
+                    if gridlines is not None
+                    else None
+                ),
+            },
+        }
+    )
+    return result
+
+
+def _chart_legend_contract(chart_root: ET.Element) -> dict[str, Any]:
+    legend = chart_root.find("c:chart/c:legend", NS)
+    if legend is None:
+        return {"enabled": False}
+    position = legend.find("c:legendPos", NS)
+    overlay = legend.find("c:overlay", NS)
+    return {
+        "enabled": True,
+        "position": {
+            "t": "top",
+            "b": "bottom",
+            "l": "left",
+            "r": "right",
+        }.get(position.get("val") if position is not None else None),
+        "overlay": overlay is not None and overlay.get("val", "0") in {"1", "true"},
+        **_chart_text_style(legend, "legend"),
+    }
+
+
 def _native_chart_contract(
     archive: zipfile.ZipFile,
     names: set[str],
@@ -1409,7 +1660,7 @@ def _native_chart_contract(
     frame: ET.Element,
     slide_relationships: dict[str, tuple[str, str, bool]],
 ) -> dict[str, Any]:
-    """Extract one native pie/doughnut chart and its embedded workbook identity."""
+    """Extract one supported native chart and its embedded workbook identity."""
     identity = frame.find("p:nvGraphicFramePr/p:cNvPr", NS)
     object_name = identity.get("name") if identity is not None else None
     chart_ref = frame.find("a:graphic/a:graphicData/c:chart", NS)
@@ -1427,82 +1678,17 @@ def _native_chart_contract(
         )
     chart_part = relationship[0]
     chart_root = _xml(archive, chart_part)
-    pie = chart_root.find("c:chart/c:plotArea/c:pieChart", NS)
-    doughnut = chart_root.find("c:chart/c:plotArea/c:doughnutChart", NS)
-    if (pie is None) == (doughnut is None):
-        raise ValidationError(
-            "NATIVE_CHART_CONTRACT_MISMATCH",
-            f"{chart_part} must contain exactly one pieChart or doughnutChart",
-        )
-    plot = doughnut if doughnut is not None else pie
+    plot_candidates = [
+        ("pie", chart_root.find("c:chart/c:plotArea/c:pieChart", NS)),
+        ("doughnut", chart_root.find("c:chart/c:plotArea/c:doughnutChart", NS)),
+        ("bar_plot", chart_root.find("c:chart/c:plotArea/c:barChart", NS)),
+        ("line", chart_root.find("c:chart/c:plotArea/c:lineChart", NS)),
+    ]
+    plots = [(name, node) for name, node in plot_candidates if node is not None]
+    if len(plots) != 1:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} must contain exactly one supported plot")
+    plot_kind, plot = plots[0]
     assert plot is not None
-    chart_type = "doughnut" if doughnut is not None else "pie"
-    series = plot.findall("c:ser", NS)
-    if len(series) != 1:
-        raise ValidationError(
-            "NATIVE_CHART_CONTRACT_MISMATCH",
-            f"{chart_part} must contain exactly one series",
-        )
-    categories = _chart_points(series[0], f"{chart_part}.categories", numeric=False)
-    values = _chart_points(series[0], f"{chart_part}.values", numeric=True)
-    if len(categories) != len(values) or len(values) < 2:
-        raise ValidationError(
-            "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice caches are misaligned"
-        )
-    colors: dict[int, str] = {}
-    for point in series[0].findall("c:dPt", NS):
-        index_node = point.find("c:idx", NS)
-        index = _int_attr(index_node, "val")
-        color = point.find("c:spPr/a:solidFill/a:srgbClr", NS)
-        value = color.get("val") if color is not None else None
-        if (
-            index is None
-            or index in colors
-            or not isinstance(value, str)
-            or re.fullmatch(r"[0-9A-Fa-f]{6}", value) is None
-        ):
-            raise ValidationError(
-                "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice color is invalid"
-            )
-        colors[index] = f"#{value.upper()}"
-    if set(colors) != set(range(len(values))):
-        raise ValidationError(
-            "NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} requires one explicit color per slice"
-        )
-
-    angle = _int_attr(plot.find("c:firstSliceAng", NS), "val")
-    hole_size = _int_attr(plot.find("c:holeSize", NS), "val")
-    labels_node = plot.find("c:dLbls", NS)
-    position_node = labels_node.find("c:dLblPos", NS) if labels_node is not None else None
-    number_format = labels_node.find("c:numFmt", NS) if labels_node is not None else None
-    label_run = labels_node.find("c:txPr/a:p/a:pPr/a:defRPr", NS) if labels_node is not None else None
-    label_color = (
-        label_run.find("a:solidFill/a:srgbClr", NS) if label_run is not None else None
-    )
-    labels = {
-        "enabled": labels_node is not None,
-        "show_category": _chart_bool(labels_node, "showCatName"),
-        "show_value": _chart_bool(labels_node, "showVal"),
-        "show_percentage": _chart_bool(labels_node, "showPercent"),
-        "position": {
-            "bestFit": "best_fit",
-            "ctr": "center",
-            "inEnd": "inside_end",
-            "outEnd": "outside_end",
-        }.get(position_node.get("val") if position_node is not None else None),
-        "number_format": number_format.get("formatCode") if number_format is not None else None,
-        "font_size": (
-            _int_attr(label_run, "sz") / 100
-            if _int_attr(label_run, "sz") is not None
-            else None
-        ),
-        "bold": label_run is not None and label_run.get("b", "0") in {"1", "true"},
-        "color": (
-            f"#{label_color.get('val').upper()}"
-            if label_color is not None and label_color.get("val")
-            else None
-        ),
-    }
 
     chart_rels_part = _slide_rels_part(chart_part)
     chart_relationships = (
@@ -1524,21 +1710,310 @@ def _native_chart_contract(
         if isinstance(object_name, str) and object_name.startswith("ia:")
         else None
     )
-    return {
+    common = {
         "element_id": element_id,
         "object_name": object_name,
         "slide_part": slide_part,
         "chart_part": chart_part,
         "embedded_workbook_part": workbook_part,
-        "chart_type": chart_type,
-        "slices": [
-            {"category": categories[index], "value": values[index], "color": colors[index]}
-            for index in range(len(values))
-        ],
-        "data_labels": labels,
-        "first_slice_angle": angle,
-        "hole_size": hole_size,
     }
+
+    if plot_kind in {"pie", "doughnut"}:
+        series = plot.findall("c:ser", NS)
+        if len(series) != 1:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} must contain exactly one pie series")
+        categories = _chart_points(series[0], f"{chart_part}.categories", numeric=False)
+        values = _chart_points(series[0], f"{chart_part}.values", numeric=True)
+        if len(categories) != len(values) or len(values) < 2:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice caches are misaligned")
+        colors: dict[int, str] = {}
+        for point in series[0].findall("c:dPt", NS):
+            index = _int_attr(point.find("c:idx", NS), "val")
+            if index is None or index in colors:
+                raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} slice index is invalid")
+            colors[index] = _chart_rgb(point.find("c:spPr/a:solidFill/a:srgbClr", NS), f"{chart_part}.slice.color")
+        if set(colors) != set(range(len(values))):
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} requires one explicit color per slice")
+        return {
+            **common,
+            "chart_type": plot_kind,
+            "slices": [
+                {"category": categories[index], "value": values[index], "color": colors[index]}
+                for index in range(len(values))
+            ],
+            "data_labels": _chart_data_labels(plot, cartesian=False),
+            "first_slice_angle": _int_attr(plot.find("c:firstSliceAng", NS), "val"),
+            "hole_size": _int_attr(plot.find("c:holeSize", NS), "val"),
+        }
+
+    if plot_kind == "bar_plot":
+        direction_node = plot.find("c:barDir", NS)
+        direction = direction_node.get("val") if direction_node is not None else None
+        chart_type = {"col": "column", "bar": "bar"}.get(direction)
+        grouping_node = plot.find("c:grouping", NS)
+        grouping = {
+            "clustered": "clustered",
+            "stacked": "stacked",
+            "percentStacked": "percent_stacked",
+        }.get(grouping_node.get("val") if grouping_node is not None else None)
+        if chart_type is None or grouping is None:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} bar direction or grouping is invalid")
+    else:
+        chart_type = "line"
+        grouping_node = plot.find("c:grouping", NS)
+        grouping = grouping_node.get("val") if grouping_node is not None else None
+        if grouping != "standard":
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} line grouping must be standard")
+
+    series_nodes = plot.findall("c:ser", NS)
+    if not series_nodes:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} requires at least one series")
+    categories: list[Any] | None = None
+    extracted_series: list[dict[str, Any]] = []
+    for index, series in enumerate(series_nodes):
+        current_categories = _chart_points(series, f"{chart_part}.series[{index}].categories", numeric=False)
+        values = _chart_sparse_numeric_points(series, f"{chart_part}.series[{index}].values")
+        if len(current_categories) != len(values):
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} series caches are misaligned")
+        if categories is None:
+            categories = current_categories
+        elif categories != current_categories:
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} series categories differ")
+        if chart_type in {"column", "bar"}:
+            extracted_series.append(
+                {
+                    "name": _chart_series_name(series),
+                    "values": values,
+                    "color": _chart_rgb(series.find("c:spPr/a:solidFill/a:srgbClr", NS), f"{chart_part}.series[{index}].color"),
+                }
+            )
+            continue
+        line = series.find("c:spPr/a:ln", NS)
+        line_contract = _chart_line_contract(line, f"{chart_part}.series[{index}].line")
+        if not isinstance(line_contract, dict):
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} line series cannot use noFill")
+        marker = series.find("c:marker", NS)
+        marker_symbol = marker.find("c:symbol", NS) if marker is not None else None
+        marker_size = _int_attr(marker.find("c:size", NS) if marker is not None else None, "val")
+        marker_line = marker.find("c:spPr/a:ln", NS) if marker is not None else None
+        marker_line_contract = _chart_line_contract(marker_line, f"{chart_part}.series[{index}].marker.line")
+        if not isinstance(marker_line_contract, dict):
+            raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} marker line cannot use noFill")
+        extracted_series.append(
+            {
+                "name": _chart_series_name(series),
+                "values": values,
+                "color": line_contract["color"],
+                "line": {"width": line_contract["width"], "dash": line_contract["dash"]},
+                "marker": {
+                    "style": marker_symbol.get("val") if marker_symbol is not None else None,
+                    "size": marker_size,
+                    "fill": _chart_rgb(marker.find("c:spPr/a:solidFill/a:srgbClr", NS) if marker is not None else None, f"{chart_part}.series[{index}].marker.fill"),
+                    "line_color": marker_line_contract["color"],
+                    "line_width": marker_line_contract["width"],
+                },
+                "smooth": _chart_bool(series, "smooth"),
+            }
+        )
+
+    category_axes = chart_root.findall("c:chart/c:plotArea/c:catAx", NS)
+    value_axes = chart_root.findall("c:chart/c:plotArea/c:valAx", NS)
+    if len(category_axes) != 1 or len(value_axes) != 1:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} requires one category axis and one value axis")
+    plot_axis_ids = [_int_attr(node, "val") for node in plot.findall("c:axId", NS)]
+    category_axis_id = _int_attr(category_axes[0].find("c:axId", NS), "val")
+    value_axis_id = _int_attr(value_axes[0].find("c:axId", NS), "val")
+    category_cross_id = _int_attr(category_axes[0].find("c:crossAx", NS), "val")
+    value_cross_id = _int_attr(value_axes[0].find("c:crossAx", NS), "val")
+    if (
+        category_axis_id is None
+        or value_axis_id is None
+        or len(plot_axis_ids) != 2
+        or set(plot_axis_ids) != {category_axis_id, value_axis_id}
+        or category_cross_id != value_axis_id
+        or value_cross_id != category_axis_id
+    ):
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} axis IDs or cross-axis bindings are invalid")
+    chart_node = chart_root.find("c:chart", NS)
+    blanks = chart_node.find("c:dispBlanksAs", NS) if chart_node is not None else None
+    plot_area = chart_root.find("c:chart/c:plotArea", NS)
+    if plot_area is None:
+        raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{chart_part} plot area is missing")
+    result = {
+        **common,
+        "chart_type": chart_type,
+        "grouping": grouping,
+        "categories": categories or [],
+        "series": extracted_series,
+        "axes": {
+            "category": _chart_axis_contract(category_axes[0], category=True, path="category_axis"),
+            "value": _chart_axis_contract(value_axes[0], category=False, path="value_axis"),
+        },
+        "legend": _chart_legend_contract(chart_root),
+        "data_labels": _chart_data_labels(plot, cartesian=True),
+        "display_blanks_as": blanks.get("val") if blanks is not None else None,
+        "chart_area": _chart_area_contract(chart_root, "chart_area"),
+        "plot_area": _chart_area_contract(plot_area, "plot_area"),
+    }
+    if chart_type in {"column", "bar"}:
+        result["gap_width"] = _int_attr(plot.find("c:gapWidth", NS), "val")
+        result["overlap"] = _int_attr(plot.find("c:overlap", NS), "val")
+    return result
+
+
+def _expected_chart_line(value: Any) -> Any:
+    if value == "noFill":
+        return value
+    if not isinstance(value, dict):
+        return value
+    return {
+        "color": str(value.get("color", "")).upper(),
+        "width": value.get("width"),
+        "dash": value.get("dash"),
+        "opacity": value.get("opacity"),
+    }
+
+
+def _expected_chart_area(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    fill = value.get("fill")
+    normalized_fill = (
+        fill
+        if fill == "noFill" or not isinstance(fill, dict)
+        else {
+            "type": fill.get("type"),
+            "color": str(fill.get("color", "")).upper(),
+            "opacity": fill.get("opacity"),
+        }
+    )
+    return {
+        "fill": normalized_fill,
+        "line": _expected_chart_line(value.get("line")),
+    }
+
+
+def _expected_chart_font(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "font_name": value.get("font_name"),
+        "font_size": value.get("font_size"),
+        "bold": (
+            value.get("bold")
+            if "bold" in value
+            else value.get("font_weight", 0) >= 600
+        ),
+        "color": str(value.get("color", "")).upper(),
+    }
+
+
+def _observable_cartesian_labels(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "show_category": value.get("show_category"),
+        "show_series_name": value.get("show_series_name"),
+        "show_value": value.get("show_value"),
+        "position": value.get("position"),
+        "number_format": value.get("number_format"),
+        **_expected_chart_font(value),
+    }
+
+
+def _observable_chart_legend(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "position": value.get("position"),
+        "overlay": value.get("overlay"),
+        **_expected_chart_font(value),
+    }
+
+
+def _expected_cartesian_chart(element: dict[str, Any]) -> dict[str, Any]:
+    content = element.get("content", {})
+    style = element.get("style", {})
+    chart_type = content.get("chart_type")
+    series: list[dict[str, Any]] = []
+    for item in content.get("series", []):
+        if not isinstance(item, dict):
+            continue
+        normalized: dict[str, Any] = {
+            "name": item.get("name"),
+            "values": [
+                None if value is None else float(value)
+                for value in item.get("values", [])
+            ],
+            "color": str(item.get("color", "")).upper(),
+        }
+        if chart_type == "line":
+            line = item.get("line", {})
+            marker = item.get("marker", {})
+            normalized.update(
+                {
+                    "line": {
+                        "width": line.get("width"),
+                        "dash": line.get("dash"),
+                    },
+                    "marker": {
+                        "style": marker.get("style"),
+                        "size": marker.get("size"),
+                        "fill": str(marker.get("fill", "")).upper(),
+                        "line_color": str(marker.get("line_color", "")).upper(),
+                        "line_width": marker.get("line_width"),
+                    },
+                    "smooth": item.get("smooth"),
+                }
+            )
+        series.append(normalized)
+    axes = content.get("axes", {})
+    category = axes.get("category", {}) if isinstance(axes, dict) else {}
+    value = axes.get("value", {}) if isinstance(axes, dict) else {}
+    gridlines = value.get("major_gridlines", {}) if isinstance(value, dict) else {}
+    expected: dict[str, Any] = {
+        "chart_type": chart_type,
+        "grouping": content.get("grouping"),
+        "categories": content.get("categories"),
+        "series": series,
+        "axes": {
+            "category": {
+                "visible": category.get("visible"),
+                "position": category.get("position"),
+                "reverse_order": category.get("reverse_order"),
+                "label_position": category.get("label_position"),
+                **_expected_chart_font(category),
+                "line": _expected_chart_line(category.get("line")),
+            },
+            "value": {
+                "visible": value.get("visible"),
+                "position": value.get("position"),
+                "minimum": None if value.get("minimum") is None else float(value["minimum"]),
+                "maximum": None if value.get("maximum") is None else float(value["maximum"]),
+                "major_unit": None if value.get("major_unit") is None else float(value["major_unit"]),
+                "number_format": value.get("number_format"),
+                **_expected_chart_font(value),
+                "line": _expected_chart_line(value.get("line")),
+                "major_gridlines": {
+                    "visible": gridlines.get("visible"),
+                    "line": (
+                        _expected_chart_line(gridlines.get("line"))
+                        if gridlines.get("visible") is True
+                        else None
+                    ),
+                },
+            },
+        },
+        "legend": _observable_chart_legend(content.get("legend")),
+        "data_labels": _observable_cartesian_labels(content.get("data_labels")),
+        "display_blanks_as": content.get("display_blanks_as"),
+        "chart_area": _expected_chart_area(style.get("chart_area")),
+        "plot_area": _expected_chart_area(style.get("plot_area")),
+    }
+    if chart_type in {"column", "bar"}:
+        expected["gap_width"] = style.get("gap_width")
+        expected["overlap"] = style.get("overlap")
+    return expected
 
 
 def _validate_native_chart_contracts(
@@ -1579,6 +2054,25 @@ def _validate_native_chart_contracts(
             )
         content = element.get("content", {})
         style = element.get("style", {})
+        if content.get("chart_type") in {"column", "bar", "line"}:
+            expected_cartesian = _expected_cartesian_chart(element)
+            observed_cartesian = {
+                key: observed.get(key) for key in expected_cartesian
+            }
+            observed_cartesian["legend"] = _observable_chart_legend(
+                observed.get("legend")
+            )
+            observed_cartesian["data_labels"] = _observable_cartesian_labels(
+                observed.get("data_labels")
+            )
+            if observed_cartesian != expected_cartesian:
+                _report_error(
+                    result,
+                    "NATIVE_CHART_CONTRACT_MISMATCH",
+                    f"elements.{element_id}",
+                    "native cartesian chart data, grouping, series, axes, legend, labels, or style differs from the spec",
+                )
+            continue
         expected_slices = [
             {
                 "category": item.get("category"),

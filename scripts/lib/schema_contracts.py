@@ -29,7 +29,7 @@ CANONICAL_VALUES = {
     ),
     "picture_mode": frozenset({"contain", "cover", "none"}),
     "bullet_type": frozenset({"char", "auto_number", "picture"}),
-    "chart_type": frozenset({"pie", "doughnut"}),
+    "chart_type": frozenset({"pie", "doughnut", "column", "bar", "line"}),
 }
 BUILDABLE_KINDS = frozenset(
     {"text", "shape", "line", "table", "matrix", "status", "picture", "icon", "chart"}
@@ -96,7 +96,16 @@ KIND_STYLE_FIELDS = {
     "status": frozenset({"rotation"}),
     "picture": frozenset({"rotation", "opacity"}),
     "icon": frozenset({"rotation", "opacity"}),
-    "chart": frozenset({"first_slice_angle", "hole_size"}),
+    "chart": frozenset(
+        {
+            "first_slice_angle",
+            "hole_size",
+            "gap_width",
+            "overlap",
+            "chart_area",
+            "plot_area",
+        }
+    ),
 }
 KIND_CONTENT_FIELDS = {
     "text": frozenset({"text"}),
@@ -111,7 +120,19 @@ KIND_CONTENT_FIELDS = {
     ),
     "picture": frozenset({"asset", "mode", "crop"}),
     "icon": frozenset({"asset", "mode", "crop"}),
-    "chart": frozenset({"chart_type", "slices", "data_labels"}),
+    "chart": frozenset(
+        {
+            "chart_type",
+            "slices",
+            "grouping",
+            "categories",
+            "series",
+            "axes",
+            "legend",
+            "data_labels",
+            "display_blanks_as",
+        }
+    ),
 }
 KIND_REQUIRED_STYLE_FIELDS = {
     "text": frozenset(),
@@ -122,7 +143,7 @@ KIND_REQUIRED_STYLE_FIELDS = {
     "status": frozenset(),
     "picture": frozenset(),
     "icon": frozenset(),
-    "chart": frozenset({"first_slice_angle"}),
+    "chart": frozenset(),
 }
 KIND_REQUIRED_CONTENT_FIELDS = {
     "text": frozenset({"text"}),
@@ -133,7 +154,7 @@ KIND_REQUIRED_CONTENT_FIELDS = {
     "status": frozenset({"part_defaults"}),
     "picture": frozenset({"asset", "mode", "crop"}),
     "icon": frozenset({"asset", "mode", "crop"}),
-    "chart": frozenset({"chart_type", "slices", "data_labels"}),
+    "chart": frozenset({"chart_type", "data_labels"}),
 }
 CHART_SLICE_FIELDS = frozenset({"category", "value", "color", "value_source"})
 CHART_DATA_LABEL_FIELDS = frozenset(
@@ -153,6 +174,75 @@ CHART_LABEL_POSITIONS = frozenset(
     {"best_fit", "center", "inside_end", "outside_end"}
 )
 CHART_VALUE_SOURCES = frozenset({"explicit", "derived_complement"})
+CHART_GROUPINGS = frozenset({"clustered", "stacked", "percent_stacked", "standard"})
+CHART_MARKER_STYLES = frozenset({"none", "circle", "square", "diamond", "triangle"})
+CHART_LEGEND_POSITIONS = frozenset({"top", "bottom", "left", "right"})
+CHART_DISPLAY_BLANKS = frozenset({"gap"})
+CHART_AXIS_POSITIONS = frozenset({"top", "bottom", "left", "right"})
+CHART_AXIS_LABEL_POSITIONS = frozenset({"next_to_axis", "low", "high", "none"})
+CHART_LINE_DASHES = frozenset({"solid", "dash", "dot", "dashDot"})
+CARTESIAN_DATA_LABEL_FIELDS = frozenset(
+    {
+        "enabled",
+        "show_category",
+        "show_series_name",
+        "show_value",
+        "position",
+        "number_format",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "color",
+    }
+)
+CHART_SERIES_FIELDS = frozenset(
+    {"name", "values", "color", "line", "marker", "smooth"}
+)
+CHART_SERIES_LINE_FIELDS = frozenset({"width", "dash"})
+CHART_MARKER_FIELDS = frozenset(
+    {"style", "size", "fill", "line_color", "line_width"}
+)
+CHART_CATEGORY_AXIS_FIELDS = frozenset(
+    {
+        "visible",
+        "position",
+        "reverse_order",
+        "label_position",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "color",
+        "line",
+    }
+)
+CHART_VALUE_AXIS_FIELDS = frozenset(
+    {
+        "visible",
+        "position",
+        "minimum",
+        "maximum",
+        "major_unit",
+        "number_format",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "color",
+        "line",
+        "major_gridlines",
+    }
+)
+CHART_GRIDLINES_FIELDS = frozenset({"visible", "line"})
+CHART_LEGEND_FIELDS = frozenset(
+    {
+        "enabled",
+        "position",
+        "overlay",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "color",
+    }
+)
 PART_FIELDS = frozenset({"part_id", "slide_bbox", "style", "content"})
 PART_STYLE_FIELDS = frozenset(
     {
@@ -901,6 +991,109 @@ _RECORDS: dict[str, dict[str, Any]] = {
             "color": RGB,
         }
     ),
+    "CartesianDataLabels": _object(
+        {
+            "enabled": BOOLEAN,
+            "show_category": BOOLEAN,
+            "show_series_name": BOOLEAN,
+            "show_value": BOOLEAN,
+            "position": {
+                "enum": [
+                    "above",
+                    "below",
+                    "center",
+                    "inside_base",
+                    "inside_end",
+                    "left",
+                    "outside_end",
+                    "right",
+                ]
+            },
+            "number_format": NON_EMPTY_STRING,
+            "font_name": NON_EMPTY_STRING,
+            "font_size": POSITIVE_NUMBER,
+            "font_weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "color": RGB,
+        }
+    ),
+    "ChartSeriesLine": _object(
+        {
+            "width": {"type": "integer", "minimum": 1, "maximum": 20116800},
+            "dash": {"enum": sorted(CHART_LINE_DASHES)},
+        }
+    ),
+    "ChartMarker": _object(
+        {
+            "style": {"enum": sorted(CHART_MARKER_STYLES)},
+            "size": {"type": "integer", "minimum": 2, "maximum": 72},
+            "fill": RGB,
+            "line_color": RGB,
+            "line_width": {"type": "integer", "minimum": 1, "maximum": 20116800},
+        }
+    ),
+    "ChartSeries": _object(
+        {
+            "name": NULLABLE_STRING,
+            "values": _array({"type": ["number", "null"]}, minimum=1),
+            "color": RGB,
+            "line": _ref("ChartSeriesLine"),
+            "marker": _ref("ChartMarker"),
+            "smooth": BOOLEAN,
+        },
+        required={"name", "values", "color"},
+    ),
+    "ChartGridlines": _object(
+        {
+            "visible": BOOLEAN,
+            "line": {"oneOf": [{"const": "noFill"}, _ref("Stroke")]},
+        }
+    ),
+    "ChartCategoryAxis": _object(
+        {
+            "visible": BOOLEAN,
+            "position": {"enum": sorted(CHART_AXIS_POSITIONS)},
+            "reverse_order": BOOLEAN,
+            "label_position": {"enum": sorted(CHART_AXIS_LABEL_POSITIONS)},
+            "font_name": NON_EMPTY_STRING,
+            "font_size": POSITIVE_NUMBER,
+            "font_weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "color": RGB,
+            "line": {"oneOf": [{"const": "noFill"}, _ref("Stroke")]},
+        }
+    ),
+    "ChartValueAxis": _object(
+        {
+            "visible": BOOLEAN,
+            "position": {"enum": sorted(CHART_AXIS_POSITIONS)},
+            "minimum": {"type": ["number", "null"]},
+            "maximum": {"type": ["number", "null"]},
+            "major_unit": {"type": ["number", "null"]},
+            "number_format": NON_EMPTY_STRING,
+            "font_name": NON_EMPTY_STRING,
+            "font_size": POSITIVE_NUMBER,
+            "font_weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "color": RGB,
+            "line": {"oneOf": [{"const": "noFill"}, _ref("Stroke")]},
+            "major_gridlines": _ref("ChartGridlines"),
+        }
+    ),
+    "ChartAxes": _object(
+        {
+            "category": _ref("ChartCategoryAxis"),
+            "value": _ref("ChartValueAxis"),
+        }
+    ),
+    "ChartLegend": _object(
+        {
+            "enabled": BOOLEAN,
+            "position": {"enum": sorted(CHART_LEGEND_POSITIONS)},
+            "overlay": BOOLEAN,
+            "font_name": NON_EMPTY_STRING,
+            "font_size": POSITIVE_NUMBER,
+            "font_weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "color": RGB,
+        }
+    ),
     "Region": _object(
         {
             "region_id": NON_EMPTY_STRING,
@@ -1005,6 +1198,13 @@ _FILL = {
         _ref("LinearGradientFill"),
     ]
 }
+_CHART_FILL = {
+    "oneOf": [
+        {"const": "noFill"},
+        _ref("SolidFill"),
+    ]
+}
+_CHART_LINE = {"oneOf": [{"const": "noFill"}, _ref("Stroke")]}
 _EFFECTS = {"oneOf": [{"const": "none"}, _ref("Effects")]}
 _RECORDS["TextStyle"] = _object(
     {
@@ -1065,10 +1265,20 @@ for _kind in ("picture", "icon"):
         required=KIND_REQUIRED_CONTENT_FIELDS[_kind],
     )
 
+_RECORDS["ChartAreaStyle"] = _object(
+    {
+        "fill": _CHART_FILL,
+        "line": _CHART_LINE,
+    }
+)
 _RECORDS["ChartStyle"] = _object(
     {
         "first_slice_angle": {"type": "integer", "minimum": 0, "maximum": 359},
         "hole_size": {"type": "integer", "minimum": 10, "maximum": 90},
+        "gap_width": {"type": "integer", "minimum": 0, "maximum": 500},
+        "overlap": {"type": "integer", "minimum": -100, "maximum": 100},
+        "chart_area": _ref("ChartAreaStyle"),
+        "plot_area": _ref("ChartAreaStyle"),
     },
     required=KIND_REQUIRED_STYLE_FIELDS["chart"],
 )
@@ -1076,7 +1286,15 @@ _RECORDS["ChartContent"] = _object(
     {
         "chart_type": {"enum": sorted(CANONICAL_VALUES["chart_type"])},
         "slices": _array(_ref("ChartSlice"), minimum=2),
-        "data_labels": _ref("ChartDataLabels"),
+        "grouping": {"enum": sorted(CHART_GROUPINGS)},
+        "categories": _array(NON_EMPTY_STRING, minimum=1),
+        "series": _array(_ref("ChartSeries"), minimum=1),
+        "axes": _ref("ChartAxes"),
+        "legend": _ref("ChartLegend"),
+        "data_labels": {
+            "oneOf": [_ref("ChartDataLabels"), _ref("CartesianDataLabels")]
+        },
+        "display_blanks_as": {"enum": sorted(CHART_DISPLAY_BLANKS)},
     },
     required=KIND_REQUIRED_CONTENT_FIELDS["chart"],
 )

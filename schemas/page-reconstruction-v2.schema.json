@@ -253,17 +253,236 @@
       ],
       "type": "object"
     },
+    "CartesianDataLabels": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "font_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "font_size": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "font_weight": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "number_format": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "position": {
+          "enum": [
+            "above",
+            "below",
+            "center",
+            "inside_base",
+            "inside_end",
+            "left",
+            "outside_end",
+            "right"
+          ]
+        },
+        "show_category": {
+          "type": "boolean"
+        },
+        "show_series_name": {
+          "type": "boolean"
+        },
+        "show_value": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "color",
+        "enabled",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "number_format",
+        "position",
+        "show_category",
+        "show_series_name",
+        "show_value"
+      ],
+      "type": "object"
+    },
+    "ChartAreaStyle": {
+      "additionalProperties": false,
+      "properties": {
+        "fill": {
+          "oneOf": [
+            {
+              "const": "noFill"
+            },
+            {
+              "$ref": "#/$defs/SolidFill"
+            }
+          ]
+        },
+        "line": {
+          "oneOf": [
+            {
+              "const": "noFill"
+            },
+            {
+              "$ref": "#/$defs/Stroke"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fill",
+        "line"
+      ],
+      "type": "object"
+    },
+    "ChartAxes": {
+      "additionalProperties": false,
+      "properties": {
+        "category": {
+          "$ref": "#/$defs/ChartCategoryAxis"
+        },
+        "value": {
+          "$ref": "#/$defs/ChartValueAxis"
+        }
+      },
+      "required": [
+        "category",
+        "value"
+      ],
+      "type": "object"
+    },
+    "ChartCategoryAxis": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "font_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "font_size": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "font_weight": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "label_position": {
+          "enum": [
+            "high",
+            "low",
+            "next_to_axis",
+            "none"
+          ]
+        },
+        "line": {
+          "oneOf": [
+            {
+              "const": "noFill"
+            },
+            {
+              "$ref": "#/$defs/Stroke"
+            }
+          ]
+        },
+        "position": {
+          "enum": [
+            "bottom",
+            "left",
+            "right",
+            "top"
+          ]
+        },
+        "reverse_order": {
+          "type": "boolean"
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "color",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "label_position",
+        "line",
+        "position",
+        "reverse_order",
+        "visible"
+      ],
+      "type": "object"
+    },
     "ChartContent": {
       "additionalProperties": false,
       "properties": {
+        "axes": {
+          "$ref": "#/$defs/ChartAxes"
+        },
+        "categories": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
         "chart_type": {
           "enum": [
+            "bar",
+            "column",
             "doughnut",
+            "line",
             "pie"
           ]
         },
         "data_labels": {
-          "$ref": "#/$defs/ChartDataLabels"
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ChartDataLabels"
+            },
+            {
+              "$ref": "#/$defs/CartesianDataLabels"
+            }
+          ]
+        },
+        "display_blanks_as": {
+          "enum": [
+            "gap"
+          ]
+        },
+        "grouping": {
+          "enum": [
+            "clustered",
+            "percent_stacked",
+            "stacked",
+            "standard"
+          ]
+        },
+        "legend": {
+          "$ref": "#/$defs/ChartLegend"
+        },
+        "series": {
+          "items": {
+            "$ref": "#/$defs/ChartSeries"
+          },
+          "minItems": 1,
+          "type": "array"
         },
         "slices": {
           "items": {
@@ -275,8 +494,7 @@
       },
       "required": [
         "chart_type",
-        "data_labels",
-        "slices"
+        "data_labels"
       ],
       "type": "object"
     },
@@ -334,6 +552,178 @@
       ],
       "type": "object"
     },
+    "ChartGridlines": {
+      "additionalProperties": false,
+      "properties": {
+        "line": {
+          "oneOf": [
+            {
+              "const": "noFill"
+            },
+            {
+              "$ref": "#/$defs/Stroke"
+            }
+          ]
+        },
+        "visible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "line",
+        "visible"
+      ],
+      "type": "object"
+    },
+    "ChartLegend": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "font_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "font_size": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "font_weight": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "overlay": {
+          "type": "boolean"
+        },
+        "position": {
+          "enum": [
+            "bottom",
+            "left",
+            "right",
+            "top"
+          ]
+        }
+      },
+      "required": [
+        "color",
+        "enabled",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "overlay",
+        "position"
+      ],
+      "type": "object"
+    },
+    "ChartMarker": {
+      "additionalProperties": false,
+      "properties": {
+        "fill": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "line_color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "line_width": {
+          "maximum": 20116800,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "size": {
+          "maximum": 72,
+          "minimum": 2,
+          "type": "integer"
+        },
+        "style": {
+          "enum": [
+            "circle",
+            "diamond",
+            "none",
+            "square",
+            "triangle"
+          ]
+        }
+      },
+      "required": [
+        "fill",
+        "line_color",
+        "line_width",
+        "size",
+        "style"
+      ],
+      "type": "object"
+    },
+    "ChartSeries": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "line": {
+          "$ref": "#/$defs/ChartSeriesLine"
+        },
+        "marker": {
+          "$ref": "#/$defs/ChartMarker"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "smooth": {
+          "type": "boolean"
+        },
+        "values": {
+          "items": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "color",
+        "name",
+        "values"
+      ],
+      "type": "object"
+    },
+    "ChartSeriesLine": {
+      "additionalProperties": false,
+      "properties": {
+        "dash": {
+          "enum": [
+            "dash",
+            "dashDot",
+            "dot",
+            "solid"
+          ]
+        },
+        "width": {
+          "maximum": 20116800,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "dash",
+        "width"
+      ],
+      "type": "object"
+    },
     "ChartSlice": {
       "additionalProperties": false,
       "properties": {
@@ -369,8 +759,16 @@
     "ChartStyle": {
       "additionalProperties": false,
       "properties": {
+        "chart_area": {
+          "$ref": "#/$defs/ChartAreaStyle"
+        },
         "first_slice_angle": {
           "maximum": 359,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "gap_width": {
+          "maximum": 500,
           "minimum": 0,
           "type": "integer"
         },
@@ -378,10 +776,99 @@
           "maximum": 90,
           "minimum": 10,
           "type": "integer"
+        },
+        "overlap": {
+          "maximum": 100,
+          "minimum": -100,
+          "type": "integer"
+        },
+        "plot_area": {
+          "$ref": "#/$defs/ChartAreaStyle"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "ChartValueAxis": {
+      "additionalProperties": false,
+      "properties": {
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "type": "string"
+        },
+        "font_name": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "font_size": {
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "font_weight": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "line": {
+          "oneOf": [
+            {
+              "const": "noFill"
+            },
+            {
+              "$ref": "#/$defs/Stroke"
+            }
+          ]
+        },
+        "major_gridlines": {
+          "$ref": "#/$defs/ChartGridlines"
+        },
+        "major_unit": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "maximum": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "minimum": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "number_format": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "position": {
+          "enum": [
+            "bottom",
+            "left",
+            "right",
+            "top"
+          ]
+        },
+        "visible": {
+          "type": "boolean"
         }
       },
       "required": [
-        "first_slice_angle"
+        "color",
+        "font_name",
+        "font_size",
+        "font_weight",
+        "line",
+        "major_gridlines",
+        "major_unit",
+        "maximum",
+        "minimum",
+        "number_format",
+        "position",
+        "visible"
       ],
       "type": "object"
     },
@@ -2724,5 +3211,5 @@
   "description": "Structural schema contract only; semantic, path/hash, representation, renderer, visual, and final gates remain authoritative in public CLIs.",
   "title": "Editable PPT page reconstruction schema v2",
   "x-schema-contract-id": "page-reconstruction-v2",
-  "x-schema-contract-sha256": "50fb6dc8e9b930f4f606c1c0d138bc3a974ddc45dc407e7ab658eb77cfea355b"
+  "x-schema-contract-sha256": "f9155ce5e29ae739126a06d692679af216d5d9501e07fb37cf287c436f5877b9"
 }

@@ -20,8 +20,23 @@ from .geometry import (
     validate_bbox,
 )
 from .schema_contracts import (
+    CARTESIAN_DATA_LABEL_FIELDS,
+    CHART_AXIS_LABEL_POSITIONS,
+    CHART_AXIS_POSITIONS,
+    CHART_CATEGORY_AXIS_FIELDS,
     CHART_DATA_LABEL_FIELDS,
+    CHART_DISPLAY_BLANKS,
+    CHART_GRIDLINES_FIELDS,
+    CHART_GROUPINGS,
+    CHART_LEGEND_FIELDS,
+    CHART_LEGEND_POSITIONS,
+    CHART_LINE_DASHES,
+    CHART_MARKER_FIELDS,
+    CHART_MARKER_STYLES,
+    CHART_SERIES_FIELDS,
+    CHART_SERIES_LINE_FIELDS,
     CHART_SLICE_FIELDS,
+    CHART_VALUE_AXIS_FIELDS,
     ELEMENT_FIELDS,
     KIND_CONTENT_FIELDS,
     KIND_REQUIRED_CONTENT_FIELDS,
@@ -277,7 +292,7 @@ def _valid_rgb(value: Any) -> bool:
     )
 
 
-def validate_chart_contract(
+def _validate_pie_chart_contract(
     element: dict[str, Any], path: str | None = None
 ) -> list[ContractIssue]:
     """Validate the closed simple 2D single-series pie/doughnut contract."""
@@ -286,8 +301,27 @@ def validate_chart_contract(
     content = element.get("content")
     if not isinstance(style, dict) or not isinstance(content, dict):
         return [_issue("UNSUPPORTED_CAPABILITY", path, "chart style and content must be objects")]
+    issues = _unknown_field_issue(
+        f"{path}.style", style, frozenset({"first_slice_angle", "hole_size"})
+    )
+    if issues:
+        return issues
+    issues = _unknown_field_issue(
+        f"{path}.content",
+        content,
+        frozenset({"chart_type", "slices", "data_labels"}),
+    )
+    if issues:
+        return issues
 
     chart_type = content.get("chart_type")
+    if chart_type not in {"pie", "doughnut"}:
+        return [_issue(
+            "UNSUPPORTED_CAPABILITY",
+            f"{path}.content.chart_type",
+            "pie chart contract requires pie or doughnut",
+            f"chart.{chart_type}",
+        )]
     try:
         require_supported_value("chart_type", chart_type, f"{path}.content.chart_type")
     except ToolError as exc:
@@ -460,6 +494,358 @@ def validate_chart_contract(
             "chart.data_labels",
         )]
     return []
+
+
+def _chart_exact_fields(
+    path: str,
+    value: Any,
+    allowed: frozenset[str],
+    required: frozenset[str] | None = None,
+) -> list[ContractIssue]:
+    issues = _unknown_field_issue(path, value, allowed)
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    missing = sorted((required or allowed) - set(value))
+    if not missing:
+        return []
+    return [_issue(
+        "UNSUPPORTED_CAPABILITY",
+        path,
+        f"missing fields: {', '.join(missing)}",
+    )]
+
+
+def _validate_chart_line_style(value: Any, path: str) -> list[ContractIssue]:
+    if value == "noFill":
+        return []
+    allowed = frozenset({"color", "width", "dash", "opacity"})
+    issues = _chart_exact_fields(path, value, allowed)
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    if not _valid_rgb(value["color"]):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.color", "line color must be #RRGGBB")]
+    if type(value["width"]) is not int or not 1 <= value["width"] <= 20116800:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.width", "line width must be an integer from 1 to 20116800 EMU")]
+    if value["dash"] not in CHART_LINE_DASHES:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.dash", "unsupported chart line dash")]
+    opacity = value["opacity"]
+    if type(opacity) not in {int, float} or not math.isfinite(opacity) or not 0 <= opacity <= 1:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.opacity", "line opacity must be finite from 0 to 1")]
+    return []
+
+
+def _validate_chart_area(value: Any, path: str) -> list[ContractIssue]:
+    issues = _chart_exact_fields(path, value, frozenset({"fill", "line"}))
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    fill = value["fill"]
+    if fill != "noFill":
+        fill_issues = _chart_exact_fields(
+            f"{path}.fill", fill, frozenset({"type", "color", "opacity"})
+        )
+        if fill_issues:
+            return fill_issues
+        assert isinstance(fill, dict)
+        if fill["type"] != "solid":
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.fill.type", "chart area fill must be solid or noFill")]
+        if not _valid_rgb(fill["color"]):
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.fill.color", "fill color must be #RRGGBB")]
+        opacity = fill["opacity"]
+        if type(opacity) not in {int, float} or not math.isfinite(opacity) or not 0 <= opacity <= 1:
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.fill.opacity", "fill opacity must be finite from 0 to 1")]
+    return _validate_chart_line_style(value["line"], f"{path}.line")
+
+
+def _validate_chart_font(value: dict[str, Any], path: str) -> list[ContractIssue]:
+    if not isinstance(value["font_name"], str) or not value["font_name"]:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.font_name", "font_name must be a non-empty string")]
+    if not valid_font_size_pt(value["font_size"]):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.font_size", "font_size must be finite and from 1 to 4000 pt")]
+    if type(value["font_weight"]) is not int or not 1 <= value["font_weight"] <= 1000:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.font_weight", "font_weight must be an integer from 1 to 1000")]
+    if not _valid_rgb(value["color"]):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.color", "font color must be #RRGGBB")]
+    return []
+
+
+def _validate_cartesian_labels(
+    value: Any, path: str, chart_type: str
+) -> list[ContractIssue]:
+    issues = _chart_exact_fields(path, value, CARTESIAN_DATA_LABEL_FIELDS)
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    for field in ("enabled", "show_category", "show_series_name", "show_value"):
+        if type(value[field]) is not bool:
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.{field}", f"{field} must be boolean")]
+    positions = (
+        {"center", "inside_base", "inside_end", "outside_end"}
+        if chart_type in {"column", "bar"}
+        else {"above", "below", "center", "left", "right"}
+    )
+    if value["position"] not in positions:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.position", "unsupported data label position for chart type")]
+    if not isinstance(value["number_format"], str) or not value["number_format"]:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.number_format", "number_format must be a non-empty string")]
+    return _validate_chart_font(value, path)
+
+
+def _validate_chart_axes(
+    value: Any, path: str, chart_type: str, grouping: str
+) -> list[ContractIssue]:
+    issues = _chart_exact_fields(path, value, frozenset({"category", "value"}))
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    category = value["category"]
+    category_path = f"{path}.category"
+    issues = _chart_exact_fields(category_path, category, CHART_CATEGORY_AXIS_FIELDS)
+    if issues:
+        return issues
+    assert isinstance(category, dict)
+    if type(category["visible"]) is not bool or type(category["reverse_order"]) is not bool:
+        return [_issue("UNSUPPORTED_CAPABILITY", category_path, "axis visibility and reverse_order must be boolean")]
+    if category["position"] not in CHART_AXIS_POSITIONS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{category_path}.position", "unsupported category axis position")]
+    allowed_category_positions = {"left", "right"} if chart_type == "bar" else {"top", "bottom"}
+    if category["position"] not in allowed_category_positions:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{category_path}.position", "category axis position conflicts with chart direction")]
+    if category["label_position"] not in CHART_AXIS_LABEL_POSITIONS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{category_path}.label_position", "unsupported category label position")]
+    issues = _validate_chart_font(category, category_path)
+    if issues:
+        return issues
+    issues = _validate_chart_line_style(category["line"], f"{category_path}.line")
+    if issues:
+        return issues
+
+    value_axis = value["value"]
+    value_path = f"{path}.value"
+    issues = _chart_exact_fields(value_path, value_axis, CHART_VALUE_AXIS_FIELDS)
+    if issues:
+        return issues
+    assert isinstance(value_axis, dict)
+    if type(value_axis["visible"]) is not bool:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.visible", "axis visibility must be boolean")]
+    if value_axis["position"] not in CHART_AXIS_POSITIONS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.position", "unsupported value axis position")]
+    allowed_value_positions = {"top", "bottom"} if chart_type == "bar" else {"left", "right"}
+    if value_axis["position"] not in allowed_value_positions:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.position", "value axis position conflicts with chart direction")]
+    numeric: dict[str, float | None] = {}
+    for field in ("minimum", "maximum", "major_unit"):
+        item = value_axis[field]
+        if item is not None and (
+            type(item) not in {int, float} or not math.isfinite(item)
+        ):
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.{field}", f"{field} must be null or finite")]
+        numeric[field] = None if item is None else float(item)
+    if numeric["minimum"] is not None and numeric["maximum"] is not None and numeric["minimum"] >= numeric["maximum"]:
+        return [_issue("UNSUPPORTED_CAPABILITY", value_path, "value axis minimum must be less than maximum")]
+    if numeric["major_unit"] is not None and numeric["major_unit"] <= 0:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.major_unit", "major_unit must be positive")]
+    if not isinstance(value_axis["number_format"], str) or not value_axis["number_format"]:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{value_path}.number_format", "number_format must be a non-empty string")]
+    if grouping == "percent_stacked" and any(item is not None for item in numeric.values()):
+        if not (
+            numeric["minimum"] == 0
+            and numeric["maximum"] == 1
+            and numeric["major_unit"] is not None
+            and 0 < numeric["major_unit"] <= 1
+            and "%" in value_axis["number_format"]
+        ):
+            return [_issue("UNSUPPORTED_CAPABILITY", value_path, "percent_stacked explicit axis requires 0..1 bounds, percentage format, and major_unit in (0,1]")]
+    issues = _validate_chart_font(value_axis, value_path)
+    if issues:
+        return issues
+    issues = _validate_chart_line_style(value_axis["line"], f"{value_path}.line")
+    if issues:
+        return issues
+    gridlines = value_axis["major_gridlines"]
+    grid_path = f"{value_path}.major_gridlines"
+    issues = _chart_exact_fields(grid_path, gridlines, CHART_GRIDLINES_FIELDS)
+    if issues:
+        return issues
+    assert isinstance(gridlines, dict)
+    if type(gridlines["visible"]) is not bool:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{grid_path}.visible", "gridline visibility must be boolean")]
+    return _validate_chart_line_style(gridlines["line"], f"{grid_path}.line")
+
+
+def _validate_chart_legend(value: Any, path: str) -> list[ContractIssue]:
+    issues = _chart_exact_fields(path, value, CHART_LEGEND_FIELDS)
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    if type(value["enabled"]) is not bool or type(value["overlay"]) is not bool:
+        return [_issue("UNSUPPORTED_CAPABILITY", path, "legend enabled and overlay must be boolean")]
+    if value["position"] not in CHART_LEGEND_POSITIONS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.position", "unsupported legend position")]
+    return _validate_chart_font(value, path)
+
+
+def _validate_chart_series(
+    value: Any,
+    path: str,
+    chart_type: str,
+    category_count: int,
+) -> list[ContractIssue]:
+    required = (
+        CHART_SERIES_FIELDS
+        if chart_type == "line"
+        else frozenset({"name", "values", "color"})
+    )
+    issues = _chart_exact_fields(path, value, required)
+    if issues:
+        return issues
+    assert isinstance(value, dict)
+    name = value["name"]
+    if name is not None and (not isinstance(name, str) or not name):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.name", "series name must be null or a non-empty string")]
+    values = value["values"]
+    if not isinstance(values, list) or len(values) != category_count:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.values", "series values length must equal categories length")]
+    non_missing = 0
+    for index, item in enumerate(values):
+        if item is None:
+            if chart_type != "line":
+                return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.values[{index}]", "column and bar values cannot be null")]
+            continue
+        if type(item) not in {int, float} or not math.isfinite(item):
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.values[{index}]", "series value must be finite or an allowed null gap")]
+        non_missing += 1
+    if non_missing == 0:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.values", "series requires at least one finite value")]
+    if not _valid_rgb(value["color"]):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.color", "series color must be #RRGGBB")]
+    if chart_type != "line":
+        return []
+    line_path = f"{path}.line"
+    issues = _chart_exact_fields(line_path, value["line"], CHART_SERIES_LINE_FIELDS)
+    if issues:
+        return issues
+    line = value["line"]
+    assert isinstance(line, dict)
+    if type(line["width"]) is not int or not 1 <= line["width"] <= 20116800:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{line_path}.width", "line width must be an integer from 1 to 20116800 EMU")]
+    if line["dash"] not in CHART_LINE_DASHES:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{line_path}.dash", "unsupported series line dash")]
+    marker_path = f"{path}.marker"
+    issues = _chart_exact_fields(marker_path, value["marker"], CHART_MARKER_FIELDS)
+    if issues:
+        return issues
+    marker = value["marker"]
+    assert isinstance(marker, dict)
+    if marker["style"] not in CHART_MARKER_STYLES:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{marker_path}.style", "unsupported marker style")]
+    if type(marker["size"]) is not int or not 2 <= marker["size"] <= 72:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{marker_path}.size", "marker size must be an integer from 2 to 72 pt")]
+    if not _valid_rgb(marker["fill"]) or not _valid_rgb(marker["line_color"]):
+        return [_issue("UNSUPPORTED_CAPABILITY", marker_path, "marker colors must be #RRGGBB")]
+    if type(marker["line_width"]) is not int or not 1 <= marker["line_width"] <= 20116800:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{marker_path}.line_width", "marker line_width must be an integer from 1 to 20116800 EMU")]
+    if value["smooth"] is not False:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.smooth", "line smooth must be false")]
+    return []
+
+
+def _validate_cartesian_chart_contract(
+    element: dict[str, Any], path: str
+) -> list[ContractIssue]:
+    style = element.get("style")
+    content = element.get("content")
+    if not isinstance(style, dict) or not isinstance(content, dict):
+        return [_issue("UNSUPPORTED_CAPABILITY", path, "chart style and content must be objects")]
+    content_fields = frozenset(
+        {
+            "chart_type",
+            "grouping",
+            "categories",
+            "series",
+            "axes",
+            "legend",
+            "data_labels",
+            "display_blanks_as",
+        }
+    )
+    issues = _chart_exact_fields(f"{path}.content", content, content_fields)
+    if issues:
+        return issues
+    chart_type = content["chart_type"]
+    if chart_type not in {"column", "bar", "line"}:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.chart_type", "cartesian chart requires column, bar, or line")]
+    grouping = content["grouping"]
+    if grouping not in CHART_GROUPINGS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.grouping", "unsupported chart grouping", "chart.grouping")]
+    if chart_type == "line" and grouping != "standard":
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.grouping", "line grouping must be standard", "chart.grouping")]
+    if chart_type in {"column", "bar"} and grouping not in {"clustered", "stacked", "percent_stacked"}:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.grouping", "column and bar grouping must be clustered, stacked, or percent_stacked", "chart.grouping")]
+    if content["display_blanks_as"] not in CHART_DISPLAY_BLANKS:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.display_blanks_as", "display_blanks_as must be gap", "chart.display_blanks.gap")]
+    categories = content["categories"]
+    if not isinstance(categories, list) or not categories or any(
+        not isinstance(item, str) or not item for item in categories
+    ):
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.categories", "categories must be a non-empty array of non-empty strings")]
+    series = content["series"]
+    if not isinstance(series, list) or not series:
+        return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.content.series", "series must be a non-empty array")]
+    for index, item in enumerate(series):
+        issues = _validate_chart_series(
+            item, f"{path}.content.series[{index}]", chart_type, len(categories)
+        )
+        if issues:
+            return issues
+    issues = _validate_chart_axes(content["axes"], f"{path}.content.axes", chart_type, grouping)
+    if issues:
+        return issues
+    issues = _validate_chart_legend(content["legend"], f"{path}.content.legend")
+    if issues:
+        return issues
+    issues = _validate_cartesian_labels(content["data_labels"], f"{path}.content.data_labels", chart_type)
+    if issues:
+        return issues
+
+    style_fields = (
+        frozenset({"chart_area", "plot_area"})
+        if chart_type == "line"
+        else frozenset({"gap_width", "overlap", "chart_area", "plot_area"})
+    )
+    issues = _chart_exact_fields(f"{path}.style", style, style_fields)
+    if issues:
+        return issues
+    for field in ("chart_area", "plot_area"):
+        issues = _validate_chart_area(style[field], f"{path}.style.{field}")
+        if issues:
+            return issues
+    if chart_type in {"column", "bar"}:
+        if type(style["gap_width"]) is not int or not 0 <= style["gap_width"] <= 500:
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.style.gap_width", "gap_width must be an integer from 0 to 500", "chart.gap_width")]
+        if type(style["overlap"]) is not int or not -100 <= style["overlap"] <= 100:
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.style.overlap", "overlap must be an integer from -100 to 100", "chart.overlap")]
+        if grouping in {"stacked", "percent_stacked"} and style["overlap"] != 100:
+            return [_issue("UNSUPPORTED_CAPABILITY", f"{path}.style.overlap", "stacked and percent_stacked charts require overlap 100", "chart.overlap")]
+    return []
+
+
+def validate_chart_contract(
+    element: dict[str, Any], path: str | None = None
+) -> list[ContractIssue]:
+    """Validate the discriminated native 2D chart contract."""
+    path = path or _element_path(element)
+    content = element.get("content") if isinstance(element, dict) else None
+    chart_type = content.get("chart_type") if isinstance(content, dict) else None
+    try:
+        require_supported_value("chart_type", chart_type, f"{path}.content.chart_type")
+    except ToolError as exc:
+        return [_issue(exc.code, exc.path, exc.detail, exc.capability)]
+    if chart_type in {"pie", "doughnut"}:
+        return _validate_pie_chart_contract(element, path)
+    return _validate_cartesian_chart_contract(element, path)
 
 
 def _validate_table(element: dict[str, Any], path: str) -> list[ContractIssue]:

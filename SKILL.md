@@ -43,7 +43,7 @@ python3 scripts/preflight_runtime.py --soffice /Applications/LibreOffice.app/Con
 
 图标 bbox 固定后可并发提取独立资产，只重做失败或触边项。彩色背景上的白色/近白色反白镂空线框图标，尤其是闭合孔洞图标，显式使用 `foreground_profile=reverse-white-outline`；其他图标保持默认 `standard`，不得自动猜测或批量切换。`source_bbox` 使用像素 XYWH，`slide_bbox` 使用 EMU。输入、overlay、资产、字体和量测细节按条件读取下方 references。
 
-简单 2D 单系列 `pie|doughnut` 在分类、数值、纯色和标签合同明确时使用原生 Chart；圆环中心 KPI 仍是独立 TextBox。复杂或证据不足的图表只保留当页最小局部 picture，不在 Renderer 内回退。
+满足封闭合同的简单 2D `pie|doughnut|column|bar|line` 使用原生 Chart：饼环仅单系列；柱形/条形支持单系列、多系列 `clustered|stacked|percent_stacked`；折线支持多系列并以 `null` 保留缺失值断口。只有分类、系列、数值、纯色、轴、网格线、图例、标签及逐类型样式均可确认时才选原生模式；圆环中心 KPI、图表标题、单位和外围注释仍用独立 TextBox。3D、组合/双轴、趋势线、渐变纹理、平滑曲线、复杂阴影或证据不足时保留当页最小局部 picture，不在 Renderer 内回退。
 
 ## 单页核心链
 
