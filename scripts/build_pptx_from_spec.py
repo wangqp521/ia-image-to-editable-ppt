@@ -26,6 +26,7 @@ from lib.background_contracts import (
 )
 from lib.capabilities import capability_manifest_sha256
 from lib.error_codes import ContractIssue, ToolError
+from lib.font_runtime import validate_font_runtime
 from lib.hashing import canonical_json_sha256, file_sha256
 from lib.path_contracts import find_user_controlled_symlink
 from lib.representation_contracts import representation_summary, validate_representation_plan
@@ -206,6 +207,9 @@ def _build_report(
     element_report: dict[str, Any],
     normalization: dict[str, Any],
     build_report_path: Path,
+    preferred_font: str,
+    font_runtime: dict[str, Any] | None,
+    runtime_preflight: dict[str, str] | None,
 ) -> dict[str, Any]:
     try:
         report = {
@@ -214,6 +218,11 @@ def _build_report(
             "schema_sha256": schema_sha256,
             "content_spec_sha256": content_identity,
             "input_spec_sha256": input_identity,
+            "preferred_font": preferred_font,
+            "runtime_preflight": (
+                dict(runtime_preflight) if runtime_preflight is not None else None
+            ),
+            "font_runtime": dict(font_runtime) if font_runtime is not None else None,
             "compiler_sha256": compiler_sha256(),
             "capability_manifest_sha256": capability_manifest_sha256(),
             "pptx_sha256": file_sha256(candidate),
@@ -398,6 +407,45 @@ def compile_single_page(
             "prebuild_report.snapshot",
             "snapshot identity is required",
         )
+
+    preferred_font = prebuild_report.get("preferred_font")
+    if not isinstance(preferred_font, str) or not preferred_font.strip():
+        raise ToolError(
+            "BUILD_OUTPUT_INCOMPLETE",
+            "prebuild_report.preferred_font",
+            "a non-empty preferred font is required",
+        )
+    preferred_font = preferred_font.strip()
+    font_runtime: dict[str, Any] | None = None
+    runtime_preflight = prebuild_report.get("runtime_preflight")
+    font_runtime_value = prebuild_report.get("font_runtime")
+    if font_runtime_value is not None or runtime_preflight is not None:
+        try:
+            font_runtime = validate_font_runtime(font_runtime_value)
+        except ValueError as exc:
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                "prebuild_report.font_runtime",
+                str(exc),
+            ) from exc
+        if (
+            not isinstance(runtime_preflight, dict)
+            or not isinstance(runtime_preflight.get("path"), str)
+            or not Path(runtime_preflight["path"]).is_absolute()
+            or not isinstance(runtime_preflight.get("sha256"), str)
+            or len(runtime_preflight["sha256"]) != 64
+        ):
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                "prebuild_report.runtime_preflight",
+                "runtime and font identities must be supplied together",
+            )
+        if font_runtime["family"] != preferred_font:
+            raise ToolError(
+                "BUILD_OUTPUT_INCOMPLETE",
+                "prebuild_report.preferred_font",
+                "preferred font does not match the optional strict runtime",
+            )
     if (
         snapshot.get("path") != str(spec_path)
         or snapshot.get("sha256") != file_sha256(spec_path)
@@ -443,6 +491,7 @@ def compile_single_page(
             representation_modes=modes,
             typography=typography,
             registry=registry,
+            font_family=preferred_font,
         )
         for element in ordered_elements:
             RENDERERS[element["kind"]].render(element, context)
@@ -500,6 +549,9 @@ def compile_single_page(
             element_report,
             normalization,
             build_report_path,
+            preferred_font,
+            font_runtime,
+            runtime_preflight,
         )
         _ensure_output_parent(output_pptx)
         _ensure_output_parent(build_report_path)

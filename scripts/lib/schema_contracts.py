@@ -788,7 +788,7 @@ _RECORDS: dict[str, dict[str, Any]] = {
                 "element_id": "title",
                 "text": "Editable title",
                 "source_font_guess": "unknown",
-                "selected_font": "STKaiti",
+                "selected_font": "Microsoft YaHei",
                 "fallback_reason": "source_font_uncertain",
                 "fallback_trace": None,
                 "runs": [
@@ -830,7 +830,7 @@ _RECORDS: dict[str, dict[str, Any]] = {
                     "soft_breaks": [],
                     "paragraph_breaks": [],
                 },
-                "internal_font_declaration": "STKaiti",
+                "internal_font_declaration": "Microsoft YaHei",
                 "font_declaration_verified": False,
             }
         ],

@@ -17,6 +17,13 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from lib.font_runtime import (
+    REQUIRED_BOLD_FAMILIES,
+    SUPPORTED_FAMILIES,
+    font_runtime_identity,
+    validate_font_runtime,
+)
+
 
 PRERELEASE_RENDERER_PATTERN = re.compile(
     r"(?:libreofficedev|\b(?:alpha|beta|rc)\d*\b)",
@@ -41,6 +48,11 @@ _MACHO_MAGICS = frozenset(
 )
 _SYSTEM_LIBRARY_PREFIXES = ("/System/", "/usr/lib/")
 _MAX_DYNAMIC_LIBRARIES = 256
+_WINDOWS_FONT_FILES = {
+    "Microsoft YaHei": ("msyh.ttc", "msyhbd.ttc"),
+    "STKaiti": ("STKAITI.TTF", None),
+}
+_FONTCONFIG_FAMILIES = SUPPORTED_FAMILIES
 
 
 def _sha256(path: Path) -> str:
@@ -60,6 +72,230 @@ def _subprocess_env() -> dict[str, str]:
     if os.name == "nt" and isinstance(os.environ.get("SYSTEMROOT"), str):
         env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
     return env
+
+
+def _runtime_error(code: str, detail: str) -> ValueError:
+    return ValueError(f"{code}: {detail}")
+
+
+def _font_artifact(path: Path, face_index: int) -> dict[str, Any]:
+    resolved = path.resolve()
+    return {
+        "path": str(resolved),
+        "sha256": _sha256(resolved),
+        "face_index": face_index,
+    }
+
+
+def resolve_windows_font_runtime(family: str, windows_dir: Path) -> dict[str, Any]:
+    """Resolve fixed font files from one Windows system Fonts directory."""
+    try:
+        regular_name, bold_name = _WINDOWS_FONT_FILES[family]
+    except KeyError as exc:
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_UNSUPPORTED",
+            f"unsupported family {family!r}",
+        ) from exc
+
+    fonts_dir = windows_dir.expanduser().resolve() / "Fonts"
+    regular_path = fonts_dir / regular_name
+    if not regular_path.is_file():
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_REGULAR_MISSING",
+            str(regular_path),
+        )
+
+    bold = None
+    if bold_name is not None:
+        bold_path = fonts_dir / bold_name
+        if not bold_path.is_file():
+            raise _runtime_error(
+                "RUNTIME_FIXED_FONT_BOLD_MISSING",
+                str(bold_path),
+            )
+        bold = _font_artifact(bold_path, 0)
+
+    return validate_font_runtime(
+        {
+            "policy": "fixed",
+            "family": family,
+            "provider": "windows-system",
+            "allow_substitution": False,
+            "regular": _font_artifact(regular_path, 0),
+            "bold": bold,
+            "bold_available": bold is not None,
+        }
+    )
+
+
+def _fontconfig_match(
+    family: str,
+    style: str,
+    fontconfig: Path,
+    fc_match: str,
+) -> tuple[str, str, Path, int]:
+    env = _subprocess_env()
+    env["FONTCONFIG_FILE"] = str(fontconfig.expanduser().resolve())
+    try:
+        completed = subprocess.run(
+            [
+                fc_match,
+                "-f",
+                "%{family}\t%{style}\t%{file}\t%{index}\n",
+                f"{family}:style={style}",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            env=env,
+            timeout=10,
+        )
+    except (OSError, UnicodeError, subprocess.SubprocessError) as exc:
+        raise _runtime_error("RUNTIME_FIXED_FONT_QUERY_FAILED", str(exc)) from exc
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout).strip()
+        raise _runtime_error("RUNTIME_FIXED_FONT_QUERY_FAILED", detail or family)
+    line = completed.stdout.splitlines()[0] if completed.stdout.splitlines() else ""
+    fields = line.split("\t")
+    if len(fields) != 4 or not all(fields):
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_QUERY_FAILED",
+            f"unexpected fc-match output for {family} {style}",
+        )
+    try:
+        face_index = int(fields[3].strip())
+    except ValueError as exc:
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_QUERY_FAILED",
+            f"invalid face index for {family} {style}",
+        ) from exc
+    if face_index < 0:
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_QUERY_FAILED",
+            f"invalid face index for {family} {style}",
+        )
+    return fields[0].strip(), fields[1].strip(), Path(fields[2].strip()), face_index
+
+
+def _family_is_exact(expected: str, resolved: str) -> bool:
+    return any(name.strip() == expected for name in resolved.split(","))
+
+
+def _style_tokens(style: str) -> set[str]:
+    return {
+        token.strip().casefold()
+        for token in re.split(r"[,;]", style)
+        if token.strip()
+    }
+
+
+def resolve_fontconfig_font_runtime(
+    family: str,
+    fontconfig: Path,
+    fc_match: str = "fc-match",
+) -> dict[str, Any]:
+    """Resolve exact Regular/Bold files through fontconfig without aliases."""
+    if family not in _FONTCONFIG_FAMILIES:
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_UNSUPPORTED",
+            f"unsupported family {family!r}",
+        )
+
+    regular_family, regular_style, regular_path, regular_face_index = _fontconfig_match(
+        family,
+        "Regular",
+        fontconfig,
+        fc_match,
+    )
+    if not _family_is_exact(family, regular_family):
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_FAMILY_MISMATCH",
+            f"requested {family!r}, resolved {regular_family!r}",
+        )
+    if not (_style_tokens(regular_style) & {"regular", "normal", "book"}):
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_STYLE_MISMATCH",
+            f"requested Regular, resolved {regular_style!r}",
+        )
+    if not regular_path.is_file():
+        raise _runtime_error(
+            "RUNTIME_FIXED_FONT_REGULAR_MISSING",
+            str(regular_path),
+        )
+
+    bold = None
+    bold_family, bold_style, bold_path, bold_face_index = _fontconfig_match(
+        family,
+        "Bold",
+        fontconfig,
+        fc_match,
+    )
+    bold_is_exact = (
+        _family_is_exact(family, bold_family)
+        and "bold" in _style_tokens(bold_style)
+        and bold_path.is_file()
+        and (bold_path.resolve(), bold_face_index)
+        != (regular_path.resolve(), regular_face_index)
+    )
+    if bold_is_exact:
+        bold = _font_artifact(bold_path, bold_face_index)
+    elif family in REQUIRED_BOLD_FAMILIES:
+        detail = f"requested {family!r} Bold, resolved {bold_family!r}/{bold_style!r}"
+        raise _runtime_error("RUNTIME_FIXED_FONT_BOLD_MISSING", detail)
+
+    return validate_font_runtime(
+        {
+            "policy": "fixed",
+            "family": family,
+            "provider": "fontconfig",
+            "allow_substitution": False,
+            "regular": _font_artifact(regular_path, regular_face_index),
+            "bold": bold,
+            "bold_available": bold is not None,
+        }
+    )
+
+
+def _selected_provider(requested: str) -> str:
+    if requested == "auto":
+        if os.name == "nt":
+            return "windows-system"
+        if sys.platform == "darwin":
+            return "fontconfig"
+        raise _runtime_error(
+            "RUNTIME_FONT_PROVIDER_UNSUPPORTED",
+            f"automatic provider is unsupported on {sys.platform}",
+        )
+    if requested == "windows-system" and os.name != "nt":
+        raise _runtime_error(
+            "RUNTIME_FONT_PROVIDER_UNSUPPORTED",
+            "windows-system requires Windows",
+        )
+    if requested == "fontconfig" and sys.platform != "darwin":
+        raise _runtime_error(
+            "RUNTIME_FONT_PROVIDER_UNSUPPORTED",
+            "fontconfig provider requires macOS",
+        )
+    return requested
+
+
+def default_font_family(provider: str) -> str:
+    """Return the fixed default family for one supported platform provider."""
+    if provider == "fontconfig":
+        return "Hiragino Sans GB"
+    if provider == "windows-system":
+        return "Microsoft YaHei"
+    raise _runtime_error(
+        "RUNTIME_FONT_PROVIDER_UNSUPPORTED",
+        f"unsupported provider {provider!r}",
+    )
+
+
+def _append_runtime_error(errors: list[dict[str, str]], exc: ValueError) -> None:
+    code, separator, detail = str(exc).partition(": ")
+    errors.append({"code": code, "detail": detail if separator else str(exc)})
 
 
 def _is_macho(path: Path) -> bool:
@@ -324,19 +560,69 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
             }
         )
 
-    fontconfig = args.fontconfig.expanduser().resolve()
-    fontconfig_entry = {
-        "path": str(fontconfig),
-        "available": fontconfig.is_file(),
-        "sha256": _sha256(fontconfig) if fontconfig.is_file() else None,
-    }
-    if not fontconfig.is_file():
-        errors.append(
-            {
-                "code": "RUNTIME_FONTCONFIG_MISSING",
-                "detail": str(fontconfig),
+    fontconfig_entry: dict[str, Any] | None = None
+    font_runtime: dict[str, Any] | None = None
+    try:
+        provider = _selected_provider(args.font_provider)
+    except ValueError as exc:
+        _append_runtime_error(errors, exc)
+        provider = None
+
+    font_family = args.font_family
+    if provider is not None and font_family is None:
+        font_family = default_font_family(provider)
+
+    if provider == "fontconfig":
+        if args.fontconfig is None:
+            errors.append(
+                {
+                    "code": "RUNTIME_FONTCONFIG_MISSING",
+                    "detail": "--fontconfig is required for the fontconfig provider",
+                }
+            )
+        else:
+            fontconfig = args.fontconfig.expanduser().resolve()
+            fontconfig_entry = {
+                "path": str(fontconfig),
+                "available": fontconfig.is_file(),
+                "sha256": _sha256(fontconfig) if fontconfig.is_file() else None,
             }
-        )
+            if not fontconfig.is_file():
+                errors.append(
+                    {
+                        "code": "RUNTIME_FONTCONFIG_MISSING",
+                        "detail": str(fontconfig),
+                    }
+                )
+            else:
+                fc_match = shutil.which("fc-match")
+                if fc_match is None:
+                    errors.append(
+                        {
+                            "code": "RUNTIME_EXECUTABLE_MISSING:fc-match",
+                            "detail": "fc-match",
+                        }
+                    )
+                else:
+                    try:
+                        font_runtime = resolve_fontconfig_font_runtime(
+                            font_family,
+                            fontconfig,
+                            fc_match=str(Path(fc_match).resolve()),
+                        )
+                    except ValueError as exc:
+                        _append_runtime_error(errors, exc)
+    elif provider == "windows-system":
+        windows_root = os.environ.get("WINDIR") or os.environ.get("SYSTEMROOT")
+        if not windows_root:
+            windows_root = r"C:\Windows"
+        try:
+            font_runtime = resolve_windows_font_runtime(
+                font_family,
+                Path(windows_root),
+            )
+        except ValueError as exc:
+            _append_runtime_error(errors, exc)
 
     modules: dict[str, dict[str, Any]] = {}
     for name in args.python_module:
@@ -367,6 +653,7 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         },
         "executables": executables,
         "fontconfig": fontconfig_entry,
+        "font_runtime": font_runtime,
         "python_modules": modules,
     }
     expected_runtime = getattr(args, "expected_runtime", None)
@@ -385,12 +672,14 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
         else:
             invalid_containers: list[str] = []
             expected_executables: dict[str, Any] = {}
-            expected_fontconfig: dict[str, Any] = {}
+            expected_fontconfig: dict[str, Any] | None = None
+            expected_font_runtime: dict[str, Any] | None = None
             if not isinstance(expected, dict):
                 invalid_containers.append("expected-runtime")
             else:
                 candidate_executables = expected.get("executables")
                 candidate_fontconfig = expected.get("fontconfig")
+                candidate_font_runtime = expected.get("font_runtime")
                 if not isinstance(candidate_executables, dict):
                     invalid_containers.append("executables")
                 else:
@@ -398,9 +687,22 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
                     for name in REQUIRED_EXECUTABLES:
                         if not isinstance(expected_executables.get(name), dict):
                             invalid_containers.append(f"executables.{name}")
-                if not isinstance(candidate_fontconfig, dict):
+                try:
+                    expected_font_runtime = validate_font_runtime(
+                        candidate_font_runtime
+                    )
+                except ValueError:
+                    invalid_containers.append("font_runtime")
+                if expected_font_runtime is not None and expected_font_runtime[
+                    "provider"
+                ] == "fontconfig":
+                    if not isinstance(candidate_fontconfig, dict):
+                        invalid_containers.append("fontconfig")
+                    else:
+                        expected_fontconfig = candidate_fontconfig
+                elif candidate_fontconfig is not None:
                     invalid_containers.append("fontconfig")
-                else:
+                elif candidate_fontconfig is None:
                     expected_fontconfig = candidate_fontconfig
             if invalid_containers:
                 errors.append(
@@ -411,11 +713,35 @@ def inspect_runtime(args: argparse.Namespace) -> dict[str, Any]:
                     }
                 )
             else:
-                keys = (
-                    ("renderer_backend", result.get("renderer_backend"), expected.get("renderer_backend")),
-                    ("preview_size", result.get("preview_size"), expected.get("preview_size")),
-                    ("fontconfig.sha256", result["fontconfig"].get("sha256"), expected_fontconfig.get("sha256")),
-                )
+                keys: list[tuple[str, Any, Any]] = [
+                    (
+                        "renderer_backend",
+                        result.get("renderer_backend"),
+                        expected.get("renderer_backend"),
+                    ),
+                    (
+                        "preview_size",
+                        result.get("preview_size"),
+                        expected.get("preview_size"),
+                    ),
+                    (
+                        "font_runtime",
+                        font_runtime_identity(result.get("font_runtime"))
+                        if result.get("font_runtime") is not None
+                        else None,
+                        font_runtime_identity(expected_font_runtime),
+                    ),
+                ]
+                if expected_font_runtime["provider"] == "fontconfig":
+                    keys.append(
+                        (
+                            "fontconfig.sha256",
+                            result["fontconfig"].get("sha256")
+                            if isinstance(result["fontconfig"], dict)
+                            else None,
+                            expected_fontconfig.get("sha256"),
+                        )
+                    )
                 mismatches = [
                     key for key, actual, wanted in keys if actual != wanted
                 ]
@@ -447,7 +773,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--pdftoppm", default="pdftoppm")
     parser.add_argument("--pdffonts", default="pdffonts")
     parser.add_argument("--pdftotext", default="pdftotext")
-    parser.add_argument("--fontconfig", type=Path, required=True)
+    parser.add_argument(
+        "--font-family",
+        choices=("Hiragino Sans GB", "Microsoft YaHei", "STKaiti"),
+        default=None,
+    )
+    parser.add_argument(
+        "--font-provider",
+        choices=("auto", "fontconfig", "windows-system"),
+        default="auto",
+    )
+    parser.add_argument("--fontconfig", type=Path)
     parser.add_argument("--expected-runtime", type=Path)
     parser.add_argument("--python-module", action="append", default=[])
     parser.add_argument("--output", type=Path, required=True)

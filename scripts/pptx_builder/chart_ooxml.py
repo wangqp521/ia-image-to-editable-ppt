@@ -22,6 +22,18 @@ _DASH_STYLES = {
 _AXIS_POSITIONS = {"top": "t", "bottom": "b", "left": "l", "right": "r"}
 
 
+def set_chart_font_family(font: Any, family: str) -> None:
+    """Write the same explicit family for every PowerPoint text script."""
+    font.name = family
+    properties = font._rPr
+    for tag in ("a:latin", "a:ea", "a:cs", "a:sym"):
+        node = properties.find(qn(tag))
+        if node is None:
+            node = OxmlElement(tag)
+            properties.append(node)
+        node.set("typeface", family)
+
+
 def set_chart_value(owner: Any, tag: str, value: Any) -> Any:
     """Set one c:* value child on a chart XML owner."""
     node = owner.find(qn(tag))

@@ -19,6 +19,8 @@ from typing import Any
 
 from PIL import Image, UnidentifiedImageError
 
+from lib.font_runtime import pdf_font_name_matches, validate_font_runtime
+
 
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PRERELEASE_PATTERN = re.compile(
@@ -55,6 +57,102 @@ def _is_valid_executable_version(value: Any) -> bool:
     )
 
 
+def _resolve_executable(requested: str) -> Path:
+    candidate = Path(requested).expanduser()
+    if candidate.is_absolute() or candidate.parent != Path("."):
+        resolved = candidate.resolve()
+        if resolved.is_file() and os.access(resolved, os.X_OK):
+            return resolved
+    else:
+        found = shutil.which(requested)
+        if found:
+            return Path(found).resolve()
+    raise RenderError("RENDER_RUNTIME_INVALID", f"executable unavailable: {requested}")
+
+
+def _executable_version(path: Path) -> str:
+    for flag in ("--version", "-v"):
+        try:
+            completed = _run([str(path), flag])
+        except RenderError:
+            continue
+        value = (completed.stdout or completed.stderr).strip().splitlines()
+        if value and _is_valid_executable_version(value[0]):
+            return value[0]
+    raise RenderError("RENDER_RUNTIME_INVALID", f"version unavailable: {path}")
+
+
+def _draft_runtime(
+    *,
+    preferred_font: str,
+    soffice: str,
+    pdftoppm: str,
+    pdffonts: str,
+    pdftotext: str,
+) -> dict[str, Any]:
+    """Resolve preview tools at point of use without a batch preflight report."""
+    if not isinstance(preferred_font, str) or not preferred_font.strip():
+        raise RenderError(
+            "RENDER_RUNTIME_INVALID",
+            "--preferred-font is required when --runtime is omitted",
+        )
+    requested = {
+        "soffice": soffice,
+        "pdftoppm": pdftoppm,
+        "pdffonts": pdffonts,
+        "pdftotext": pdftotext,
+    }
+    executables: dict[str, dict[str, str]] = {}
+    for name, value in requested.items():
+        path = _resolve_executable(value)
+        version = _executable_version(path)
+        executables[name] = {
+            "path": str(path),
+            "version": version,
+            "sha256": _sha256(path),
+        }
+    if PRERELEASE_PATTERN.search(executables["soffice"]["version"]):
+        raise RenderError(
+            "RENDER_RUNTIME_INVALID",
+            f"unstable LibreOffice: {executables['soffice']['version']}",
+        )
+    return {
+        "mode": "draft_preview",
+        "preferred_font": preferred_font.strip(),
+        "executables": executables,
+    }
+
+
+def render_environment(
+    runtime: dict[str, Any],
+    base: dict[str, str],
+) -> dict[str, str]:
+    """Return a provider-specific render environment without selecting fonts."""
+    env = dict(base)
+    try:
+        font_runtime = validate_font_runtime(runtime.get("font_runtime"))
+    except ValueError as exc:
+        raise RenderError("RENDER_RUNTIME_INVALID", str(exc)) from exc
+    if font_runtime["provider"] == "fontconfig":
+        fontconfig = runtime.get("fontconfig")
+        if not isinstance(fontconfig, dict) or not isinstance(
+            fontconfig.get("path"), str
+        ):
+            raise RenderError("RENDER_RUNTIME_INVALID", "missing fontconfig")
+        env["FONTCONFIG_FILE"] = fontconfig["path"]
+    else:
+        env.pop("FONTCONFIG_FILE", None)
+    return env
+
+
+def validate_resolved_fonts(family: str, resolved_fonts: list[str]) -> bool:
+    """Report whether PDF fonts match the preferred family."""
+    mismatches = [
+        name for name in resolved_fonts if not pdf_font_name_matches(family, name)
+    ]
+    return not mismatches
+
+
 def _load_runtime(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.expanduser().resolve().read_text(encoding="utf-8"))
@@ -89,16 +187,26 @@ def _load_runtime(path: Path) -> dict[str, Any]:
             or _sha256(executable) != entry["sha256"]
         ):
             raise RenderError("RENDER_RUNTIME_INVALID", f"invalid {name}")
+    try:
+        font_runtime = validate_font_runtime(payload.get("font_runtime"))
+    except ValueError as exc:
+        raise RenderError("RENDER_RUNTIME_INVALID", str(exc)) from exc
     fontconfig = payload.get("fontconfig")
-    if not isinstance(fontconfig, dict):
-        raise RenderError("RENDER_RUNTIME_INVALID", "missing fontconfig")
-    fontconfig_path = Path(str(fontconfig.get("path", ""))).expanduser().resolve()
-    if (
-        not fontconfig_path.is_file()
-        or not isinstance(fontconfig.get("sha256"), str)
-        or _sha256(fontconfig_path) != fontconfig["sha256"]
-    ):
-        raise RenderError("RENDER_RUNTIME_INVALID", "invalid fontconfig")
+    if font_runtime["provider"] == "fontconfig":
+        if not isinstance(fontconfig, dict):
+            raise RenderError("RENDER_RUNTIME_INVALID", "missing fontconfig")
+        fontconfig_path = Path(str(fontconfig.get("path", ""))).expanduser().resolve()
+        if (
+            not fontconfig_path.is_file()
+            or not isinstance(fontconfig.get("sha256"), str)
+            or _sha256(fontconfig_path) != fontconfig["sha256"]
+        ):
+            raise RenderError("RENDER_RUNTIME_INVALID", "invalid fontconfig")
+    elif fontconfig is not None:
+        raise RenderError(
+            "RENDER_RUNTIME_INVALID",
+            "windows-system runtime must not carry fontconfig",
+        )
     return payload
 
 
@@ -192,8 +300,14 @@ def _new_render_temp(output_dir: Path) -> Path:
 def render_preview(
     pptx: Path,
     output_dir: Path,
-    runtime_path: Path,
+    runtime_path: Path | None,
     expected_slides: int = 1,
+    *,
+    preferred_font: str | None = None,
+    soffice_command: str | None = None,
+    pdftoppm_command: str = "pdftoppm",
+    pdffonts_command: str = "pdffonts",
+    pdftotext_command: str = "pdftotext",
 ) -> dict[str, Any]:
     pptx = pptx.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
@@ -202,16 +316,45 @@ def render_preview(
     if expected_slides < 1:
         raise RenderError("RENDER_INPUT_INVALID", "expected_slides must be positive")
     _validate_output_dir(output_dir)
-    runtime = _load_runtime(runtime_path)
+    strict_runtime = runtime_path is not None
+    if strict_runtime:
+        runtime = _load_runtime(runtime_path)
+    else:
+        default_soffice = (
+            "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+            if sys.platform == "darwin"
+            else "soffice"
+        )
+        runtime = _draft_runtime(
+            preferred_font=preferred_font or "",
+            soffice=soffice_command or default_soffice,
+            pdftoppm=pdftoppm_command,
+            pdffonts=pdffonts_command,
+            pdftotext=pdftotext_command,
+        )
     initial_pptx_hash = _sha256(pptx)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     soffice = Path(runtime["executables"]["soffice"]["path"]).resolve()
     pdftoppm = Path(runtime["executables"]["pdftoppm"]["path"]).resolve()
     pdffonts = Path(runtime["executables"]["pdffonts"]["path"]).resolve()
     pdftotext = Path(runtime["executables"]["pdftotext"]["path"]).resolve()
-    fontconfig = Path(runtime["fontconfig"]["path"]).resolve()
-    env = os.environ.copy()
-    env["FONTCONFIG_FILE"] = str(fontconfig)
+    font_runtime = (
+        validate_font_runtime(runtime["font_runtime"])
+        if strict_runtime
+        else None
+    )
+    preferred_family = (
+        font_runtime["family"]
+        if font_runtime is not None
+        else runtime["preferred_font"]
+    )
+    env = (
+        render_environment(runtime, os.environ.copy())
+        if strict_runtime
+        else os.environ.copy()
+    )
+    if not strict_runtime:
+        env.pop("FONTCONFIG_FILE", None)
     temp_dir: Path | None = None
     attempt_count = 0
     recovered_from: str | None = None
@@ -246,14 +389,14 @@ def render_preview(
                         or pdf_path.stat().st_size == 0
                     )
                 )
-                if macos_sigabrt_without_pdf and attempt_count == 1:
+                if strict_runtime and macos_sigabrt_without_pdf and attempt_count == 1:
                     if _sha256(pptx) != initial_pptx_hash:
                         raise RenderError("RENDER_INPUT_CHANGED", str(pptx)) from exc
                     shutil.rmtree(temp_dir)
                     temp_dir = None
                     recovered_from = "SIGABRT"
                     continue
-                if macos_sigabrt_without_pdf:
+                if strict_runtime and macos_sigabrt_without_pdf:
                     raise RenderError(
                         "RENDER_MACOS_APPLICATION_REGISTRATION_FAILED",
                         (
@@ -285,9 +428,21 @@ def render_preview(
         fonts_text_path.write_text(fonts_completed.stdout, encoding="utf-8")
         fonts_json_path = temp_dir / "pdffonts.json"
         resolved_fonts = _parse_pdffonts(fonts_completed.stdout)
+        matched = validate_resolved_fonts(preferred_family, resolved_fonts)
+        mismatches = [
+            name
+            for name in resolved_fonts
+            if not pdf_font_name_matches(preferred_family, name)
+        ]
+        font_payload = {
+            "expected_family": preferred_family,
+            "resolved_fonts": resolved_fonts,
+            "matched": matched,
+            "mismatches": mismatches,
+        }
         fonts_json_path.write_text(
             json.dumps(
-                {"resolved_fonts": resolved_fonts},
+                font_payload,
                 ensure_ascii=False,
                 indent=2,
             )
@@ -341,11 +496,16 @@ def render_preview(
             "path": str(soffice),
             "version": runtime["executables"]["soffice"]["version"],
             "executable_sha256": runtime["executables"]["soffice"]["sha256"],
-            "fontconfig_path": str(fontconfig),
-            "fontconfig_sha256": runtime["fontconfig"]["sha256"],
+            "font_policy": "fixed" if strict_runtime else "preferred",
+            "preferred_font": preferred_family,
             "isolated_profile": True,
             "attempt_count": attempt_count,
         }
+        if font_runtime is not None:
+            renderer["font_runtime"] = font_runtime
+        if font_runtime is not None and font_runtime["provider"] == "fontconfig":
+            renderer["fontconfig_path"] = runtime["fontconfig"]["path"]
+            renderer["fontconfig_sha256"] = runtime["fontconfig"]["sha256"]
         if recovered_from is not None:
             renderer["recovered_from"] = recovered_from
         report = {
@@ -363,7 +523,10 @@ def render_preview(
                 "sha256": _sha256(fonts_json_path),
                 "raw_path": str(final_fonts_text),
                 "raw_sha256": _sha256(fonts_text_path),
+                "expected_family": preferred_family,
                 "resolved_fonts": resolved_fonts,
+                "matched": matched,
+                "mismatches": mismatches,
             },
             "text_extractor": {
                 "path": str(pdftotext),
@@ -401,9 +564,17 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pptx", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--runtime", type=Path, required=True)
+    parser.add_argument("--runtime", type=Path)
+    parser.add_argument("--preferred-font")
+    parser.add_argument("--soffice")
+    parser.add_argument("--pdftoppm", default="pdftoppm")
+    parser.add_argument("--pdffonts", default="pdffonts")
+    parser.add_argument("--pdftotext", default="pdftotext")
     parser.add_argument("--expected-slides", type=int, default=1)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.runtime is None and not args.preferred_font:
+        parser.error("--preferred-font is required when --runtime is omitted")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -414,6 +585,11 @@ def main(argv: list[str] | None = None) -> int:
             args.output_dir,
             args.runtime,
             expected_slides=args.expected_slides,
+            preferred_font=args.preferred_font,
+            soffice_command=args.soffice,
+            pdftoppm_command=args.pdftoppm,
+            pdffonts_command=args.pdffonts,
+            pdftotext_command=args.pdftotext,
         )
     except RenderError as exc:
         print(

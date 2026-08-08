@@ -61,7 +61,9 @@ spans = [{"start": start, "end": start + 1, "color": ORANGE}]
 
 ## 字体与字号
 
-来源字体明确时写实际 family。能判断为楷体/手写体风格但无法确定具体 family 时，固定 `source_font_guess=kaiti-like`、`selected_font=STKaiti`、`fallback_reason=source_font_uncertain`；连字体大类也无法判断时，固定 `source_font_guess=unknown`、`selected_font=STKaiti`、`fallback_reason=source_font_uncertain`。`fallback_reason` 是枚举值，不写自然语言。两类不确定来源的 `internal_font_declaration` 都写 `STKaiti`；structure report 必须确认 PPTX 内部 Text Run 声明为 `STKaiti`。PDF resolved name 只记录 `pdffonts` 的真实结果；运行时替换须披露并按实际视觉影响分级，不得为了迎合预览 renderer 改写 `selected_font`。
+`rapid` 把字体视为构建意图，而不是运行时门禁。每页第一项 typography 的 `selected_font` 是 `preferred_font`；同页每个 `selected_font`、`internal_font_declaration`、非空且非 `follow_text` 的 `bullet_font`，以及 element 中的 `font_name/font.name` 都必须与它一致。`source_font_guess` 只记录源图观感，来源不确定时可写 `fallback_reason=source_font_uncertain`。
+
+compiler 必须把 `preferred_font` 显式写入一致的 `a:latin/a:ea/a:cs/a:sym`，不得依赖主题字体。`rapid` 不检查字体文件、TTC face 或 fontconfig；LibreOffice/PowerPoint的实际 fallback 不回写规格、不触发换字或第二次 build。可选预览中的 `pdffonts` 只生成 `matched/mismatches` 诊断。只有 `reviewed` 严格链仍要求 runtime 中的真实 Regular/Bold face 和精确字体身份。
 
 `runs[].font_size` 固定使用 point（pt），文本坐标使用 EMU；自定义字号字段以 `_font_size_pt` 结尾。初值按页面实际比例估算，不使用固定 96 DPI：
 
@@ -71,11 +73,11 @@ scale_pt_per_source_px =
       slide_height_emu / 12700 / page_frame_height_px)
 ```
 
-比例只映射物理长度，不把 glyph 高度当作字体 em。先确认页面映射、`selected_font`、显式 margin 和关闭 AutoFit，再生成首次整页预览。预览无明显字号、换行或溢出差异时继续；有系统性差异时，从标题、正文、数字/KPI、列表/表格等实际存在组别各选一个代表性高风险 TextBox，以 `new_font_pt = current_font_pt × target_glyph_px / current_glyph_px` 修正同一规格，目标框及相邻边界改善后应用于同组。不逐框试排，不做自动字号搜索，不新增字体优化状态机。
+比例只映射物理长度，不把 glyph 高度当作字体 em。先确认页面映射、`preferred_font`、显式 margin 和关闭 AutoFit，再按来源估计字号。可选预览无明显字号、换行或溢出差异时继续；有系统性差异时，从标题、正文、数字/KPI、列表/表格等实际存在组别各选一个代表性高风险 TextBox，以 `new_font_pt = current_font_pt × target_glyph_px / current_glyph_px` 修正同一规格，目标框及相邻边界改善后应用于同组。不逐框试排，不做自动字号搜索，不新增字体优化状态机。
 
-不做字体比较或独立试排。未知字体先用 `render_preview.py` 的 `pdffonts` 确认；同一运行环境下项目级只验证一次。每个最终 PDF 都检查 `pdffonts`；仅特殊字符、生僻字、公式、多语言、缺字、意外 fallback、换行或溢出触发局部调查。
+不做字体比较、候选字体试排或阶段性换字。特殊字符、生僻字、公式、多语言或缺字只能触发局部内容调查，不能在渲染后修改 `preferred_font`。
 
-调整顺序：字体 → 字号 → box → margin/wrap → 字距 → 行/段距 → 垂直对齐；先锁定换行位置，再校准相邻行中心距，最后校准文字块纵向中心。自动折行只改 `line_spacing`，真实段落优先改相邻一侧的 `space_after/space_before`。不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。首轮 render 后把 source/preview 中全部可见文字问题与 structure/font report 诊断合入同一修复批次；不边看边改或逐框搜索。修正后仍须对当前 PPTX 重跑 build、render、structure、background 与 visual diff；回退即拒绝。`validate_pptx.py --spec` 继续核对 OOXML Text Run 字号与规格 point 值。
+调整顺序：字号 → box → margin/wrap → 字距 → 行/段距 → 垂直对齐；先锁定换行位置，再校准相邻行中心距，最后校准文字块纵向中心。自动折行只改 `line_spacing`，真实段落优先改相邻一侧的 `space_after/space_before`。不用硬换行、拆框、过度缩字、改写或图片化掩盖问题。若生成了预览，把 source/preview 中全部可见文字问题合入一次修复批次；修正后重跑 build、structure、background，并至多再生成一次预览。字体 fallback 只披露，不修复。`validate_pptx.py --spec` 继续核对 OOXML Text Run 字号与规格 point 值。
 
 ## 特殊文本与最低可编辑性
 

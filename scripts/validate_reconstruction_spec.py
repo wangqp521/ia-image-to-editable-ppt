@@ -19,7 +19,7 @@ from PIL import Image, UnidentifiedImageError
 
 from lib.atomic_write import atomic_write_bytes
 from lib.artifact_identity import is_sha256
-from lib.hashing import canonical_json_sha256
+from lib.hashing import canonical_json_sha256, file_sha256
 from lib.background_contracts import (
     resolved_element_mode_map,
     validate_background_prebuild,
@@ -34,6 +34,7 @@ from lib.capabilities import (
 from lib.element_contracts import validate_element_contract
 from lib.error_codes import ToolError
 from lib.final_identity import collect_current_artifacts
+from lib.font_runtime import validate_font_runtime
 from lib.representation_contracts import require_asset, validate_representation_plan
 from lib.reviewer_contracts import (
     build_review_context,
@@ -105,6 +106,152 @@ def _validate_typography_allowed_fields(
             f"{path}.{field}",
             f"unknown field: {field}",
         )
+
+
+def fixed_font_issues(
+    spec: Any,
+    font_runtime: Any,
+) -> list[dict[str, str]]:
+    """Return inconsistent preferred-font declarations.
+
+    A runtime report is optional. When present, keep the stricter reviewed-mode
+    checks against its resolved family and real Bold face. Otherwise derive the
+    preferred family from the first typography item and only enforce consistent
+    declarations inside the build specification.
+    """
+    runtime = (
+        validate_font_runtime(font_runtime)
+        if font_runtime is not None
+        else None
+    )
+    modules = spec.get("modules") if isinstance(spec, dict) else None
+    typography_module = (
+        modules.get("typography") if isinstance(modules, dict) else None
+    )
+    items = (
+        typography_module.get("items")
+        if isinstance(typography_module, dict)
+        else None
+    )
+    first_selected = (
+        items[0].get("selected_font")
+        if isinstance(items, list) and items and isinstance(items[0], dict)
+        else None
+    )
+    family = runtime["family"] if runtime is not None else first_selected
+    issues: list[dict[str, str]] = []
+
+    if not isinstance(family, str) or not family.strip():
+        _error(
+            issues,
+            "SPEC_PREFERRED_FONT_MISSING",
+            "modules.typography.items[0].selected_font",
+            "the first typography item must declare a preferred font",
+        )
+        return issues
+
+    mismatch_code = (
+        "SPEC_FIXED_FONT_MISMATCH"
+        if runtime is not None
+        else "SPEC_PREFERRED_FONT_MISMATCH"
+    )
+
+    def mismatch(path: str, value: Any) -> None:
+        if isinstance(value, str) and value and value != family:
+            _error(
+                issues,
+                mismatch_code,
+                path,
+                f"expected {family!r}, got {value!r}",
+            )
+
+    def walk(value: Any, path: str, *, typography: bool) -> None:
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                walk(item, f"{path}[{index}]", typography=typography)
+            return
+        if not isinstance(value, dict):
+            return
+        for key in (
+            "selected_font",
+            "internal_font_declaration",
+            "bullet_font",
+            "font_name",
+        ):
+            if key in value and (typography or key == "font_name"):
+                candidate = value.get(key)
+                if key != "bullet_font" or candidate != "follow_text":
+                    mismatch(f"{path}.{key}", candidate)
+        font = value.get("font")
+        if isinstance(font, dict):
+            mismatch(f"{path}.font.name", font.get("name"))
+            weight = font.get("weight")
+            if (
+                runtime is not None
+                and runtime["bold_available"] is False
+                and _is_number(weight)
+                and float(weight) >= 600
+            ):
+                _error(
+                    issues,
+                    "SPEC_FIXED_FONT_BOLD_UNAVAILABLE",
+                    f"{path}.font.weight",
+                    f"{family} has no true Bold font face",
+                )
+        weight = value.get("font_weight")
+        if (
+            runtime is not None
+            and runtime["bold_available"] is False
+            and _is_number(weight)
+            and float(weight) >= 600
+        ):
+            _error(
+                issues,
+                "SPEC_FIXED_FONT_BOLD_UNAVAILABLE",
+                f"{path}.font_weight",
+                f"{family} has no true Bold font face",
+            )
+        for key, item in value.items():
+            if key != "font":
+                walk(item, f"{path}.{key}", typography=typography)
+
+    if isinstance(typography_module, dict):
+        walk(typography_module, "modules.typography", typography=True)
+        if runtime is not None and isinstance(items, list):
+            for index, item in enumerate(items):
+                if isinstance(item, dict) and item.get("fallback_trace") is not None:
+                    _error(
+                        issues,
+                        "SPEC_FIXED_FONT_FALLBACK_TRACE_FORBIDDEN",
+                        f"modules.typography.items[{index}].fallback_trace",
+                        "fixed-font mode requires null fallback_trace",
+                    )
+    elements = spec.get("elements") if isinstance(spec, dict) else None
+    if isinstance(elements, list):
+        for index, element in enumerate(elements):
+            if not isinstance(element, dict):
+                continue
+            for field in ("content", "style"):
+                if field in element:
+                    walk(
+                        element[field],
+                        f"elements[{index}].{field}",
+                        typography=False,
+                    )
+    return issues
+
+
+def preferred_font_from_spec(spec: Any) -> str | None:
+    """Return the page's explicit preferred font without consulting runtime."""
+    modules = spec.get("modules") if isinstance(spec, dict) else None
+    typography = modules.get("typography") if isinstance(modules, dict) else None
+    items = typography.get("items") if isinstance(typography, dict) else None
+    value = (
+        items[0].get("selected_font")
+        if isinstance(items, list) and items and isinstance(items[0], dict)
+        else None
+    )
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _pdf_page_size_matches(value: Any) -> bool:
@@ -895,7 +1042,6 @@ def _validate_typography(
                 f"{path}.{field}",
                 f"{field} was removed from the single-font typography workflow",
             )
-        source_font_guess = item.get("source_font_guess")
         selected = item.get("selected_font")
         if not isinstance(selected, str) or not selected.strip():
             _error(
@@ -903,16 +1049,6 @@ def _validate_typography(
                 "SPEC_SELECTED_FONT_INVALID",
                 f"{path}.selected_font",
                 "selected_font must be a non-empty font family",
-            )
-        if source_font_guess in {"kaiti-like", "unknown"} and (
-            selected != "STKaiti"
-            or item.get("fallback_reason") != "source_font_uncertain"
-        ):
-            _error(
-                errors,
-                "SPEC_UNCERTAIN_FONT_FALLBACK_INVALID",
-                path,
-                "kaiti-like or unknown source fonts require selected_font=STKaiti and fallback_reason=source_font_uncertain",
             )
         runs = item.get("runs")
         _validate_coverage(runs, text, f"{path}.runs", "SPEC_TEXT_RUN_COVERAGE_INVALID", errors)
@@ -1384,7 +1520,12 @@ def _identity_only_final(
     return summary
 
 
-def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
+def validate_spec(
+    spec: Any,
+    stage: str = "prebuild",
+    *,
+    font_runtime: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return a stable validation report for a reconstruction specification."""
     if stage not in {"prebuild", "final"}:
         raise ValueError("stage must be prebuild or final")
@@ -1426,6 +1567,9 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             "errors": [{"code": "SPEC_ROOT_INVALID", "path": "$", "detail": "root must be an object"}],
             "warnings": [],
         }
+
+    if stage == "prebuild":
+        errors.extend(fixed_font_issues(spec, font_runtime))
 
     verification_profile = _verification_profile(spec)
     envelope_issues = schema_envelope_issues(spec)
@@ -1724,7 +1868,7 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
             **final_summary,
         }
 
-    return {
+    report = {
         "valid": not errors,
         "stage": stage,
         "verification_profile": verification_profile,
@@ -1732,6 +1876,9 @@ def validate_spec(spec: Any, stage: str = "prebuild") -> dict[str, Any]:
         "errors": errors,
         "warnings": warnings,
     }
+    if stage == "prebuild":
+        report["preferred_font"] = preferred_font_from_spec(spec)
+    return report
 
 
 def validate_spec_file(
@@ -1739,16 +1886,41 @@ def validate_spec_file(
     *,
     stage: str,
     snapshot_path: Path | None = None,
+    runtime_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate one exact JSON byte stream and optionally freeze it for build."""
     if snapshot_path is not None and stage != "prebuild":
         raise ValueError("--snapshot is only valid with --stage prebuild")
+    if stage == "final" and runtime_path is not None:
+        raise ValueError("--runtime is not accepted with --stage final")
+    runtime: dict[str, Any] | None = None
+    runtime_identity: dict[str, str] | None = None
+    if runtime_path is not None:
+        resolved_runtime = runtime_path.expanduser().resolve()
+        runtime_payload = json.loads(
+            resolved_runtime.read_text(encoding="utf-8"),
+            parse_constant=reject_nonstandard_json_number,
+        )
+        if (
+            not isinstance(runtime_payload, dict)
+            or runtime_payload.get("valid") is not True
+            or runtime_payload.get("errors") != []
+        ):
+            raise ValueError("runtime preflight must be a passing report")
+        runtime = validate_font_runtime(runtime_payload.get("font_runtime"))
+        runtime_identity = {
+            "path": str(resolved_runtime),
+            "sha256": file_sha256(resolved_runtime),
+        }
     raw = spec_path.read_bytes()
     spec = json.loads(
         raw.decode("utf-8"),
         parse_constant=reject_nonstandard_json_number,
     )
-    report = validate_spec(spec, stage=stage)
+    report = validate_spec(spec, stage=stage, font_runtime=runtime)
+    if runtime is not None and runtime_identity is not None:
+        report["runtime_preflight"] = runtime_identity
+        report["font_runtime"] = runtime
     if snapshot_path is not None and report["valid"]:
         resolved_snapshot = snapshot_path.expanduser().resolve()
         resolved_snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -1778,11 +1950,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         help="atomically freeze the exact validated bytes for compiler input",
     )
+    parser.add_argument(
+        "--runtime",
+        type=Path,
+        help="optional passing batch/runtime-preflight.json for the strict reviewed path",
+    )
     args = parser.parse_args(argv)
     if args.snapshot is not None and args.stage != "prebuild":
         parser.error("--snapshot is only valid with --stage prebuild")
     if args.snapshot is not None and args.output is None:
         parser.error("--snapshot requires --output")
+    if args.stage == "final" and args.runtime is not None:
+        parser.error("--runtime is not accepted with --stage final")
     return args
 
 
@@ -1818,12 +1997,14 @@ def main(argv: list[str] | None = None) -> int:
             args.spec,
             stage=args.stage,
             snapshot_path=args.snapshot,
+            runtime_path=args.runtime,
         )
     except (
         OSError,
         UnicodeDecodeError,
         json.JSONDecodeError,
         NonStandardJsonNumberError,
+        ValueError,
     ) as exc:
         result = {
             "valid": False,

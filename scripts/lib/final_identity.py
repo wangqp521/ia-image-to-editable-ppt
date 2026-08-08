@@ -9,6 +9,7 @@ from typing import Any
 
 from .artifact_identity import EvidenceSnapshot, ensure_unchanged, is_sha256, snapshot_file
 from .hashing import canonical_json_sha256
+from .font_runtime import font_runtime_identity, validate_font_runtime
 from .reviewer_contracts import (
     REVIEW_CONTEXT_ARTIFACT_FIELDS,
     VISUAL_REVIEW_COVERAGE_FIELDS,
@@ -192,10 +193,34 @@ def collect_current_artifacts(
 
         _expect(runtime.get("valid") is True and runtime.get("errors") == [], "runtime_preflight.valid", "runtime preflight must pass")
         _expect(runtime.get("renderer_backend") == "libreoffice", "runtime_preflight.renderer_backend", "LibreOffice runtime is required")
+        try:
+            font_runtime = validate_font_runtime(runtime.get("font_runtime"))
+            build_font_runtime = validate_font_runtime(build.get("font_runtime"))
+        except ValueError as exc:
+            raise _InvalidIdentity("runtime_preflight.font_runtime", str(exc)) from exc
+        _expect(
+            font_runtime_identity(build_font_runtime)
+            == font_runtime_identity(font_runtime),
+            "build_report.font_runtime",
+            "build font runtime is stale",
+        )
+        _same_identity(
+            build.get("runtime_preflight"),
+            runtime_identity,
+            "build_report.runtime_preflight",
+        )
         executables = _dict(runtime.get("executables"), "runtime_preflight.executables")
         tools = {name: _tool_identity(executables.get(name), f"runtime_preflight.executables.{name}", snapshots) for name in ("soffice", "pdftoppm", "pdffonts", "pdftotext")}
-        fontconfig = _dict(runtime.get("fontconfig"), "runtime_preflight.fontconfig")
-        _record(fontconfig, "runtime_preflight.fontconfig", snapshots)
+        fontconfig: dict[str, Any] | None = None
+        if font_runtime["provider"] == "fontconfig":
+            fontconfig = _dict(runtime.get("fontconfig"), "runtime_preflight.fontconfig")
+            _record(fontconfig, "runtime_preflight.fontconfig", snapshots)
+        else:
+            _expect(
+                runtime.get("fontconfig") is None,
+                "runtime_preflight.fontconfig",
+                "windows-system runtime must not carry fontconfig",
+            )
 
         _expect(render.get("schema_version") == 1, "render_report.schema_version", "render schema version must be 1")
         _same_identity(render.get("pptx"), pptx_identity, "render_report.pptx")
@@ -205,9 +230,11 @@ def collect_current_artifacts(
             "path": tools["soffice"]["path"],
             "version": tools["soffice"]["version"],
             "executable_sha256": tools["soffice"]["sha256"],
-            "fontconfig_path": fontconfig["path"],
-            "fontconfig_sha256": fontconfig["sha256"],
+            "font_runtime": font_runtime,
         }
+        if fontconfig is not None:
+            expected_renderer["fontconfig_path"] = fontconfig["path"]
+            expected_renderer["fontconfig_sha256"] = fontconfig["sha256"]
         for field, expected in expected_renderer.items():
             _expect(renderer.get(field) == expected, f"render_report.renderer.{field}", "renderer identity is stale")
         _expect(renderer.get("isolated_profile") is True, "render_report.renderer.isolated_profile", "isolated renderer profile is required")
@@ -223,7 +250,23 @@ def collect_current_artifacts(
         except UnicodeError as exc:
             raise _InvalidIdentity("render_report.font_report.raw", "raw font evidence must be UTF-8") from exc
         resolved_fonts = render["font_report"].get("resolved_fonts")
-        _expect(font_payload == {"resolved_fonts": resolved_fonts}, "render_report.font_report", "font report payload is stale")
+        expected_family = render["font_report"].get("expected_family")
+        matched = render["font_report"].get("matched")
+        _expect(
+            font_payload
+            == {
+                "expected_family": expected_family,
+                "resolved_fonts": resolved_fonts,
+                "matched": matched,
+            },
+            "render_report.font_report",
+            "font report payload is stale",
+        )
+        _expect(
+            expected_family == font_runtime["family"] and matched is True,
+            "render_report.font_report",
+            "font report does not confirm the fixed family",
+        )
         _expect(isinstance(resolved_fonts, list) and all(isinstance(font, str) and font in raw_fonts for font in resolved_fonts), "render_report.font_report.resolved_fonts", "resolved fonts do not match raw pdffonts evidence")
         for label, runtime_name in (("rasterizer", "pdftoppm"), ("text_extractor", "pdftotext")):
             value = _dict(render.get(label), f"render_report.{label}")

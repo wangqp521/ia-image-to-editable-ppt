@@ -23,6 +23,7 @@ from .chart_ooxml import (
     set_axis_position,
     set_axis_reverse_order,
     set_chart_area_style,
+    set_chart_font_family,
     set_chart_format_line,
     set_chart_value,
     set_display_blanks_as,
@@ -96,7 +97,7 @@ _CHART_FIELDS = frozenset(
 
 
 def _set_font(font: Any, contract: dict[str, Any]) -> None:
-    font.name = contract["font_name"]
+    set_chart_font_family(font, contract["font_name"])
     font.size = Pt(contract["font_size"])
     font.bold = contract["font_weight"] >= 600
     font.color.rgb = RGBColor.from_string(contract["color"].removeprefix("#"))
@@ -152,6 +153,9 @@ def _render_pie_chart(element: dict[str, Any], context: RenderContext) -> Any:
         data_labels.show_percentage = labels["show_percentage"]
         data_labels.position = _LABEL_POSITIONS[labels["position"]]
         data_labels.number_format = labels["number_format"]
+        if context.font_family is None:
+            raise ValueError("fixed chart font family is required")
+        set_chart_font_family(data_labels.font, context.font_family)
         data_labels.font.size = Pt(labels["font_size"])
         data_labels.font.bold = labels["font_weight"] >= 600
         data_labels.font.color.rgb = RGBColor.from_string(labels["color"].removeprefix("#"))

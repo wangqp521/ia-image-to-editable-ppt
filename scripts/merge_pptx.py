@@ -16,6 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 from xml.etree import ElementTree as ET
 
+from lib.font_runtime import font_runtime_identity, validate_font_runtime
 from lib.spec_identity import content_spec_sha256
 
 
@@ -126,9 +127,47 @@ def _artifact_identity(value: Any, code: str) -> tuple[Path, str]:
     return path.resolve(), actual.lower()
 
 
-def _render_identity(
-    spec: dict[str, Any],
-) -> tuple[str, str, str, str, tuple[int, int]]:
+def render_runtime_identity(report: Any) -> tuple[Any, ...]:
+    """Return one merge-comparable renderer and fixed-font identity."""
+    if not isinstance(report, dict):
+        raise ValueError("render report must be an object")
+    renderer = report.get("renderer")
+    rasterizer = report.get("rasterizer")
+    if not isinstance(renderer, dict) or not isinstance(rasterizer, dict):
+        raise ValueError("renderer and rasterizer are required")
+    font_runtime = validate_font_runtime(renderer.get("font_runtime"))
+    output_size = rasterizer.get("output_size")
+    font_identity = font_runtime_identity(font_runtime)
+    fontconfig_sha256 = renderer.get("fontconfig_sha256")
+    identity = (
+        renderer.get("backend"),
+        renderer.get("version"),
+        renderer.get("executable_sha256"),
+        *font_identity,
+        fontconfig_sha256,
+        tuple(output_size) if isinstance(output_size, list) else (),
+    )
+    if (
+        renderer.get("backend") != "libreoffice"
+        or not isinstance(renderer.get("version"), str)
+        or not renderer.get("version")
+        or not isinstance(renderer.get("executable_sha256"), str)
+        or not renderer.get("executable_sha256")
+        or (
+            font_runtime["provider"] == "fontconfig"
+            and not isinstance(fontconfig_sha256, str)
+        )
+        or (
+            font_runtime["provider"] == "windows-system"
+            and fontconfig_sha256 is not None
+        )
+        or identity[-1] != (1920, 1080)
+    ):
+        raise ValueError("render report identity is incomplete")
+    return identity
+
+
+def _render_identity(spec: dict[str, Any]) -> tuple[Any, ...]:
     visual_gate = spec.get("visual_gate")
     artifact = (
         visual_gate.get("render_report") if isinstance(visual_gate, dict) else None
@@ -141,26 +180,14 @@ def _render_identity(
             "RENDER_REPORT_INVALID",
             f"Render report is not valid JSON: {report_path}",
         ) from exc
-    renderer = report.get("renderer") if isinstance(report, dict) else None
-    rasterizer = report.get("rasterizer") if isinstance(report, dict) else None
-    output_size = rasterizer.get("output_size") if isinstance(rasterizer, dict) else None
-    identity = (
-        renderer.get("backend") if isinstance(renderer, dict) else None,
-        renderer.get("version") if isinstance(renderer, dict) else None,
-        renderer.get("executable_sha256") if isinstance(renderer, dict) else None,
-        renderer.get("fontconfig_sha256") if isinstance(renderer, dict) else None,
-        tuple(output_size) if isinstance(output_size, list) else (),
-    )
-    if (
-        identity[0] != "libreoffice"
-        or not all(isinstance(item, str) and item for item in identity[:4])
-        or identity[4] != (1920, 1080)
-    ):
+    try:
+        identity = render_runtime_identity(report)
+    except ValueError as exc:
         raise MergeError(
             "RENDER_REPORT_INVALID",
             f"Render report identity is incomplete: {report_path}",
-        )
-    return identity  # type: ignore[return-value]
+        ) from exc
+    return identity
 
 
 def _validate_page_binding(
@@ -583,86 +610,120 @@ def merge_presentations(
     specs: list[Path],
     final_reports: list[Path],
     output: Path,
+    *,
+    draft: bool = False,
 ) -> dict[str, Any]:
     if not inputs:
         raise MergeError("INPUTS_REQUIRED", "At least one single-slide PPTX is required")
-    if len(inputs) != len(specs):
-        raise MergeError(
-            "SPEC_COUNT_MISMATCH",
-            "Every merge input requires one reconstruction spec",
-            input_count=len(inputs),
-            spec_count=len(specs),
-        )
-    if len(inputs) != len(final_reports):
-        raise MergeError(
-            "FINAL_REPORT_COUNT_MISMATCH",
-            "Every merge input requires one final validation report",
-            input_count=len(inputs),
-            final_report_count=len(final_reports),
-        )
     paths = [Path(item).expanduser().resolve() for item in inputs]
-    spec_paths = [Path(item).expanduser().resolve() for item in specs]
-    final_report_paths = [Path(item).expanduser().resolve() for item in final_reports]
-    page_specs = [_load_page_spec(path) for path in spec_paths]
-    page_final_reports = [_load_final_report(path) for path in final_report_paths]
-    verification_profiles = [spec.get("verification_profile") for spec in page_specs]
-    if any(profile not in VERIFICATION_PROFILES for profile in verification_profiles):
-        raise MergeError(
-            "VERIFICATION_PROFILE_INVALID",
-            "Every page spec must use rapid or reviewed verification",
-            profiles=verification_profiles,
-        )
-    if len(set(verification_profiles)) != 1:
-        raise MergeError(
-            "VERIFICATION_PROFILE_MISMATCH",
-            "All merge inputs must use the same fixed verification profile",
-            profiles=verification_profiles,
-        )
-    verification_profile = verification_profiles[0]
-    render_identities = [_render_identity(spec) for spec in page_specs]
-    if len(set(render_identities)) != 1:
-        raise MergeError(
-            "RENDER_RUNTIME_MIXED",
-            "All merge inputs must use the same LibreOffice, fontconfig, and preview size",
-            identities=render_identities,
-        )
-    page_ids = [spec.get("page_id") for spec in page_specs]
-    if any(not isinstance(page_id, str) or not page_id for page_id in page_ids):
-        raise MergeError("PAGE_ID_INVALID", "Every page spec requires a non-empty page_id")
-    if len(page_ids) != len(set(page_ids)):
-        raise MergeError("PAGE_ID_DUPLICATE", "Merge page_id values must be unique")
-    validations = []
-    page_bindings = []
-    for path, page_spec, final_report in zip(paths, page_specs, page_final_reports):
-        if not path.is_file():
-            raise MergeError("INPUT_NOT_FOUND", f"Merge input does not exist: {path}")
-        binding = _validate_page_binding(path, page_spec, final_report)
-        page_bindings.append(binding)
-        validation = binding["validation"]
-        validations.append(validation)
-        if validation.get("slide_count") != 1:
+    spec_paths: list[Path] = []
+    final_report_paths: list[Path] = []
+    render_identities: list[tuple[Any, ...]] = []
+    page_bindings: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
+
+    if draft:
+        if specs or final_reports:
             raise MergeError(
-                "INPUT_NOT_SINGLE_SLIDE", f"Merge input must contain one slide: {path}"
+                "DRAFT_MERGE_ARGUMENTS_INVALID",
+                "Draft merge accepts only --input values",
             )
-    runtime_hashes = {binding["runtime_sha256"] for binding in page_bindings}
-    if len(runtime_hashes) != 1:
-        raise MergeError(
-            "RUNTIME_PREFLIGHT_MIXED",
-            "All merge inputs must use the same runtime preflight identity",
-        )
-    capability_hashes = {
-        binding["capability_manifest_sha256"] for binding in page_bindings
-    }
-    if len(capability_hashes) != 1:
-        raise MergeError(
-            "CAPABILITY_MANIFEST_MIXED",
-            "All merge inputs must use the same capability manifest identity",
-        )
-        if not validation.get("valid"):
+        validator = _load_validator()
+        verification_profile = "rapid"
+        page_ids = [f"page-{index + 1:03d}" for index in range(len(paths))]
+        for path in paths:
+            if not path.is_file():
+                raise MergeError("INPUT_NOT_FOUND", f"Merge input does not exist: {path}")
+            validation = validator.validate_pptx(path, expected_slides=1)
+            if not validation.get("valid"):
+                raise MergeError(
+                    "INPUT_VALIDATION_FAILED",
+                    f"Draft merge input did not pass structure validation: {path}",
+                    errors=validation.get("errors", []),
+                )
+            validations.append(validation)
+    else:
+        if len(inputs) != len(specs):
             raise MergeError(
-                "INPUT_VALIDATION_FAILED",
-                f"Merge input did not pass validation: {path}",
-                errors=validation.get("errors", []),
+                "SPEC_COUNT_MISMATCH",
+                "Every merge input requires one reconstruction spec",
+                input_count=len(inputs),
+                spec_count=len(specs),
+            )
+        if len(inputs) != len(final_reports):
+            raise MergeError(
+                "FINAL_REPORT_COUNT_MISMATCH",
+                "Every merge input requires one final validation report",
+                input_count=len(inputs),
+                final_report_count=len(final_reports),
+            )
+        spec_paths = [Path(item).expanduser().resolve() for item in specs]
+        final_report_paths = [
+            Path(item).expanduser().resolve() for item in final_reports
+        ]
+        page_specs = [_load_page_spec(path) for path in spec_paths]
+        page_final_reports = [
+            _load_final_report(path) for path in final_report_paths
+        ]
+        verification_profiles = [
+            spec.get("verification_profile") for spec in page_specs
+        ]
+        if any(
+            profile not in VERIFICATION_PROFILES
+            for profile in verification_profiles
+        ):
+            raise MergeError(
+                "VERIFICATION_PROFILE_INVALID",
+                "Every page spec must use rapid or reviewed verification",
+                profiles=verification_profiles,
+            )
+        if len(set(verification_profiles)) != 1:
+            raise MergeError(
+                "VERIFICATION_PROFILE_MISMATCH",
+                "All merge inputs must use the same fixed verification profile",
+                profiles=verification_profiles,
+            )
+        verification_profile = verification_profiles[0]
+        render_identities = [_render_identity(spec) for spec in page_specs]
+        if len(set(render_identities)) != 1:
+            raise MergeError(
+                "RENDER_RUNTIME_MIXED",
+                "All merge inputs must use the same LibreOffice, fixed font runtime, and preview size",
+                identities=render_identities,
+            )
+        page_ids = [spec.get("page_id") for spec in page_specs]
+        if any(
+            not isinstance(page_id, str) or not page_id for page_id in page_ids
+        ):
+            raise MergeError(
+                "PAGE_ID_INVALID",
+                "Every page spec requires a non-empty page_id",
+            )
+        if len(page_ids) != len(set(page_ids)):
+            raise MergeError("PAGE_ID_DUPLICATE", "Merge page_id values must be unique")
+        for path, page_spec, final_report in zip(
+            paths, page_specs, page_final_reports
+        ):
+            if not path.is_file():
+                raise MergeError("INPUT_NOT_FOUND", f"Merge input does not exist: {path}")
+            binding = _validate_page_binding(path, page_spec, final_report)
+            page_bindings.append(binding)
+            validations.append(binding["validation"])
+        runtime_hashes = {
+            binding["runtime_sha256"] for binding in page_bindings
+        }
+        if len(runtime_hashes) != 1:
+            raise MergeError(
+                "RUNTIME_PREFLIGHT_MIXED",
+                "All merge inputs must use the same runtime preflight identity",
+            )
+        capability_hashes = {
+            binding["capability_manifest_sha256"] for binding in page_bindings
+        }
+        if len(capability_hashes) != 1:
+            raise MergeError(
+                "CAPABILITY_MANIFEST_MIXED",
+                "All merge inputs must use the same capability manifest identity",
             )
     expected_size = (
         validations[0].get("width_emu"),
@@ -712,12 +773,14 @@ def merge_presentations(
     finally:
         temporary.unlink(missing_ok=True)
 
-    all_passed = all(binding["profile_passed"] for binding in page_bindings)
+    all_passed = (not draft) and all(
+        binding["profile_passed"] for binding in page_bindings
+    )
     delivery_labels = {
         "rapid": ("快速校验版", "快速校验未通过版"),
         "reviewed": ("独立复核通过版", "独立复核未通过版"),
     }
-    return {
+    result = {
         "output": str(output),
         "slide_count": len(paths),
         "inputs": [str(path) for path in paths],
@@ -725,17 +788,32 @@ def merge_presentations(
         "final_reports": [str(path) for path in final_report_paths],
         "page_ids": page_ids,
         "verification_profile": verification_profile,
-        "render_identity": {
-            "backend": render_identities[0][0],
-            "version": render_identities[0][1],
-            "executable_sha256": render_identities[0][2],
-            "fontconfig_sha256": render_identities[0][3],
-            "preview_size": list(render_identities[0][4]),
-        },
-        "delivery_label": delivery_labels[verification_profile][0 if all_passed else 1],
+        "render_identity": None,
+        "delivery_label": (
+            "可编辑草稿"
+            if draft
+            else delivery_labels[verification_profile][0 if all_passed else 1]
+        ),
         "imported_slide_parts": imported_parts,
         "validation": validation,
     }
+    if not draft:
+        result["render_identity"] = {
+            "backend": render_identities[0][0],
+            "version": render_identities[0][1],
+            "executable_sha256": render_identities[0][2],
+            "font_runtime": {
+                "family": render_identities[0][3],
+                "provider": render_identities[0][4],
+                "regular_sha256": render_identities[0][5],
+                "regular_face_index": render_identities[0][6],
+                "bold_sha256": render_identities[0][7],
+                "bold_face_index": render_identities[0][8],
+            },
+            "fontconfig_sha256": render_identities[0][9],
+            "preview_size": list(render_identities[0][10]),
+        }
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -743,11 +821,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", action="append", required=True, type=Path)
     parser.add_argument("--spec", action="append", default=[], type=Path)
     parser.add_argument("--final-report", action="append", default=[], type=Path)
+    parser.add_argument("--draft", action="store_true")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args(argv)
     try:
         result = merge_presentations(
-            args.input, args.spec, args.final_report, args.output
+            args.input,
+            args.spec,
+            args.final_report,
+            args.output,
+            draft=args.draft,
         )
         print(json.dumps({"ok": True, "result": result}, ensure_ascii=False, indent=2))
         return 0

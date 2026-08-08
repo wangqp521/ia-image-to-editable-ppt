@@ -28,6 +28,7 @@ class RenderContext:
     representation_modes: Mapping[str, str]
     typography: Mapping[str, dict[str, Any]]
     registry: ObjectRegistry
+    font_family: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "typography", MappingProxyType(dict(self.typography)))

@@ -33,6 +33,7 @@ from lib.background_contracts import (
 )
 from lib.element_contracts import expand_multipart_parts, expected_object_types
 from lib.error_codes import ToolError
+from lib.font_runtime import validate_font_runtime
 from lib.geometry import bbox_union, is_near_full_page_bbox
 from lib.hashing import canonical_json_sha256
 from lib.representation_contracts import (
@@ -84,6 +85,9 @@ BUILD_REPORT_FIELDS = frozenset(
         "schema_sha256",
         "content_spec_sha256",
         "input_spec_sha256",
+        "preferred_font",
+        "runtime_preflight",
+        "font_runtime",
         "compiler_sha256",
         "capability_manifest_sha256",
         "pptx_sha256",
@@ -944,20 +948,43 @@ def _load_build_report(value: dict[str, Any] | Path | str) -> dict[str, Any]:
 
 def _validate_build_report_shape(report: dict[str, Any]) -> None:
     if set(report) != BUILD_REPORT_FIELDS:
+        fixed_runtime_fields = BUILD_REPORT_FIELDS - {"preferred_font"}
+        if set(report) == fixed_runtime_fields:
+            try:
+                report["preferred_font"] = validate_font_runtime(
+                    report.get("font_runtime")
+                )["family"]
+            except ValueError as exc:
+                raise ValidationError(
+                    "BUILD_REPORT_INVALID",
+                    f"legacy build report font runtime is invalid: {exc}",
+                ) from exc
+        if set(report) != BUILD_REPORT_FIELDS:
+            previous_fields = BUILD_REPORT_FIELDS - {
+                "preferred_font",
+                "runtime_preflight",
+                "font_runtime",
+            }
+            if set(report) == previous_fields:
+                raise ValidationError(
+                    "BUILD_REPORT_INVALID",
+                    "build report is missing preferred_font; rebuild the PPTX",
+                )
         legacy_fields = BUILD_REPORT_FIELDS - {
             "content_spec_sha256",
             "input_spec_sha256",
             "background_summary",
             "background_pictures",
         }
-        if set(report) == legacy_fields:
+        if set(report) != BUILD_REPORT_FIELDS and set(report) == legacy_fields:
             raise ValidationError(
                 "BUILD_REPORT_INVALID",
                 "legacy build report is missing background and spec identity fields; rebuild the PPTX",
             )
-        raise ValidationError(
-            "BUILD_REPORT_INVALID", "build report fields do not match schema_version 1"
-        )
+        if set(report) != BUILD_REPORT_FIELDS:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID", "build report fields do not match schema_version 1"
+            )
     if report.get("valid") is not True or report.get("schema_version") != 1:
         raise ValidationError(
             "BUILD_REPORT_INVALID", "build report must declare valid schema_version 1"
@@ -974,6 +1001,41 @@ def _validate_build_report_shape(report: dict[str, Any]) -> None:
         if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
             raise ValidationError(
                 "BUILD_REPORT_INVALID", f"build_report.{field} must be lowercase sha256"
+            )
+    preferred_font = report.get("preferred_font")
+    if not isinstance(preferred_font, str) or not preferred_font.strip():
+        raise ValidationError(
+            "BUILD_REPORT_INVALID",
+            "build_report.preferred_font must be a non-empty font family",
+        )
+    runtime_preflight = report.get("runtime_preflight")
+    font_runtime_value = report.get("font_runtime")
+    if runtime_preflight is None and font_runtime_value is None:
+        pass
+    elif (
+        not isinstance(runtime_preflight, dict)
+        or set(runtime_preflight) != {"path", "sha256"}
+        or not isinstance(runtime_preflight.get("path"), str)
+        or not Path(runtime_preflight["path"]).is_absolute()
+        or not isinstance(runtime_preflight.get("sha256"), str)
+        or SHA256_PATTERN.fullmatch(runtime_preflight["sha256"]) is None
+    ):
+        raise ValidationError(
+            "BUILD_REPORT_INVALID",
+            "build_report runtime and font identities must be supplied together",
+        )
+    else:
+        try:
+            font_runtime = validate_font_runtime(font_runtime_value)
+        except ValueError as exc:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID",
+                f"build_report.font_runtime is invalid: {exc}",
+            ) from exc
+        if font_runtime["family"] != preferred_font:
+            raise ValidationError(
+                "BUILD_REPORT_INVALID",
+                "build_report preferred_font does not match font_runtime.family",
             )
     environment = report.get("environment")
     if (
@@ -1498,19 +1560,38 @@ def _chart_area_contract(owner: ET.Element, path: str) -> dict[str, Any]:
     }
 
 
+def _chart_font_family(run: ET.Element, path: str) -> str:
+    families = {
+        tag: (
+            run.find(f"a:{tag}", NS).get("typeface")
+            if run.find(f"a:{tag}", NS) is not None
+            else None
+        )
+        for tag in ("latin", "ea", "cs")
+    }
+    if any(not isinstance(value, str) or not value for value in families.values()):
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH",
+            f"{path} requires explicit a:latin/a:ea/a:cs fonts",
+        )
+    if len(set(families.values())) != 1:
+        raise ValidationError(
+            "NATIVE_CHART_CONTRACT_MISMATCH",
+            f"{path} a:latin/a:ea/a:cs fonts must match",
+        )
+    return families["latin"]  # type: ignore[return-value]
+
+
 def _chart_text_style(owner: ET.Element | None, path: str) -> dict[str, Any]:
     run = owner.find("c:txPr/a:p/a:pPr/a:defRPr", NS) if owner is not None else None
     if run is None and owner is not None:
         run = owner.find("c:txPr/a:p/a:endParaRPr", NS)
     if run is None:
         raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} text properties are missing")
-    font_node = run.find("a:latin", NS)
-    if font_node is None:
-        font_node = run.find("a:ea", NS)
-    font_name = font_node.get("typeface") if font_node is not None else None
+    font_name = _chart_font_family(run, path)
     color = run.find("a:solidFill/a:srgbClr", NS)
     size = _int_attr(run, "sz")
-    if not isinstance(font_name, str) or not font_name or size is None:
+    if size is None:
         raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", f"{path} font name or size is missing")
     return {
         "font_name": font_name,
@@ -1569,6 +1650,7 @@ def _chart_data_labels(plot: ET.Element, *, cartesian: bool) -> dict[str, Any]:
             size = _int_attr(run, "sz")
             if run is None or size is None:
                 raise ValidationError("NATIVE_CHART_CONTRACT_MISMATCH", "data_labels size is missing")
+            _chart_font_family(run, "data_labels")
             result.update(
                 {
                     "font_size": size / 100,
